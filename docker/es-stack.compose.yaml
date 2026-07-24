@@ -1,0 +1,19 @@
+name: es-stack
+
+services:
+  elasticsearch:
+    container_name: es-standalone
+    image: elasticsearch:7.17.25
+    environment:
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    restart: unless-stopped
+
+volumes:
+  es-data:

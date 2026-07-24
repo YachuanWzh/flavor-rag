@@ -1,0 +1,66 @@
+name: lightrag-neo4j-stack
+
+services:
+  neo4j:
+    container_name: neo4j
+    image: neo4j:5.26-enterprise
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: "neo4j/password123"
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*,gds.*"
+      NEO4J_server_memory_heap_max__size: "1G"
+      NEO4J_server_memory_pagecache_size: "512m"
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p password123 'RETURN 1' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  lightrag:
+    container_name: lightrag
+    image: ghcr.io/hkuds/lightrag:latest
+    ports:
+      - "9621:9621"
+    environment:
+      WORKING_DIR: "/app/data/rag_storage"
+      LLM_BINDING: "openai"
+      LLM_BINDING_HOST: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      LLM_BINDING_API_KEY: "${BAILIAN_API_KEY}"
+      LLM_MODEL: "qwen-plus-latest"
+      SUMMARY_LANGUAGE: "简体中文"
+      EMBEDDING_BINDING: "openai"
+      EMBEDDING_BINDING_HOST: "https://api.siliconflow.cn/v1"
+      EMBEDDING_BINDING_API_KEY: "${SILICONFLOW_API_KEY}"
+      EMBEDDING_MODEL: "Qwen/Qwen3-Embedding-8B"
+      EMBEDDING_DIM: "1536"
+      LIGHTRAG_GRAPH_STORAGE: "Neo4JStorage"
+      LIGHTRAG_KV_STORAGE: "PGKVStorage"
+      LIGHTRAG_VECTOR_STORAGE: "PGVectorStorage"
+      LIGHTRAG_DOC_STATUS_STORAGE: "PGDocStatusStorage"
+      NEO4J_URI: "neo4j://neo4j:7687"
+      NEO4J_USERNAME: "neo4j"
+      NEO4J_PASSWORD: "password123"
+      POSTGRES_HOST: "host.docker.internal"
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "postgres"
+      POSTGRES_DATABASE: "ragent"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - lightrag-data:/app/data
+    depends_on:
+      neo4j:
+        condition: service_healthy
+
+volumes:
+  neo4j-data:
+  neo4j-logs:
+  lightrag-data:

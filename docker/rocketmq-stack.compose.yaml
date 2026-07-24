@@ -1,0 +1,29 @@
+name: rocketmq-stack
+
+services:
+  namesrv:
+    container_name: rmq-namesrv
+    image: apache/rocketmq:5.2.0
+    command: sh mqnamesrv
+    ports:
+      - "9876:9876"
+    volumes:
+      - rmq-namesrv-data:/home/rocketmq/store
+
+  broker:
+    container_name: rmq-broker
+    image: apache/rocketmq:5.2.0
+    command: sh mqbroker -n namesrv:9876 --enable-proxy
+    ports:
+      - "10911:10911"
+      - "10909:10909"
+    environment:
+      - NAMESRV_ADDR=namesrv:9876
+    depends_on:
+      - namesrv
+    volumes:
+      - rmq-broker-data:/home/rocketmq/store
+
+volumes:
+  rmq-namesrv-data:
+  rmq-broker-data:

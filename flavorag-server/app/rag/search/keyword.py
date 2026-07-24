@@ -1,4 +1,4 @@
-"""Elasticsearch BM25 keyword search channel."""
+﻿"""Elasticsearch BM25 keyword search channel."""
 from __future__ import annotations
 
 from app.rag.search.base import SearchChannel, SearchResult

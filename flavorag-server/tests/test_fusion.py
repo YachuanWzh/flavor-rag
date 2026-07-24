@@ -1,4 +1,4 @@
-"""Unit tests for RRF fusion and deduplication — no external deps."""
+﻿"""Unit tests for RRF fusion and deduplication — no external deps."""
 import pytest
 from app.rag.search.base import SearchResult
 from app.rag.postprocess.fusion import rrf_fusion, deduplicate

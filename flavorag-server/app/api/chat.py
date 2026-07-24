@@ -1,17 +1,18 @@
-"""SSE streaming chat API — GET /api/rag/v3/chat with trace + rate limit."""
+﻿"""SSE streaming chat API — GET /api/rag/v3/chat with trace + rate limit."""
 from __future__ import annotations
 
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query, Request, HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.session import get_db
 from app.auth.dependencies import get_current_user
-from app.models import User, Conversation, gen_id
+from app.models import User, Conversation, KnowledgeBase, gen_id
 from app.rag.pipeline import RAGPipeline, RAGContext
 from app.rag.trace import TraceLogger
 from app.rag.rate_limiter import RateLimiter
@@ -61,7 +62,7 @@ async def chat(
             conversation_id=gen_id(),
             user_id=user.id,
             title=question[:30] + ("..." if len(question) > 30 else ""),
-            last_time=datetime.utcnow(),
+            last_time=datetime.now(timezone.utc).replace(tzinfo=None),
         )
         db.add(conv)
         await db.flush()
@@ -78,18 +79,44 @@ async def chat(
             await chat_service.save_message(conversation_id=conversation_id, role="user", content=question)
             await db.flush()
 
-            # 3. RAG retrieval
+            # 3. Resolve kb_id → collection_name (auto-select first KB if none given)
+            resolved_kb_id = kb_id
+            collection_name: str | None = None
+            if not resolved_kb_id:
+                # Auto-select first available knowledge base
+                first_kb = await db.execute(
+                    select(KnowledgeBase.id, KnowledgeBase.collection_name)
+                    .where(KnowledgeBase.deleted == 0)
+                    .limit(1)
+                )
+                first_row = first_kb.first()
+                if first_row:
+                    resolved_kb_id = first_row[0]
+                    collection_name = first_row[1]
+            else:
+                kb_result = await db.execute(
+                    select(KnowledgeBase.collection_name).where(
+                        KnowledgeBase.id == resolved_kb_id,
+                        KnowledgeBase.deleted == 0,
+                    )
+                )
+                row = kb_result.scalar_one_or_none()
+                if row:
+                    collection_name = row
+
+            # 4. RAG retrieval
             ctx = RAGContext(
                 question=question, conversation_id=conversation_id,
-                kb_id=kb_id, history=history, deep_thinking=deep_thinking,
+                kb_id=resolved_kb_id, collection_name=collection_name,
+                history=history, deep_thinking=deep_thinking,
             )
             rag_result = await rag_pipeline.run(ctx)
 
-            # 4. Send meta
+            # 5. Send meta
             meta = json.dumps({"conversationId": conversation_id, "taskId": trace_id})
             yield f"event: meta\ndata: {meta}\n\n"
 
-            # 5. Build prompt with context
+            # 6. Build prompt with context
             context_text = "\n\n---\n\n".join(
                 f"[来源 {i + 1}] {c['content']}" for i, c in enumerate(rag_result.context_chunks)
             )
@@ -103,7 +130,7 @@ async def chat(
                 messages.append({"role": h["role"], "content": h["content"]})
             messages.append({"role": "user", "content": question})
 
-            # 6. Select LLM client (model router)
+            # 7. Select LLM client (model router)
             t_llm_start = time.time()
             llm_client = get_llm_client(
                 api_key=rag_result.model_api_key,
@@ -111,7 +138,7 @@ async def chat(
                 model=rag_result.model_name,
             )
 
-            # 7. Stream LLM response
+            # 8. Stream LLM response
             full_content = ""
             thinking_content = ""
 
@@ -127,7 +154,7 @@ async def chat(
 
             llm_duration = int((time.time() - t_llm_start) * 1000)
 
-            # 8. Save assistant message
+            # 9. Save assistant message
             assistant_msg_id = await chat_service.save_message(
                 conversation_id=conversation_id,
                 role="assistant", content=full_content,
@@ -136,7 +163,7 @@ async def chat(
             )
             await db.flush()
 
-            # 9. Finalize trace
+            # 10. Finalize trace
             total_duration = int((time.time() - t_total_start) * 1000)
             await trace.finalize(
                 trace_run_id=trace_id,
@@ -148,7 +175,7 @@ async def chat(
                 model_name=rag_result.model_name or "",
             )
 
-            # 10. Send finish
+            # 11. Send finish
             finish = json.dumps({"messageId": assistant_msg_id, "sources": rag_result.sources})
             yield f"event: finish\ndata: {finish}\n\n"
             yield "event: done\ndata: {}\n\n"

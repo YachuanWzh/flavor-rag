@@ -12,16 +12,13 @@ export interface AuthResult {
 }
 
 export async function login(params: LoginParams): Promise<AuthResult> {
-  const { data } = await api.post("/api/auth/login", params);
-  return data;
+  return await api.post("/api/auth/login", params);
 }
 
 export async function register(params: LoginParams): Promise<AuthResult> {
-  const { data } = await api.post("/api/auth/register", params);
-  return data;
+  return await api.post("/api/auth/register", params);
 }
 
 export async function getCurrentUser() {
-  const { data } = await api.get("/api/auth/current");
-  return data;
+  return await api.get("/api/auth/current");
 }

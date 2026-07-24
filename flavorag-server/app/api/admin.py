@@ -1,4 +1,4 @@
-"""Admin API — health check, trace inspection, system status."""
+﻿"""Admin API — health check, trace inspection, system status."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException

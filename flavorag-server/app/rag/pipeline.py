@@ -1,8 +1,8 @@
-"""RAG Pipeline — rewrite → intent → multi-channel search → fusion → rerank."""
+﻿"""RAG Pipeline — rewrite → intent → multi-channel search → fusion → rerank."""
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 
 from app.rag.search.vector import MilvusSearchChannel
@@ -57,9 +57,9 @@ class RAGPipeline:
         trace_id: str | None = None
 
         # 1. Query rewrite
-        t_rewrite = datetime.utcnow()
+        t_rewrite = datetime.now(timezone.utc).replace(tzinfo=None)
         rewritten = await rewrite_query(ctx.question, ctx.history)
-        t_rewrite_end = datetime.utcnow()
+        t_rewrite_end = datetime.now(timezone.utc).replace(tzinfo=None)
         if self._trace:
             await self._trace.trace_node(trace_id or "", "rewrite", "query_rewrite",
                                          t_rewrite, t_rewrite_end,
@@ -67,9 +67,9 @@ class RAGPipeline:
                                          output_data={"rewritten": rewritten})
 
         # 2. Intent recognition
-        t_intent = datetime.utcnow()
+        t_intent = datetime.now(timezone.utc).replace(tzinfo=None)
         intent = await recognize_intent(rewritten or ctx.question)
-        t_intent_end = datetime.utcnow()
+        t_intent_end = datetime.now(timezone.utc).replace(tzinfo=None)
         if self._trace:
             await self._trace.trace_node(trace_id or "", "intent", "intent_recognition",
                                          t_intent, t_intent_end,
@@ -80,13 +80,13 @@ class RAGPipeline:
         collection_name = (
             ctx.collection_name
             or (intent.get("collection_name") if intent else None)
-            or "rag_default_store"
+            or "default_store"
         )
 
         search_question = rewritten or ctx.question
 
         # 4. Multi-channel search
-        t_search = datetime.utcnow()
+        t_search = datetime.now(timezone.utc).replace(tzinfo=None)
         all_results: list[list[SearchResult]] = []
 
         # Vector search
@@ -109,18 +109,18 @@ class RAGPipeline:
                     content=hit.get("content", ""),
                     score=float(hit.get("score", 0.5)),
                 )])
-        t_search_end = datetime.utcnow()
+        t_search_end = datetime.now(timezone.utc).replace(tzinfo=None)
         search_ms = int((t_search_end - t_search).total_seconds() * 1000)
 
         # 5. RRF fusion
-        t_fuse = datetime.utcnow()
+        t_fuse = datetime.now(timezone.utc).replace(tzinfo=None)
         if len(all_results) > 1:
             merged = rrf_fusion(*all_results)
         elif all_results:
             merged = all_results[0]
         else:
             merged = []
-        t_fuse_end = datetime.utcnow()
+        t_fuse_end = datetime.now(timezone.utc).replace(tzinfo=None)
         if self._trace:
             await self._trace.trace_node(trace_id or "", "fusion", "rrf_fusion",
                                          t_fuse, t_fuse_end,
@@ -132,9 +132,9 @@ class RAGPipeline:
         recall_count = len(deduped)
 
         # 7. Rerank
-        t_rerank = datetime.utcnow()
+        t_rerank = datetime.now(timezone.utc).replace(tzinfo=None)
         reranked = await self.reranker.rerank(search_question, deduped, top_n=5)
-        t_rerank_end = datetime.utcnow()
+        t_rerank_end = datetime.now(timezone.utc).replace(tzinfo=None)
         final_count = len(reranked)
 
         if self._trace:

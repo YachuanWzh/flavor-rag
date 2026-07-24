@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import traceback
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -174,6 +175,7 @@ async def upload_document(
 
     # Save uploaded file to temp location
     tmp_path = os.path.join(tempfile.gettempdir(), f"rag_upload_{gen_id()}.{ext}")
+    doc = None
     try:
         with open(tmp_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
@@ -219,12 +221,11 @@ async def upload_document(
             },
         }
     except Exception as e:
-        # Update doc status to failed
-        if "doc" in locals():
+        traceback.print_exc()
+        if doc is not None:
             doc.status = "failed"
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        # Clean up temp file
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 

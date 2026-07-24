@@ -28,3 +28,30 @@ export interface SourceRef {
   content: string;
   score: number;
 }
+
+// ---- Knowledge Base ----
+
+export interface KnowledgeBase {
+  id: string;
+  name: string;
+  embeddingModel: string;
+  collectionName: string;
+  createTime: string;
+}
+
+export interface KnowledgeDocument {
+  id: string;
+  docName: string;
+  fileType: string;
+  fileSize: number;
+  chunkCount: number;
+  status: "running" | "success" | "failed";
+  createTime: string;
+}
+
+export interface KnowledgeChunk {
+  id: string;
+  chunkIndex: number;
+  content: string;
+  charCount: number;
+}

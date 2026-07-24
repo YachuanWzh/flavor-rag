@@ -1,4 +1,4 @@
-"""Unit tests for LightRAG client."""
+﻿"""Unit tests for LightRAG client."""
 import pytest
 from app.rag.graph.lightrag_client import LightRAGClient
 

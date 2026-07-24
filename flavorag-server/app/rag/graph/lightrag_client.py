@@ -1,4 +1,4 @@
-"""LightRAG client — wraps the LightRAG HTTP API for graph-based retrieval."""
+﻿"""LightRAG client — wraps the LightRAG HTTP API for graph-based retrieval."""
 from __future__ import annotations
 
 import httpx

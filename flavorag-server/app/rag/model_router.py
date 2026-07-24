@@ -1,4 +1,4 @@
-"""Intent-based model router — selects model/endpoint per query intent."""
+﻿"""Intent-based model router — selects model/endpoint per query intent."""
 from __future__ import annotations
 
 from app.config.settings import settings

@@ -5,6 +5,7 @@ import { createStreamResponse, type StreamHandlers } from "@/hooks/useStreamResp
 interface ChatState {
   sessions: Session[];
   currentSessionId: string | null;
+  selectedKbId: string | null;
   messages: Message[];
   isLoading: boolean;
   isStreaming: boolean;
@@ -14,6 +15,7 @@ interface ChatState {
 
   setSessions: (sessions: Session[]) => void;
   setCurrentSession: (id: string) => void;
+  setSelectedKbId: (id: string | null) => void;
   setMessages: (msgs: Message[]) => void;
   setDeepThinking: (enabled: boolean) => void;
   toggleSourcesPanel: (messageId: string) => void;
@@ -29,6 +31,7 @@ let cancelFn: (() => void) | null = null;
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   currentSessionId: null,
+  selectedKbId: null,
   messages: [],
   isLoading: false,
   isStreaming: false,
@@ -37,11 +40,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   openedSourceMessageId: null,
 
   setSessions: (sessions) => set({ sessions }),
+  setSelectedKbId: (id) => set({ selectedKbId: id }),
+
   setCurrentSession: (id) => {
     set({ currentSessionId: id, messages: [] });
     // Fetch messages for this session
+    const token = localStorage.getItem("token") || "";
     fetch(`/api/conversations/${id}/messages`, {
-      headers: { Authorization: localStorage.getItem("token") || "" },
+      headers: { Authorization: token ? `Bearer ${token}` : "" },
     })
       .then((r) => r.json())
       .then((data) => {
@@ -87,6 +93,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     if (state.currentSessionId) {
       params.set("conversation_id", state.currentSessionId);
+    }
+    if (state.selectedKbId) {
+      params.set("kb_id", state.selectedKbId);
     }
 
     const handlers: StreamHandlers = {
@@ -142,12 +151,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
       },
     };
 
-    const { cancel } = createStreamResponse(
+    const { start, cancel } = createStreamResponse(
       `/api/rag/v3/chat?${params.toString()}`,
       handlers
     );
     cancelFn = cancel;
-    await cancel.start();
+    try {
+      await start();
+    } catch (err: any) {
+      // Belt-and-suspenders: if start() itself throws before onError fires
+      const msg = err instanceof Error ? err.message : String(err);
+      set((s) => ({
+        messages: s.messages.map((m) =>
+          m.id === s.streamingMessageId
+            ? { ...m, content: m.content || `[错误] ${msg}` }
+            : m
+        ),
+        isLoading: false,
+        isStreaming: false,
+        streamingMessageId: null,
+      }));
+    }
   },
 
   cancelGeneration: () => {

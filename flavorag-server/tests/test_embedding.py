@@ -1,4 +1,4 @@
-"""Unit tests for embedding module — mock client only."""
+﻿"""Unit tests for embedding module — mock client only."""
 import pytest
 from app.llm.embedding import MockEmbeddingClient, get_embedding_client
 

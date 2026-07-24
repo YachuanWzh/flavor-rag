@@ -1,4 +1,4 @@
-"""Redis sliding-window rate limiter. Degrades gracefully when Redis is down."""
+﻿"""Redis sliding-window rate limiter. Degrades gracefully when Redis is down."""
 from __future__ import annotations
 
 import time

@@ -1,4 +1,4 @@
-"""RAG search API — sematic search endpoint for external clients (e.g., flavor-code)."""
+﻿"""RAG search API — sematic search endpoint for external clients (e.g., flavor-code)."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException

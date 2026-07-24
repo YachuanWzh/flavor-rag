@@ -1,4 +1,4 @@
-"""Search channel abstract base + shared types."""
+﻿"""Search channel abstract base + shared types."""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

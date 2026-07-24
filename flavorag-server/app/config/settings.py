@@ -1,4 +1,7 @@
+﻿from pathlib import Path
 from pydantic_settings import BaseSettings
+
+_ENV_FILE = str(Path(__file__).resolve().parent.parent.parent / ".env")
 
 
 class Settings(BaseSettings):
@@ -33,7 +36,7 @@ class Settings(BaseSettings):
     # Embedding
     embedding_base_url: str = "https://api.siliconflow.cn/v1"
     embedding_model: str = "Qwen/Qwen3-Embedding-8B"
-    embedding_dim: int = 1536
+    embedding_dim: int = 4096
 
     # LLM
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -70,7 +73,7 @@ class Settings(BaseSettings):
     flavor_code_integration_enabled: bool = False
     flavor_code_api_tokens: str = ""
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": _ENV_FILE, "env_file_encoding": "utf-8"}
 
 
 settings = Settings()

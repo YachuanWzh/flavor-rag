@@ -19,78 +19,93 @@ export function createStreamResponse(
   const mergedSignal = signal ?? controller.signal;
 
   const start = async () => {
-    const response = await fetch(url, {
-      headers: {
-        Accept: "text/event-stream",
-        Authorization: localStorage.getItem("token") || "",
-      },
-      signal: mergedSignal,
-    });
+    try {
+      const token = localStorage.getItem("token") || "";
+      const response = await fetch(url, {
+        headers: {
+          Accept: "text/event-stream",
+          Authorization: token ? `Bearer ${token}` : "",
+        },
+        signal: mergedSignal,
+      });
 
-    if (!response.body) throw new Error("No response body");
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder("utf-8");
-    let buffer = "";
-    let eventName = "message";
-    let dataLines: string[] = [];
-
-    const dispatch = () => {
-      if (dataLines.length === 0) return;
-      const raw = dataLines.join("\n");
-      let payload: any;
-      try {
-        payload = JSON.parse(raw);
-      } catch {
-        payload = raw;
+      if (!response.ok) {
+        let detail = `HTTP ${response.status}`;
+        try {
+          const errBody = await response.text();
+          const parsed = JSON.parse(errBody);
+          detail = parsed.detail || parsed.message || detail;
+        } catch {}
+        throw new Error(detail);
       }
 
-      switch (eventName) {
-        case "meta":
-          handlers.onMeta?.(payload);
-          break;
-        case "message":
-          if (payload?.type === "think") handlers.onThinking?.(payload);
-          handlers.onMessage?.(payload);
-          break;
-        case "finish":
-          handlers.onFinish?.(payload);
-          break;
-        case "done":
-          handlers.onDone?.();
-          break;
-        case "cancel":
-          handlers.onCancel?.(payload);
-          break;
-        case "error":
-          handlers.onError?.(new Error(payload?.error || "Unknown error"));
-          break;
-      }
-      eventName = "message";
-      dataLines = [];
-    };
+      if (!response.body) throw new Error("No response body");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+      let eventName = "message";
+      let dataLines: string[] = [];
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) {
-        dispatch();
-        break;
-      }
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line) {
+      const dispatch = () => {
+        if (dataLines.length === 0) return;
+        const raw = dataLines.join("\n");
+        let payload: any;
+        try {
+          payload = JSON.parse(raw);
+        } catch {
+          payload = raw;
+        }
+
+        switch (eventName) {
+          case "meta":
+            handlers.onMeta?.(payload);
+            break;
+          case "message":
+            if (payload?.type === "think") handlers.onThinking?.(payload);
+            handlers.onMessage?.(payload);
+            break;
+          case "finish":
+            handlers.onFinish?.(payload);
+            break;
+          case "done":
+            handlers.onDone?.();
+            break;
+          case "cancel":
+            handlers.onCancel?.(payload);
+            break;
+          case "error":
+            handlers.onError?.(new Error(payload?.error || "Unknown error"));
+            break;
+        }
+        eventName = "message";
+        dataLines = [];
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
           dispatch();
-          continue;
+          break;
         }
-        if (line.startsWith("event:")) {
-          eventName = line.slice(6).trim();
-          continue;
-        }
-        if (line.startsWith("data:")) {
-          dataLines.push(line.slice(5).trim());
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line) {
+            dispatch();
+            continue;
+          }
+          if (line.startsWith("event:")) {
+            eventName = line.slice(6).trim();
+            continue;
+          }
+          if (line.startsWith("data:")) {
+            dataLines.push(line.slice(5).trim());
+          }
         }
       }
+    } catch (err: any) {
+      handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
     }
   };
 

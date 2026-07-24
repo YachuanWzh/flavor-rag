@@ -1,4 +1,4 @@
-"""Unit tests for LLM client module."""
+﻿"""Unit tests for LLM client module."""
 import pytest
 from app.llm.client import MockLLMClient, get_llm_client, LLMClient
 

@@ -1,4 +1,4 @@
-"""Document parser — extracts text from TXT/MD/DOCX/PDF files."""
+﻿"""Document parser — extracts text from TXT/MD/DOCX/PDF files."""
 from __future__ import annotations
 
 import os

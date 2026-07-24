@@ -1,4 +1,4 @@
-"""Dev launcher — uses SQLite instead of PostgreSQL, zero Docker required.
+﻿"""Dev launcher — uses SQLite instead of PostgreSQL, zero Docker required.
 
 Usage:
     cd flavorag-server

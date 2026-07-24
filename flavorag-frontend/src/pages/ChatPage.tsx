@@ -4,6 +4,8 @@ import { useAuthStore } from "@/stores/authStore";
 import { useChatStore } from "@/stores/chatStore";
 import { getCurrentUser } from "@/services/authService";
 import { fetchSessions, createSession, deleteSession } from "@/services/sessionService";
+import { fetchKnowledgeBases } from "@/services/knowledgeService";
+import type { KnowledgeBase } from "@/types";
 import SessionList from "@/components/session/SessionList";
 import ChatInput from "@/components/chat/ChatInput";
 import MessageList from "@/components/chat/MessageList";
@@ -13,19 +15,23 @@ export default function ChatPage() {
   const { logout, setUser } = useAuthStore();
   const {
     sessions, setSessions, currentSessionId, setCurrentSession,
+    selectedKbId, setSelectedKbId,
     messages, isLoading, isStreaming, sendMessage, cancelGeneration,
     addSession, removeSession,
   } = useChatStore();
+  const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [initLoading, setInitLoading] = useState(true);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
     if (!token) { navigate("/login"); return; }
-    Promise.all([getCurrentUser(), fetchSessions()])
-      .then(([user, sess]) => {
+    Promise.all([getCurrentUser(), fetchSessions(), fetchKnowledgeBases()])
+      .then(([user, sess, kbList]) => {
         setUser(user);
         setSessions(sess);
+        setKbs(kbList);
         if (sess.length > 0) setCurrentSession(sess[0].id);
+        if (kbList.length > 0) setSelectedKbId(kbList[0].id);
         setInitLoading(false);
       })
       .catch(() => { logout(); navigate("/login"); });
@@ -73,10 +79,43 @@ export default function ChatPage() {
           onSelect={setCurrentSession}
           onDelete={handleDeleteSession}
         />
-        <div className="p-3 border-t mt-auto">
+
+        {/* KB Selector */}
+        <div className="px-3 py-2 border-t">
+          <label className="text-xs text-gray-500 block mb-1">检索知识库</label>
+          <select
+            value={selectedKbId || ""}
+            onChange={(e) => setSelectedKbId(e.target.value || null)}
+            className="w-full text-xs border rounded px-2 py-1.5 bg-white"
+          >
+            <option value="">— 不检索 —</option>
+            {kbs.map((kb) => (
+              <option key={kb.id} value={kb.id}>{kb.name}</option>
+            ))}
+          </select>
+          {kbs.length === 0 && (
+            <p className="text-xs text-gray-400 mt-1">
+              暂无知识库，<a href="/knowledge" className="text-blue-500 underline">去创建</a>
+            </p>
+          )}
+        </div>
+
+        <div className="p-3 border-t mt-auto space-y-2">
+          <button
+            onClick={() => navigate("/knowledge")}
+            className="block w-full text-left text-xs text-gray-500 hover:text-blue-600"
+          >
+            知识库管理
+          </button>
+          <button
+            onClick={() => navigate("/admin")}
+            className="block w-full text-left text-xs text-gray-500 hover:text-blue-600"
+          >
+            管理后台
+          </button>
           <button
             onClick={() => { logout(); navigate("/login"); }}
-            className="text-xs text-gray-500 hover:text-red-500"
+            className="block w-full text-left text-xs text-gray-500 hover:text-red-500"
           >
             退出登录
           </button>

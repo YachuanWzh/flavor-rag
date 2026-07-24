@@ -1,7 +1,7 @@
-"""RAG trace logging — async trace runs and trace nodes."""
+﻿"""RAG trace logging — async trace runs and trace nodes."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import RagTraceRun, RagTraceNode, gen_id
 
@@ -32,7 +32,7 @@ class TraceLogger:
             query=query,
             rewrite_query=rewrite_query,
             intent=intent,
-            create_time=datetime.utcnow(),
+            create_time=datetime.now(timezone.utc).replace(tzinfo=None),
         )
         self.db.add(run)
         await self.db.flush()
@@ -65,7 +65,7 @@ class TraceLogger:
             output_data=output_data,
             status=status,
             error_message=error_message,
-            create_time=datetime.utcnow(),
+            create_time=datetime.now(timezone.utc).replace(tzinfo=None),
         )
         self.db.add(node)
         await self.db.flush()

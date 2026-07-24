@@ -1,4 +1,4 @@
-"""Document chunker — splits text into chunks using configurable strategies."""
+﻿"""Document chunker — splits text into chunks using configurable strategies."""
 from __future__ import annotations
 
 import re

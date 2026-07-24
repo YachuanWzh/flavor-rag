@@ -1,7 +1,7 @@
-"""Conversation CRUD API — create/list/delete/rename sessions."""
+﻿"""Conversation CRUD API — create/list/delete/rename sessions."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
@@ -71,7 +71,7 @@ async def create_conversation(
         conversation_id=conv_id,
         user_id=user.id,
         title=title,
-        last_time=datetime.utcnow(),
+        last_time=datetime.now(timezone.utc).replace(tzinfo=None),
     )
     db.add(conv)
     await db.flush()

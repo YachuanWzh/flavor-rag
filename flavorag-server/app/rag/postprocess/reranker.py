@@ -1,4 +1,4 @@
-"""Reranker — cross-encoder / LLM-based post-recall re-ranking."""
+﻿"""Reranker — cross-encoder / LLM-based post-recall re-ranking."""
 from __future__ import annotations
 
 import httpx

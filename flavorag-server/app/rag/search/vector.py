@@ -1,4 +1,4 @@
-"""Milvus vector search channel."""
+﻿"""Milvus vector search channel."""
 from __future__ import annotations
 
 from pymilvus import Collection, connections, FieldSchema, CollectionSchema, DataType
@@ -28,9 +28,13 @@ class MilvusSearchChannel(SearchChannel):
         """Create a Milvus collection for a knowledge base.
 
         Collection name format: rag_{collection_name}
+        When dim is None, reads the actual dimension from the configured
+        embedding client. After the first real embedding call, the client
+        auto-corrects its dim field from the API response.
         """
         self._connect()
-        dim = dim or settings.embedding_dim
+        if dim is None:
+            dim = get_embedding_client().dim
         full_name = f"rag_{collection_name}"
 
         if drop_if_exists:
@@ -62,10 +66,14 @@ class MilvusSearchChannel(SearchChannel):
 
         return collection
 
-    def get_collection(self, collection_name: str) -> Collection:
-        """Get (load if needed) an existing Milvus collection."""
+    def get_collection(self, collection_name: str) -> Collection | None:
+        """Get (load if needed) an existing Milvus collection.
+        Returns None if the collection does not exist."""
         self._connect()
+        from pymilvus import utility
         full_name = f"rag_{collection_name}"
+        if not utility.has_collection(full_name):
+            return None
         collection = Collection(full_name)
         collection.load()
         return collection
@@ -76,11 +84,13 @@ class MilvusSearchChannel(SearchChannel):
         collection_name: str,
         top_k: int = 10,
     ) -> list[SearchResult]:
-        """Vector similarity search."""
+        """Vector similarity search. Returns empty list if collection missing."""
+        collection = self.get_collection(collection_name)
+        if collection is None:
+            return []
+
         embedder = get_embedding_client()
         query_vector = await embedder.embed_query(query)
-
-        collection = self.get_collection(collection_name)
 
         results = collection.search(
             data=[query_vector],
@@ -111,6 +121,8 @@ class MilvusSearchChannel(SearchChannel):
     ):
         """Insert vectors with metadata into a collection."""
         collection = self.get_collection(collection_name)
+        if collection is None:
+            return
         entities = [
             chunk_ids,
             doc_ids,

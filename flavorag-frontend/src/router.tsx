@@ -3,6 +3,8 @@ import App from "./App";
 import LoginPage from "./pages/LoginPage";
 import ChatPage from "./pages/ChatPage";
 import AdminPage from "./pages/admin/AdminPage";
+import KnowledgeBasePage from "./pages/knowledge/KnowledgeBasePage";
+import KnowledgeBaseDetailPage from "./pages/knowledge/KnowledgeBaseDetailPage";
 import NotFoundPage from "./pages/NotFoundPage";
 
 export const router = createBrowserRouter([
@@ -15,6 +17,8 @@ export const router = createBrowserRouter([
       { path: "chat", element: <ChatPage /> },
       { path: "chat/:sessionId", element: <ChatPage /> },
       { path: "admin", element: <AdminPage /> },
+      { path: "knowledge", element: <KnowledgeBasePage /> },
+      { path: "knowledge/:kbId", element: <KnowledgeBaseDetailPage /> },
       { path: "*", element: <NotFoundPage /> },
     ],
   },

@@ -1,4 +1,4 @@
-"""Tests for DocumentChunker — RED phase."""
+﻿"""Tests for DocumentChunker — RED phase."""
 import pytest
 from app.ingestion.chunker import DocumentChunker, ChunkConfig
 

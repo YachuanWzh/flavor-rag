@@ -1,4 +1,4 @@
-"""RRF (Reciprocal Rank Fusion) + deduplication for multi-channel search results."""
+﻿"""RRF (Reciprocal Rank Fusion) + deduplication for multi-channel search results."""
 from __future__ import annotations
 
 from app.rag.search.base import SearchResult

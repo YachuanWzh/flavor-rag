@@ -1,7 +1,7 @@
-"""Chat service — message persistence, history retrieval."""
+﻿"""Chat service — message persistence, history retrieval."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from app.models import Message, gen_id
@@ -52,7 +52,7 @@ class ChatService:
             content=content,
             thinking_content=thinking_content,
             sources=sources,
-            create_time=datetime.utcnow(),
+            create_time=datetime.now(timezone.utc).replace(tzinfo=None),
         )
         self.db.add(msg)
         await self.db.flush()

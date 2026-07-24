@@ -1,4 +1,4 @@
-"""Query rewriting — lightweight prompt-based rewriter (no external LLM call by default)."""
+﻿"""Query rewriting — lightweight prompt-based rewriter (no external LLM call by default)."""
 from __future__ import annotations
 
 

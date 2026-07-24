@@ -1,11 +1,14 @@
 """Embedding client — OpenAI-compatible API + local mock fallback."""
 from __future__ import annotations
 
+import asyncio
 import math
 import random
 
 import httpx
 from app.config.settings import settings
+
+_BATCH_SIZE = 16
 
 
 class EmbeddingClient:
@@ -23,31 +26,48 @@ class EmbeddingClient:
         self.dim = settings.embedding_dim
 
     async def embed_query(self, text: str) -> list[float]:
-        """Embed a single text (e.g., a user query)."""
         results = await self.embed_documents([text])
         return results[0]
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Embed a batch of texts."""
+        all_vectors: list[list[float]] = []
+        for i in range(0, len(texts), _BATCH_SIZE):
+            batch = texts[i : i + _BATCH_SIZE]
+            vectors = await self._call_with_retry(batch)
+            all_vectors.extend(vectors)
+            if i + _BATCH_SIZE < len(texts):
+                await asyncio.sleep(0.05)
+        return all_vectors
+
+    async def _call_with_retry(self, texts: list[str]) -> list[list[float]]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        payload = {
-            "model": self.model,
-            "input": texts,
-        }
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{self.base_url}/embeddings",
-                headers=headers,
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            # Sort by index to preserve input order
-            items = sorted(data["data"], key=lambda x: x["index"])
-            return [item["embedding"] for item in items]
+        payload = {"model": self.model, "input": texts}
+
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    resp = await client.post(
+                        f"{self.base_url}/embeddings",
+                        headers=headers,
+                        json=payload,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    items = sorted(data["data"], key=lambda x: x["index"])
+                    vectors = [item["embedding"] for item in items]
+                    if vectors:
+                        self.dim = len(vectors[0])
+                    return vectors
+            except Exception as e:
+                last_err = e
+                if attempt < 2:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+
+        raise RuntimeError(f"Embedding failed after 3 retries: {last_err}")
 
 
 class MockEmbeddingClient:
@@ -76,7 +96,6 @@ def get_embedding_client(
     base_url: str | None = None,
     model: str | None = None,
 ) -> EmbeddingClient | MockEmbeddingClient:
-    """Factory: return real client when an API key is present, else mock."""
     key = api_key or settings.siliconflow_api_key
     if not key:
         return MockEmbeddingClient()

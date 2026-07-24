@@ -1,4 +1,4 @@
-"""Document ingestion pipeline — Parse → Chunk → Embed → Index → PG save."""
+﻿"""Document ingestion pipeline — Parse → Chunk → Embed → Index → PG save."""
 from __future__ import annotations
 
 import hashlib

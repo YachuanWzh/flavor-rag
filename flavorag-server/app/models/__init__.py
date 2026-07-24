@@ -1,7 +1,11 @@
-import uuid
-from datetime import datetime
+﻿import uuid
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, Integer, SmallInteger, Text, BigInteger, DateTime, JSON
 from sqlalchemy.orm import DeclarativeBase, declared_attr
+
+
+def _utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def gen_id() -> str:
@@ -13,8 +17,8 @@ class Base(DeclarativeBase):
 
 
 class TimestampMixin:
-    create_time = Column(DateTime, default=datetime.utcnow)
-    update_time = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    create_time = Column(DateTime, default=_utcnow)
+    update_time = Column(DateTime, default=_utcnow, onupdate=_utcnow)
     deleted = Column(SmallInteger, default=0)
 
 
@@ -172,7 +176,7 @@ class RagTraceRun(Base):
     model_name = Column(String(64))
     status = Column(String(16), default="success")
     error_message = Column(Text)
-    create_time = Column(DateTime, default=datetime.utcnow)
+    create_time = Column(DateTime, default=_utcnow)
 
 
 class RagTraceNode(Base):
@@ -190,4 +194,4 @@ class RagTraceNode(Base):
     output_data = Column(JSON)
     status = Column(String(16), default="success")
     error_message = Column(Text)
-    create_time = Column(DateTime, default=datetime.utcnow)
+    create_time = Column(DateTime, default=_utcnow)

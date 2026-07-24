@@ -1,4 +1,4 @@
-"""Unit tests for RAG rewrite, intent, pipeline — no external deps."""
+﻿"""Unit tests for RAG rewrite, intent, pipeline — no external deps."""
 import pytest
 from app.rag.rewrite import rewrite_query
 from app.rag.intent import recognize_intent

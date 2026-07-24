@@ -1,4 +1,4 @@
-"""LLM streaming client — OpenAI-compatible API + mock fallback."""
+﻿"""LLM streaming client — OpenAI-compatible API + mock fallback."""
 from __future__ import annotations
 
 import json

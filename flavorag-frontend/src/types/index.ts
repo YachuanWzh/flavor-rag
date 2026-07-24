@@ -23,6 +23,8 @@ export interface Message {
 }
 
 export interface SourceRef {
+  documentId: string;
+  chunkId: string;
   docName: string;
   chunkIndex: number;
   content: string;

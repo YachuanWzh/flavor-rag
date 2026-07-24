@@ -55,6 +55,7 @@ class ESKeywordSearchChannel(SearchChannel):
                 src = hit["_source"]
                 results.append(SearchResult(
                     chunk_id=hit["_id"],
+                    doc_id=src.get("doc_id", ""),
                     content=src.get("content", ""),
                     score=float(hit["_score"]),
                 ))

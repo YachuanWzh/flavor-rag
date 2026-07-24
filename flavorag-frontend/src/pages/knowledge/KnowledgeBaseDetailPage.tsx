@@ -8,6 +8,7 @@ import {
   uploadDocument,
   deleteDocument,
   fetchChunks,
+  type ChunkOptions,
 } from "@/services/knowledgeService";
 import type { KnowledgeDocument, KnowledgeChunk } from "@/types";
 
@@ -21,6 +22,11 @@ export default function KnowledgeBaseDetailPage() {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
+
+  // Chunking config state
+  const [chunkStrategy, setChunkStrategy] = useState("FIXED_WINDOW");
+  const [chunkSize, setChunkSize] = useState(512);
+  const [chunkOverlap, setChunkOverlap] = useState(128);
 
   // Chunk viewer state
   const [chunksDocId, setChunksDocId] = useState<string | null>(null);
@@ -57,7 +63,12 @@ export default function KnowledgeBaseDetailPage() {
       setUploading(true);
       setError("");
       setSuccessMsg("");
-      await uploadDocument(kbId, file);
+      const chunkOptions: ChunkOptions = {
+        strategy: chunkStrategy,
+        chunkSize,
+        overlap: chunkOverlap,
+      };
+      await uploadDocument(kbId, file, chunkOptions);
       setSuccessMsg(`「${file.name}」上传成功`);
       await loadDocs();
     } catch (err: any) {
@@ -148,6 +159,48 @@ export default function KnowledgeBaseDetailPage() {
             <button className="ml-2 underline" onClick={() => setSuccessMsg("")}>关闭</button>
           </div>
         )}
+
+        {/* Chunking config */}
+        <div className="mb-6 p-4 bg-white border rounded-lg">
+          <h3 className="text-sm font-medium mb-3 text-gray-700">分块配置</h3>
+          <div className="flex flex-wrap gap-4 items-end">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">切分策略</label>
+              <select
+                value={chunkStrategy}
+                onChange={(e) => setChunkStrategy(e.target.value)}
+                className="border rounded px-2 py-1.5 text-sm bg-white min-w-[140px]"
+              >
+                <option value="FIXED_WINDOW">固定窗口</option>
+                <option value="SEMANTIC">语义切分</option>
+              </select>
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">块大小 (字符)</label>
+              <input
+                type="number"
+                min={100}
+                max={5000}
+                step={50}
+                value={chunkSize}
+                onChange={(e) => setChunkSize(Number(e.target.value))}
+                className="border rounded px-2 py-1.5 text-sm w-28"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">重叠 (字符)</label>
+              <input
+                type="number"
+                min={0}
+                max={1000}
+                step={10}
+                value={chunkOverlap}
+                onChange={(e) => setChunkOverlap(Number(e.target.value))}
+                className="border rounded px-2 py-1.5 text-sm w-28"
+              />
+            </div>
+          </div>
+        </div>
 
         {/* Upload area */}
         <div className="mb-6 p-6 bg-white border-2 border-dashed border-gray-300 rounded-lg text-center hover:border-blue-400 transition-colors">

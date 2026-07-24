@@ -5,10 +5,11 @@ import { useChatStore } from "@/stores/chatStore";
 import { getCurrentUser } from "@/services/authService";
 import { fetchSessions, createSession, deleteSession } from "@/services/sessionService";
 import { fetchKnowledgeBases } from "@/services/knowledgeService";
-import type { KnowledgeBase } from "@/types";
+import type { KnowledgeBase, SourceRef } from "@/types";
 import SessionList from "@/components/session/SessionList";
 import ChatInput from "@/components/chat/ChatInput";
 import MessageList from "@/components/chat/MessageList";
+import SourcesDrawer from "@/components/chat/SourcesDrawer";
 
 export default function ChatPage() {
   const navigate = useNavigate();
@@ -16,11 +17,16 @@ export default function ChatPage() {
   const {
     sessions, setSessions, currentSessionId, setCurrentSession,
     selectedKbId, setSelectedKbId,
-    messages, isLoading, isStreaming, sendMessage, cancelGeneration,
+    messages, isLoading, isStreaming, streamingMessageId,
+    sendMessage, cancelGeneration,
     addSession, removeSession,
   } = useChatStore();
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [initLoading, setInitLoading] = useState(true);
+
+  // Sources drawer state
+  const [drawerSources, setDrawerSources] = useState<SourceRef[]>([]);
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -56,12 +62,17 @@ export default function ChatPage() {
     sendMessage(text);
   };
 
+  const handleViewSources = (sources: SourceRef[]) => {
+    setDrawerSources(sources);
+    setDrawerOpen(true);
+  };
+
   if (initLoading) {
     return <div className="min-h-screen flex items-center justify-center text-gray-500">加载中...</div>;
   }
 
   return (
-    <div className="min-h-screen flex bg-white">
+    <div className="h-screen flex bg-white overflow-hidden">
       {/* Sidebar */}
       <aside className="w-64 border-r flex flex-col bg-gray-50">
         <div className="p-3 border-b flex items-center justify-between">
@@ -130,7 +141,12 @@ export default function ChatPage() {
               输入问题开始对话
             </div>
           ) : (
-            <MessageList messages={messages} />
+            <MessageList
+              messages={messages}
+              isStreaming={isStreaming}
+              streamingMessageId={streamingMessageId}
+              onViewSources={handleViewSources}
+            />
           )}
         </div>
         <ChatInput
@@ -139,6 +155,13 @@ export default function ChatPage() {
           isStreaming={isStreaming}
         />
       </main>
+
+      {/* Sources Drawer */}
+      <SourcesDrawer
+        open={drawerOpen}
+        sources={drawerSources}
+        onClose={() => setDrawerOpen(false)}
+      />
     </div>
   );
 }

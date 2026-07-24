@@ -146,7 +146,9 @@ async def list_documents(
 async def upload_document(
     kb_id: str,
     file: UploadFile = File(...),
-    chunk_strategy: str = Form("FIXED_SIZE"),
+    chunk_strategy: str = Form("FIXED_WINDOW"),
+    chunk_size: int = Form(512),
+    overlap: int = Form(128),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -198,8 +200,8 @@ async def upload_document(
         pipeline = IngestionPipeline()
         chunk_config = ChunkConfig(
             strategy=chunk_strategy,
-            chunk_size=800,
-            overlap=100,
+            chunk_size=chunk_size,
+            overlap=overlap,
         )
         chunk_count = await pipeline.run(
             doc_id=doc.id,

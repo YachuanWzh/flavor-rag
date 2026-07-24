@@ -105,6 +105,7 @@ class MilvusSearchChannel(SearchChannel):
             for hit in hits:
                 search_results.append(SearchResult(
                     chunk_id=hit.entity.get("chunk_id", ""),
+                    doc_id=hit.entity.get("doc_id", ""),
                     content=hit.entity.get("content", ""),
                     score=float(hit.score),
                 ))
@@ -123,13 +124,17 @@ class MilvusSearchChannel(SearchChannel):
         collection = self.get_collection(collection_name)
         if collection is None:
             return
-        entities = [
-            chunk_ids,
-            doc_ids,
-            contents,
-            vectors,
+        # Use dict-based insert to avoid pymilvus positional field mapping issues
+        data = [
+            {
+                "chunk_id": chunk_ids[i],
+                "doc_id": doc_ids[i],
+                "content": contents[i],
+                "embedding": vectors[i],
+            }
+            for i in range(len(chunk_ids))
         ]
-        collection.insert(entities)
+        collection.insert(data)
 
     def drop_collection(self, collection_name: str):
         """Drop a collection."""

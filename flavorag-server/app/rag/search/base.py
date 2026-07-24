@@ -10,6 +10,7 @@ class SearchResult:
     chunk_id: str
     content: str
     score: float
+    doc_id: str = ""
     doc_name: str = ""
     chunk_index: int = 0
 

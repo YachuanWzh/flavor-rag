@@ -101,7 +101,7 @@ CREATE TABLE t_knowledge_document (
     source_location  VARCHAR(1024),                   -- 源 URL（URL 类型文档）
     schedule_enabled SMALLINT,                        -- 是否启用定时刷新
     schedule_cron    VARCHAR(64),                     -- Cron 表达式
-    chunk_strategy   VARCHAR(32),                     -- FIXED_SIZE / STRUCTURE_AWARE / BLOCK_AWARE
+    chunk_strategy   VARCHAR(32),                     -- FIXED_WINDOW (固定窗口) / SEMANTIC (语义切分)
     chunk_config     JSONB,                           -- 分块配置 JSON
     created_by       VARCHAR(20)  NOT NULL,
     updated_by       VARCHAR(20),

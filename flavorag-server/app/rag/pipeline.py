@@ -1,9 +1,15 @@
-﻿"""RAG Pipeline — rewrite → intent → multi-channel search → fusion → rerank."""
+"""RAG Pipeline — rewrite → intent → multi-channel search → fusion → rerank."""
 from __future__ import annotations
 
+import hashlib
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
+
+from sqlalchemy import select
+
+from app.database.session import async_session_factory
+from app.models import KnowledgeChunk, KnowledgeDocument
 
 from app.rag.search.vector import MilvusSearchChannel
 from app.rag.search.keyword import ESKeywordSearchChannel
@@ -147,14 +153,23 @@ class RAGPipeline:
         intent_name = intent.get("intent", "general") if intent else "general"
         model_name, model_base_url, model_api_key = self.model_router.route(intent_name)
 
-        # 9. Build chunks
+        # 9. Resolve doc_name + chunk_index from PG
+        await self._resolve_metadata(reranked)
+
+        # 10. Build chunks
         chunks = [
             {"content": r.content, "chunk_id": r.chunk_id, "score": r.score}
             for r in reranked
         ]
         sources = [
-            {"docName": r.doc_name or "unknown", "chunkIndex": r.chunk_index,
-             "content": r.content[:200], "score": r.score}
+            {
+                "documentId": r.doc_id,
+                "chunkId": r.chunk_id,
+                "docName": r.doc_name or "unknown",
+                "chunkIndex": r.chunk_index,
+                "content": r.content[:300],
+                "score": r.score,
+            }
             for r in reranked
         ]
 
@@ -172,3 +187,53 @@ class RAGPipeline:
             model_base_url=model_base_url,
             model_api_key=model_api_key,
         )
+
+    async def _resolve_metadata(self, results: list[SearchResult]) -> None:
+        """Resolve doc_name + chunk_index + doc_id from PostgreSQL.
+
+        Uses content_hash as the primary match key — ingestion stores
+        sha256(content)[:16] in KnowledgeChunk.content_hash.  ID-based
+        matching from Milvus is tried as a fast path but content never lies.
+        """
+        if not results:
+            return
+
+        import logging
+        _log = logging.getLogger("flavorag.rag.pipeline")
+
+        # Phase 1: build content hash → result index map
+        hash_to_indices: dict[str, list[int]] = {}
+        for i, r in enumerate(results):
+            if r.content:
+                h = hashlib.sha256(r.content.encode()).hexdigest()[:16]
+                hash_to_indices.setdefault(h, []).append(i)
+
+        if not hash_to_indices:
+            return
+
+        try:
+            async with async_session_factory() as session:
+                rows = await session.execute(
+                    select(
+                        KnowledgeChunk.content_hash,
+                        KnowledgeChunk.id,
+                        KnowledgeChunk.chunk_index,
+                        KnowledgeChunk.doc_id,
+                        KnowledgeDocument.doc_name,
+                    )
+                    .outerjoin(KnowledgeDocument, KnowledgeChunk.doc_id == KnowledgeDocument.id)
+                    .where(
+                        KnowledgeChunk.content_hash.in_(hash_to_indices.keys()),
+                        KnowledgeChunk.deleted == 0,
+                    )
+                )
+                for row in rows:
+                    content_hash, chunk_id, chunk_index, doc_id, doc_name = row
+                    for idx in hash_to_indices.get(content_hash, []):
+                        r = results[idx]
+                        r.chunk_id = chunk_id
+                        r.chunk_index = chunk_index
+                        r.doc_id = doc_id
+                        r.doc_name = doc_name or "unknown"
+        except Exception as exc:
+            _log.warning("Failed to resolve chunk metadata from PG: %s", exc)

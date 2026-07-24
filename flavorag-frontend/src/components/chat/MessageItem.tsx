@@ -1,17 +1,16 @@
 import { useState } from "react";
-import type { Message, SourceRef } from "@/types";
-import { useChatStore } from "@/stores/chatStore";
+import type { Message } from "@/types";
+import MarkdownRenderer from "./MarkdownRenderer";
 
 interface Props {
   message: Message;
+  isStreaming?: boolean;
+  onViewSources?: (sources: NonNullable<Message["sources"]>) => void;
 }
 
-export default function MessageItem({ message }: Props) {
+export default function MessageItem({ message, isStreaming, onViewSources }: Props) {
   const isUser = message.role === "user";
   const [showThinking, setShowThinking] = useState(false);
-  const openedSourceId = useChatStore((s) => s.openedSourceMessageId);
-  const toggleSources = useChatStore((s) => s.toggleSourcesPanel);
-  const sourcesOpen = openedSourceId === message.id;
 
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
@@ -40,34 +39,35 @@ export default function MessageItem({ message }: Props) {
         )}
 
         {/* Content */}
-        <div className="text-sm whitespace-pre-wrap leading-relaxed">
-          {message.content || (
-            <span className="italic opacity-50">思考中...</span>
-          )}
-        </div>
-
-        {/* Sources */}
-        {message.sources && message.sources.length > 0 && (
-          <div className="mt-2 pt-2 border-t border-gray-200/50">
-            <button
-              onClick={() => toggleSources(message.id)}
-              className="text-xs underline opacity-70 hover:opacity-100"
-            >
-              {sourcesOpen ? "收起来源" : `查看来源 (${message.sources.length})`}
-            </button>
-            {sourcesOpen && (
-              <div className="mt-1 space-y-1">
-                {message.sources.map((s, i) => (
-                  <div key={i} className="text-xs opacity-70 bg-gray-50 rounded p-1">
-                    <span className="font-medium">[{i + 1}]</span> {s.content?.substring(0, 120)}
-                    {s.score !== undefined && (
-                      <span className="ml-1 text-gray-400">({(s.score * 100).toFixed(0)}%)</span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
+        {isUser ? (
+          <div className="text-sm whitespace-pre-wrap leading-relaxed">
+            {message.content}
           </div>
+        ) : (
+          <MarkdownRenderer
+            content={message.content}
+            isStreaming={isStreaming}
+          />
+        )}
+
+        {/* Sources button */}
+        {message.sources && message.sources.length > 0 && (
+          <div className="mt-3 pt-2 border-t border-gray-200/50">
+            <button
+              onClick={() => onViewSources?.(message.sources!)}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 rounded-lg px-3 py-1.5 transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              查看来源 ({message.sources.length})
+            </button>
+          </div>
+        )}
+
+        {/* Interrupted indicator */}
+        {message.messageStatus === "INTERRUPTED" && (
+          <div className="mt-1 text-xs italic opacity-50">已中断</div>
         )}
       </div>
     </div>

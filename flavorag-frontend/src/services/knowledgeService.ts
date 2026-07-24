@@ -27,14 +27,24 @@ export async function fetchDocuments(kbId: string): Promise<KnowledgeDocument[]>
   return api.get(`/api/knowledge-base/${kbId}/docs`);
 }
 
+/** Chunking configuration for document upload. */
+export interface ChunkOptions {
+  strategy?: string;      // "FIXED_WINDOW" | "SEMANTIC"
+  chunkSize?: number;     // target characters per chunk, default 800
+  overlap?: number;       // character overlap between chunks, default 100
+}
+
 export async function uploadDocument(
   kbId: string,
   file: File,
-  chunkStrategy: string = "FIXED_SIZE"
+  options: ChunkOptions = {}
 ): Promise<KnowledgeDocument> {
+  const { strategy = "FIXED_WINDOW", chunkSize = 512, overlap = 128 } = options;
   const form = new FormData();
   form.append("file", file);
-  form.append("chunk_strategy", chunkStrategy);
+  form.append("chunk_strategy", strategy);
+  form.append("chunk_size", String(chunkSize));
+  form.append("overlap", String(overlap));
   return api.post(`/api/knowledge-base/${kbId}/docs/upload`, form, {
     headers: { "Content-Type": "multipart/form-data" },
     timeout: 600000,  // 10min, embedding batches take time

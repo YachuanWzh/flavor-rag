@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     bailian_api_key: str = ""
     aihubmix_api_key: str = ""
 
+    # Embedding
+    embedding_base_url: str = "https://api.siliconflow.cn/v1"
+    embedding_model: str = "Qwen/Qwen3-Embedding-8B"
+    embedding_dim: int = 1536
+
     # Elasticsearch（可选）
     es_uris: str = "http://127.0.0.1:9200"
     es_enabled: bool = False

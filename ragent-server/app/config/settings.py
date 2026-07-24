@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     embedding_model: str = "Qwen/Qwen3-Embedding-8B"
     embedding_dim: int = 1536
 
+    # LLM
+    llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    llm_model: str = "qwen-plus-latest"
+
     # Elasticsearch（可选）
     es_uris: str = "http://127.0.0.1:9200"
     es_enabled: bool = False

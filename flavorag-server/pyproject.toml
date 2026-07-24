@@ -7,7 +7,7 @@ where = ["."]
 include = ["app", "app.*"]
 
 [project]
-name = "ragent-server"
+name = "flavorag-server"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [

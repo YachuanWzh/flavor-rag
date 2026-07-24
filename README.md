@@ -21,7 +21,7 @@ flavor-rag/
 ├── database/
 │   └── schema_pg.sql                   # PostgreSQL 建表脚本
 │
-├── ragent-server/                      # 服务端 (FastAPI)
+├── flavorag-server/                    # 服务端 (FastAPI)
 │   ├── pyproject.toml
 │   ├── run.py
 │   └── app/
@@ -38,7 +38,7 @@ flavor-rag/
 │       ├── ingestion/                  # 文档入库流水线 (待实现)
 │       └── llm/                        # LLM 客户端 (待实现)
 │
-└── ragent-frontend/                    # 前端 (React + Vite)
+└── flavorag-frontend/                  # 前端 (React + Vite)
     ├── package.json
     ├── vite.config.ts
     ├── tsconfig.json
@@ -77,13 +77,13 @@ docker compose -f docker/milvus-stack.compose.yaml up -d
 
 ```bash
 # 在 PostgreSQL 中执行建表脚本
-docker exec -i ragent-postgres psql -U postgres -d ragent < database/schema_pg.sql
+docker exec -i flavorag-postgres psql -U postgres -d flavorag < database/schema_pg.sql
 ```
 
 ### 3. 启动服务端
 
 ```bash
-cd ragent-server
+cd flavorag-server
 pip install -e .
 python run.py
 # API 文档: http://localhost:9090/docs
@@ -92,7 +92,7 @@ python run.py
 ### 4. 启动前端
 
 ```bash
-cd ragent-frontend
+cd flavorag-frontend
 npm install
 npm run dev
 # 访问: http://localhost:5173

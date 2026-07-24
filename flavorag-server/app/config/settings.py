@@ -6,7 +6,7 @@ class Settings(BaseSettings):
     server_port: int = 9090
 
     # 数据库
-    database_url: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/ragent"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/flavorag"
 
     # Redis
     redis_url: str = "redis://:123456@127.0.0.1:6379/0"
@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     s3_endpoint: str = "http://localhost:9000"
     s3_access_key: str = "rustfsadmin"
     s3_secret_key: str = "rustfsadmin"
-    s3_bucket: str = "ragent-sources"
+    s3_bucket: str = "flavorag-sources"
 
     # JWT
     jwt_secret_key: str = "change-me-in-production"

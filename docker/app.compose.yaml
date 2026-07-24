@@ -1,8 +1,8 @@
-name: ragent-app
+name: flavorag-app
 
 services:
   server:
-    build: ../ragent-server
+    build: ../flavorag-server
     ports:
       - "9090:9090"
     env_file:
@@ -13,7 +13,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    build: ../ragent-frontend
+    build: ../flavorag-frontend
     ports:
       - "80:80"
     depends_on:
@@ -25,7 +25,7 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: ragent
+      POSTGRES_DB: flavorag
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped

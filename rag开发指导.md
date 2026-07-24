@@ -1,6 +1,6 @@
-# RAG 智能问答系统 — 新项目开发指导
+﻿# RAG 智能问答系统 — 新项目开发指导
 
-> 基于 Ragent 项目的架构设计与 RAG 核心原理，指导使用 **Python（服务端）+ React（前端）** 技术栈从零搭建一个企业级 RAG 系统，存储方案与 Ragent 保持一致。
+> 基于 flavorag 项目的架构设计与 RAG 核心原理，指导使用 **Python（服务端）+ React（前端）** 技术栈从零搭建一个企业级 RAG 系统，存储方案与 flavorag 保持一致。
 
 ---
 
@@ -55,7 +55,7 @@
 | Markdown 渲染 | react-markdown + remark-gfm + rehype-raw |
 | 代码高亮 | react-syntax-highlighter |
 
-### 1.3 存储方案（与 Ragent 一致）
+### 1.3 存储方案（与 flavorag 一致）
 
 | 存储 | 技术选型 | 用途 |
 |------|---------|------|
@@ -78,29 +78,29 @@
 #### 2.1.1 基础中间件栈 (`infra-stack.compose.yaml`)
 
 ```yaml
-name: ragent-infra
+name: flavorag-infra
 
 services:
   postgres:
-    container_name: ragent-postgres
+    container_name: flavorag-postgres
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: ragent
+      POSTGRES_DB: flavorag
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d ragent"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d flavorag"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
 
   redis:
-    container_name: ragent-redis
+    container_name: flavorag-redis
     image: redis:7.4-alpine
     command: redis-server --requirepass 123456
     ports:
@@ -110,7 +110,7 @@ services:
     restart: unless-stopped
 
   rustfs:
-    container_name: ragent-rustfs
+    container_name: flavorag-rustfs
     image: rustfs/rustfs:1.0.0-alpha.72
     command:
       - "--address"
@@ -339,7 +339,7 @@ services:
       POSTGRES_PORT: "5432"
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "postgres"
-      POSTGRES_DATABASE: "ragent"
+      POSTGRES_DATABASE: "flavorag"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -381,7 +381,7 @@ docker compose -f lightrag-neo4j-stack.compose.yaml up -d
 
 ### 3.1 PostgreSQL Schema
 
-> 以下为精简核心表结构，完整建表 DDL 参考 Ragent 项目的 `resources/database/schema_pg.sql`。
+> 以下为精简核心表结构，完整建表 DDL 参考 flavorag 项目的 `resources/database/schema_pg.sql`。
 
 #### 用户与会话
 
@@ -681,7 +681,7 @@ INDEX_MAPPING = {
 ## 4. 服务端项目结构
 
 ```
-ragent-server/
+flavorag-server/
 ├── pyproject.toml              # 项目元数据与依赖（Poetry/Pipenv/uv）
 ├── .env                        # 环境变量（不提交到 Git）
 ├── .env.example                # 环境变量模板
@@ -1106,7 +1106,7 @@ class DocumentChunker:
 
     def _structure_aware_chunk(self, text: str, config: ChunkConfig) -> list[dict]:
         """语义感知切分：按 Markdown 标题、代码块、空行边界切"""
-        # 实现参考 Ragent 的 StructureAwareTextChunker
+        # 实现参考 flavorag 的 StructureAwareTextChunker
         # 识别 # 标题、```代码块```、空行作为自然边界
         ...
 
@@ -1455,7 +1455,7 @@ server: {
 ## 7. 前端项目结构
 
 ```
-ragent-frontend/
+flavorag-frontend/
 ├── index.html
 ├── package.json
 ├── tsconfig.json
@@ -1758,7 +1758,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   streamingMessageId: null,
   openedSourceMessageId: null,
 
-  // ... 实现各 Action（详见 Ragent 项目 frontend/src/stores/chatStore.ts）
+  // ... 实现各 Action（详见 flavorag 项目 frontend/src/stores/chatStore.ts）
   sendMessage: async (content) => {
     // 1. 添加用户消息 + 空的助手消息（占位）
     // 2. 调用 createStreamResponse 发起 SSE 连接
@@ -1885,7 +1885,7 @@ export const router = createBrowserRouter([
 ```bash
 # === 服务端 ===
 SERVER_PORT=9090
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/ragent
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/flavorag
 REDIS_URL=redis://:123456@127.0.0.1:6379/0
 MILVUS_URI=http://localhost:19530
 
@@ -1893,7 +1893,7 @@ MILVUS_URI=http://localhost:19530
 S3_ENDPOINT=http://localhost:9000
 S3_ACCESS_KEY=rustfsadmin
 S3_SECRET_KEY=rustfsadmin
-S3_BUCKET=ragent-sources
+S3_BUCKET=flavorag-sources
 
 # 模型供应商 API Key
 SILICONFLOW_API_KEY=sk-xxx
@@ -1920,7 +1920,7 @@ VITE_APP_NAME=RAG 智能问答
 
 ```toml
 [project]
-name = "ragent-server"
+name = "flavorag-server"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -1986,5 +1986,5 @@ dependencies = [
 
 ---
 
-> **本文档基于 Ragent (https://github.com/nageoffer/ragent) 项目的架构设计与 RAG 核心原理编写。**  
-> Ragent 是一个面向 Agentic RAG 演进的企业级 RAG 平台，采用 Java Spring Boot 3 + React 18 技术栈。本文档在保留其存储方案和 RAG 核心设计的基础上，给出了 Python FastAPI + React 的技术实施路线。
+> **本文档基于 flavorag (https://github.com/nageoffer/flavorag) 项目的架构设计与 RAG 核心原理编写。**  
+> flavorag 是一个面向 Agentic RAG 演进的企业级 RAG 平台，采用 Java Spring Boot 3 + React 18 技术栈。本文档在保留其存储方案和 RAG 核心设计的基础上，给出了 Python FastAPI + React 的技术实施路线。

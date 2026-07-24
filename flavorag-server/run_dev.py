@@ -1,7 +1,7 @@
 """Dev launcher — uses SQLite instead of PostgreSQL, zero Docker required.
 
 Usage:
-    cd ragent-server
+    cd flavorag-server
     pip install -e .
     python run_dev.py
 
@@ -10,7 +10,7 @@ Then open http://localhost:9090/docs
 import os
 
 # Override to SQLite before importing anything
-os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///ragent_dev.db"
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///flavorag_dev.db"
 
 import uvicorn
 

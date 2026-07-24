@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     # LLM
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_model: str = "qwen-plus-latest"
+    code_model: str = "deepseek-v3"
+    doc_model: str = "qwen-plus-latest"
+
+    # Reranker
+    reranker_base_url: str = "https://api.siliconflow.cn/v1"
+    reranker_model: str = "Qwen/Qwen3-Reranker"
 
     # Elasticsearch（可选）
     es_uris: str = "http://127.0.0.1:9200"
@@ -47,8 +53,18 @@ class Settings(BaseSettings):
     lightrag_base_url: str = "http://127.0.0.1:9621"
     graph_enabled: bool = False
 
+    # Neo4j（可选）
+    neo4j_uri: str = "neo4j://127.0.0.1:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = "password123"
+
     # RocketMQ（可选）
     rocketmq_name_server: str = "127.0.0.1:9876"
+
+    # 限流
+    rate_limit_enabled: bool = False
+    rate_limit_user_qpm: int = 60
+    rate_limit_ip_qpm: int = 600
 
     # flavor-code 集成
     flavor_code_integration_enabled: bool = False

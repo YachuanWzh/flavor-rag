@@ -2,6 +2,7 @@ import { createBrowserRouter, Navigate } from "react-router-dom";
 import App from "./App";
 import LoginPage from "./pages/LoginPage";
 import ChatPage from "./pages/ChatPage";
+import AdminPage from "./pages/admin/AdminPage";
 import NotFoundPage from "./pages/NotFoundPage";
 
 export const router = createBrowserRouter([
@@ -13,6 +14,7 @@ export const router = createBrowserRouter([
       { path: "login", element: <LoginPage /> },
       { path: "chat", element: <ChatPage /> },
       { path: "chat/:sessionId", element: <ChatPage /> },
+      { path: "admin", element: <AdminPage /> },
       { path: "*", element: <NotFoundPage /> },
     ],
   },

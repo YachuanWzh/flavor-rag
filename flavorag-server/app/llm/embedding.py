@@ -20,7 +20,7 @@ class EmbeddingClient:
         base_url: str | None = None,
         model: str | None = None,
     ):
-        self.api_key = api_key or settings.siliconflow_api_key
+        self.api_key = api_key if api_key is not None else settings.siliconflow_api_key
         self.base_url = (base_url or settings.embedding_base_url).rstrip("/")
         self.model = model or settings.embedding_model
         self.dim = settings.embedding_dim
@@ -96,7 +96,7 @@ def get_embedding_client(
     base_url: str | None = None,
     model: str | None = None,
 ) -> EmbeddingClient | MockEmbeddingClient:
-    key = api_key or settings.siliconflow_api_key
+    key = api_key if api_key is not None else settings.siliconflow_api_key
     if not key:
         return MockEmbeddingClient()
     return EmbeddingClient(api_key=key, base_url=base_url, model=model)

@@ -21,6 +21,9 @@ from app.rag.intent import recognize_intent
 from app.rag.graph.lightrag_client import LightRAGClient
 from app.rag.model_router import ModelRouter
 from app.config.settings import settings
+from app.config.logging_config import get_logger
+
+_pipeline_log = get_logger("flavorag.rag.pipeline")
 
 
 @dataclass
@@ -61,11 +64,14 @@ class RAGPipeline:
     async def run(self, ctx: RAGContext) -> RAGResult:
         t0 = time.time()
         trace_id: str | None = None
+        _pipeline_log.info("rag_pipeline_start", question=ctx.question[:80], kb_id=ctx.kb_id)
 
         # 1. Query rewrite
         t_rewrite = datetime.now(timezone.utc).replace(tzinfo=None)
         rewritten = await rewrite_query(ctx.question, ctx.history)
         t_rewrite_end = datetime.now(timezone.utc).replace(tzinfo=None)
+        rewrite_ms = int((t_rewrite_end - t_rewrite).total_seconds() * 1000)
+        _pipeline_log.info("rewrite", original=ctx.question[:60], rewritten=(rewritten or "(unchanged)")[:60], took_ms=rewrite_ms)
         if self._trace:
             await self._trace.trace_node(trace_id or "", "rewrite", "query_rewrite",
                                          t_rewrite, t_rewrite_end,
@@ -76,6 +82,9 @@ class RAGPipeline:
         t_intent = datetime.now(timezone.utc).replace(tzinfo=None)
         intent = await recognize_intent(rewritten or ctx.question)
         t_intent_end = datetime.now(timezone.utc).replace(tzinfo=None)
+        intent_ms = int((t_intent_end - t_intent).total_seconds() * 1000)
+        intent_name = intent.get("intent", "unknown") if intent else "unknown"
+        _pipeline_log.info("intent", intent=intent_name, took_ms=intent_ms)
         if self._trace:
             await self._trace.trace_node(trace_id or "", "intent", "intent_recognition",
                                          t_intent, t_intent_end,
@@ -88,6 +97,7 @@ class RAGPipeline:
             or (intent.get("collection_name") if intent else None)
             or "default_store"
         )
+        _pipeline_log.info("collection_resolved", collection_name=collection_name)
 
         search_question = rewritten or ctx.question
 
@@ -96,52 +106,82 @@ class RAGPipeline:
         all_results: list[list[SearchResult]] = []
 
         # Vector search
+        t_vector = time.time()
         vector_results = await self.milvus.search(search_question, collection_name, top_k=10)
+        vector_ms = int((time.time() - t_vector) * 1000)
+        _pipeline_log.info("vector_retrieval", collection=collection_name, count=len(vector_results), took_ms=vector_ms)
         all_results.append(vector_results)
 
         # ES keyword search
         if settings.es_enabled:
+            t_keyword = time.time()
             kw_results = await self.es.search(search_question, collection_name, top_k=10)
+            kw_ms = int((time.time() - t_keyword) * 1000)
+            _pipeline_log.info("bm25_retrieval", collection=collection_name, count=len(kw_results), took_ms=kw_ms)
             if kw_results:
                 all_results.append(kw_results)
 
         # Graph search
         if settings.graph_enabled:
+            t_graph = time.time()
             graph_resp = await self.graph_client.query_graph(search_question, top_k=5)
             graph_hits = graph_resp.get("results", [])
+            graph_ms = int((time.time() - t_graph) * 1000)
             for hit in graph_hits:
                 all_results.append([SearchResult(
                     chunk_id=hit.get("id", ""),
                     content=hit.get("content", ""),
                     score=float(hit.get("score", 0.5)),
                 )])
+            _pipeline_log.info("graph_retrieval", count=len(graph_hits), took_ms=graph_ms)
+
         t_search_end = datetime.now(timezone.utc).replace(tzinfo=None)
         search_ms = int((t_search_end - t_search).total_seconds() * 1000)
+        total_hits = sum(len(r) for r in all_results)
+        _pipeline_log.info("multi_search_complete", channels=len(all_results), total_hits=total_hits, took_ms=search_ms)
 
         # 5. RRF fusion
         t_fuse = datetime.now(timezone.utc).replace(tzinfo=None)
         if len(all_results) > 1:
+            # Log pre-fusion per-channel top scores
+            for i, channel_results in enumerate(all_results):
+                if channel_results:
+                    top_scores = [f"{r.score:.4f}" for r in channel_results[:3]]
+                    _pipeline_log.info("rrf_pre_fusion_channel", channel=i, count=len(channel_results), top_scores=top_scores)
             merged = rrf_fusion(*all_results)
         elif all_results:
             merged = all_results[0]
         else:
             merged = []
         t_fuse_end = datetime.now(timezone.utc).replace(tzinfo=None)
+        fusion_ms = int((t_fuse_end - t_fuse).total_seconds() * 1000)
+        _pipeline_log.info("rrf_fusion", input_channels=len(all_results), input_total=total_hits, output_count=len(merged), took_ms=fusion_ms)
         if self._trace:
             await self._trace.trace_node(trace_id or "", "fusion", "rrf_fusion",
                                          t_fuse, t_fuse_end,
-                                         input_data={"channel_count": len(all_results), "total_hits": sum(len(r) for r in all_results)},
+                                         input_data={"channel_count": len(all_results), "total_hits": total_hits},
                                          output_data={"merged_count": len(merged)})
 
         # 6. Dedup
+        t_dedup = time.time()
         deduped = deduplicate(merged)
+        dedup_ms = int((time.time() - t_dedup) * 1000)
         recall_count = len(deduped)
+        removed = len(merged) - len(deduped)
+        _pipeline_log.info("deduplicate", before=len(merged), after=recall_count, removed=removed, took_ms=dedup_ms)
 
         # 7. Rerank
         t_rerank = datetime.now(timezone.utc).replace(tzinfo=None)
+        # Log pre-rerank order
+        pre_rerank_ids = [(r.chunk_id or r.content[:20], f"{r.score:.4f}") for r in deduped[:5]]
+        _pipeline_log.info("rerank_pre", candidates=recall_count, top_ids=pre_rerank_ids)
         reranked = await self.reranker.rerank(search_question, deduped, top_n=5)
         t_rerank_end = datetime.now(timezone.utc).replace(tzinfo=None)
+        rerank_ms = int((t_rerank_end - t_rerank).total_seconds() * 1000)
         final_count = len(reranked)
+        # Log post-rerank order
+        post_rerank_ids = [(r.chunk_id or r.content[:20], f"{r.score:.4f}") for r in reranked]
+        _pipeline_log.info("rerank_post", final_count=final_count, top_ids=post_rerank_ids, took_ms=rerank_ms)
 
         if self._trace:
             await self._trace.trace_node(trace_id or "", "rerank", "rerank",
@@ -174,6 +214,20 @@ class RAGPipeline:
         ]
 
         duration = int((time.time() - t0) * 1000)
+
+        _pipeline_log.info(
+            "rag_pipeline_complete",
+            question=ctx.question[:60],
+            rewrite=rewrite_ms,
+            intent=intent_ms,
+            vector=vector_ms,
+            fusion=fusion_ms,
+            dedup=dedup_ms,
+            rerank=rerank_ms,
+            total_ms=duration,
+            recall_count=recall_count,
+            final_count=final_count,
+        )
 
         return RAGResult(
             question=ctx.question,

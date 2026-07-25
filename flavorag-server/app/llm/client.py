@@ -18,7 +18,7 @@ class LLMClient:
         base_url: str | None = None,
         model: str | None = None,
     ):
-        self.api_key = api_key or settings.bailian_api_key or settings.siliconflow_api_key
+        self.api_key = api_key if api_key is not None else (settings.bailian_api_key or settings.siliconflow_api_key)
         self.base_url = (base_url or settings.llm_base_url).rstrip("/")
         self.model = model or settings.llm_model
 
@@ -102,7 +102,7 @@ def get_llm_client(
     model: str | None = None,
 ) -> LLMClient | MockLLMClient:
     """Factory: return real client when API key is set, else mock."""
-    key = api_key or settings.bailian_api_key or settings.siliconflow_api_key
+    key = api_key if api_key is not None else (settings.bailian_api_key or settings.siliconflow_api_key)
     if not key:
         return MockLLMClient()
     return LLMClient(api_key=key, base_url=base_url, model=model)

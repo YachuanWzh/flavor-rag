@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +11,9 @@ from app.ingestion.parser import DocumentParser
 from app.ingestion.chunker import DocumentChunker, ChunkConfig
 from app.llm.embedding import get_embedding_client
 from app.rag.search.vector import MilvusSearchChannel
+from app.config.logging_config import get_logger
+
+_ingest_log = get_logger("flavorag.ingestion.pipeline")
 
 
 class IngestionPipeline:
@@ -39,20 +43,33 @@ class IngestionPipeline:
         """
         from app.models import KnowledgeChunk, KnowledgeDocument
 
+        t0 = time.time()
+        _ingest_log.info("ingestion_start", doc_id=doc_id, kb_id=kb_id, file_path=file_path)
+
         # 1. Parse
+        t_parse = time.time()
         parsed_text = await self.parser.parse(file_path)
+        parse_ms = int((time.time() - t_parse) * 1000)
+        _ingest_log.info("parse", doc_id=doc_id, text_len=len(parsed_text), took_ms=parse_ms)
 
         # 2. Chunk
+        t_chunk = time.time()
         if chunk_config is None:
             chunk_config = ChunkConfig()
         chunks = self.chunker.chunk(parsed_text, chunk_config)
+        chunk_ms = int((time.time() - t_chunk) * 1000)
+        _ingest_log.info("chunk", doc_id=doc_id, strategy=chunk_config.strategy, chunk_count=len(chunks), chunk_size=chunk_config.chunk_size, took_ms=chunk_ms)
 
         if not chunks:
+            _ingest_log.warning("ingestion_no_chunks", doc_id=doc_id)
             return 0
 
         # 3. Embed
+        t_embed = time.time()
         texts = [c["content"] for c in chunks]
         vectors = await self.embedder.embed_documents(texts)
+        embed_ms = int((time.time() - t_embed) * 1000)
+        _ingest_log.info("embed", doc_id=doc_id, vector_count=len(vectors), dim=len(vectors[0]) if vectors else 0, took_ms=embed_ms)
 
         # 4. Save chunk metadata to PostgreSQL
         chunk_records: list[KnowledgeChunk] = []
@@ -102,6 +119,18 @@ class IngestionPipeline:
         # 8. Optional: LightRAG graph sync
         if settings.graph_enabled:
             await self._sync_to_lightrag(kb_id, chunk_records)
+
+        total_ms = int((time.time() - t0) * 1000)
+        _ingest_log.info(
+            "ingestion_complete",
+            doc_id=doc_id,
+            kb_id=kb_id,
+            chunk_count=len(chunks),
+            parse_ms=parse_ms,
+            chunk_ms=chunk_ms,
+            embed_ms=embed_ms,
+            total_ms=total_ms,
+        )
 
         return len(chunks)
 

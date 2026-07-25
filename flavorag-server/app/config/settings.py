@@ -50,7 +50,7 @@ class Settings(BaseSettings):
 
     # Elasticsearch（可选）
     es_uris: str = "http://127.0.0.1:9200"
-    es_enabled: bool = False
+    es_enabled: bool = True
 
     # LightRAG（可选）
     lightrag_base_url: str = "http://127.0.0.1:9621"

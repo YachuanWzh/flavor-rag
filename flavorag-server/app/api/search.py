@@ -10,8 +10,10 @@ from app.database.session import get_db
 from app.auth.dependencies import get_current_user
 from app.models import User, KnowledgeBase
 from app.rag.search.vector import MilvusSearchChannel
+from app.rag.search.keyword import ESKeywordSearchChannel
 from app.rag.postprocess.fusion import rrf_fusion, deduplicate
 from app.rag.search.base import SearchResult
+from app.config.settings import settings
 
 router = APIRouter(prefix="/api/rag/v3", tags=["search"])
 
@@ -21,7 +23,7 @@ class SearchRequest(BaseModel):
     kb_id: str | None = None
     collection_name: str | None = None
     top_k: int = Field(default=5, ge=1, le=50)
-    channels: list[str] = Field(default=["vector"])
+    channels: list[str] = Field(default=["vector", "keyword"])
 
 
 class ChunkResult(BaseModel):
@@ -76,6 +78,16 @@ async def rag_search(
             top_k=req.top_k,
         )
         all_results.append(vector_results)
+
+    if "keyword" in req.channels and settings.es_enabled:
+        es = ESKeywordSearchChannel()
+        kw_results = await es.search(
+            query=req.query,
+            collection_name=collection_name,
+            top_k=req.top_k,
+        )
+        if kw_results:
+            all_results.append(kw_results)
 
     # Fuse multi-channel results
     if len(all_results) > 1:

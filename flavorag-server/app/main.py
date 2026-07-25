@@ -8,6 +8,9 @@ from app.api.search import router as search_router
 from app.api.conversation import router as conversation_router
 from app.api.chat import router as chat_router
 from app.api.admin import router as admin_router
+from app.api.intent_tree import router as intent_tree_router
+from app.api.sample_question import router as sample_question_router
+from app.api.query_term_mapping import router as query_term_mapping_router
 from app.config.settings import settings
 from app.config.logging_config import get_logger, configure_root_logger
 
@@ -55,8 +58,26 @@ async def lifespan(app: FastAPI):
 
     # Seed admin user for all backends
     await _seed_admin_user()
+
+    # Start URL refresh scheduler
+    global _url_scheduler
+    try:
+        from app.services.url_refresh_scheduler import URLRefreshScheduler
+        _url_scheduler = URLRefreshScheduler()
+        await _url_scheduler.start()
+        _log.info("url_scheduler_started")
+    except Exception as exc:
+        _log.warning("url_scheduler_failed", error=str(exc))
+
     _log.info("server_started", port=settings.server_port)
     yield
+    # Shutdown: stop scheduler
+    if _url_scheduler:
+        try:
+            await _url_scheduler.stop()
+            _log.info("url_scheduler_stopped")
+        except Exception as exc:
+            _log.warning("url_scheduler_stop_failed", error=str(exc))
     _log.info("server_shutting_down")
 
 
@@ -76,6 +97,9 @@ app.include_router(search_router)
 app.include_router(conversation_router)
 app.include_router(chat_router)
 app.include_router(admin_router)
+app.include_router(intent_tree_router)
+app.include_router(sample_question_router)
+app.include_router(query_term_mapping_router)
 
 
 @app.get("/api/health")

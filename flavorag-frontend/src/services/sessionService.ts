@@ -2,7 +2,7 @@ import { api } from "./api";
 import type { Session } from "@/types";
 
 export async function fetchSessions(): Promise<Session[]> {
-  const list = await api.get("/api/conversations");
+  const list: any = await api.get("/api/conversations");
   return list.map((s: any) => ({
     id: s.id,
     conversationId: s.conversationId,
@@ -16,7 +16,7 @@ export async function createSession(
 ): Promise<Session> {
   const form = new FormData();
   form.set("title", title);
-  const result = await api.post("/api/conversations", form);
+  const result: any = await api.post("/api/conversations", form);
   return {
     id: result.id,
     conversationId: result.conversationId,

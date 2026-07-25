@@ -20,5 +20,5 @@ export async function register(params: LoginParams): Promise<AuthResult> {
 }
 
 export async function getCurrentUser() {
-  return await api.get("/api/auth/current");
+  return (await api.get("/api/auth/current")) as any;
 }

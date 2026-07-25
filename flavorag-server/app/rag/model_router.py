@@ -35,8 +35,15 @@ class ModelRouter:
         self._base_url = (base_url or settings.llm_base_url).rstrip("/")
         self._api_key = api_key or settings.bailian_api_key or settings.siliconflow_api_key or ""
 
-    def route(self, intent: str) -> tuple[str, str, str]:
-        """Return (model_name, base_url, api_key) for the given intent."""
+    def route(self, intent: str, deep_thinking: bool = False) -> tuple[str, str, str]:
+        """Return (model_name, base_url, api_key) for the given intent.
+
+        When ``deep_thinking`` is True, prefer the reasoning model (if configured).
+        """
+        if deep_thinking and settings.reasoning_model:
+            base_url = (settings.reasoning_base_url or self._base_url).rstrip("/")
+            api_key = settings.reasoning_api_key or self._api_key
+            return (settings.reasoning_model, base_url, api_key)
         model = self._resolve_model(intent)
         return (model, self._base_url, self._api_key)
 

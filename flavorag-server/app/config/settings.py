@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     code_model: str = "deepseek-v3"
     doc_model: str = "qwen-plus-latest"
 
+    # 深度思考 / 推理模型
+    reasoning_model: str = ""
+    reasoning_base_url: str = ""
+    reasoning_api_key: str = ""
+
     # Reranker
     reranker_base_url: str = "https://api.siliconflow.cn/v1"
     reranker_model: str = "Qwen/Qwen3-Reranker"
@@ -63,6 +68,12 @@ class Settings(BaseSettings):
 
     # RocketMQ（可选）
     rocketmq_name_server: str = "127.0.0.1:9876"
+
+    # 查询重写
+    rewrite_enabled: bool = True  # 是否启用 LLM 查询重写
+
+    # 意图识别
+    intent_llm_enabled: bool = True  # 是否启用 LLM 意图分类
 
     # 限流
     rate_limit_enabled: bool = False

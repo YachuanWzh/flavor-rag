@@ -51,6 +51,24 @@ export async function uploadDocument(
   });
 }
 
+/** URL upload request. */
+export interface URLUploadRequest {
+  url: string;
+  docName?: string;
+  scheduleEnabled?: boolean;
+  scheduleCron?: string;
+}
+
+/** Upload a document from a URL. */
+export async function uploadDocumentFromUrl(
+  kbId: string,
+  req: URLUploadRequest,
+): Promise<KnowledgeDocument> {
+  return api.post(`/api/knowledge-base/${kbId}/docs/upload-url`, req, {
+    timeout: 600000,
+  });
+}
+
 export async function deleteDocument(docId: string): Promise<void> {
   return api.delete(`/api/knowledge-base/docs/${docId}`);
 }

@@ -20,6 +20,7 @@ export default function ChatPage() {
     messages, isLoading, isStreaming, streamingMessageId,
     sendMessage, cancelGeneration,
     addSession, removeSession,
+    deepThinkingEnabled, setDeepThinking,
   } = useChatStore();
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [initLoading, setInitLoading] = useState(true);
@@ -153,6 +154,8 @@ export default function ChatPage() {
           onSend={handleSend}
           onCancel={cancelGeneration}
           isStreaming={isStreaming}
+          deepThinking={deepThinkingEnabled}
+          onDeepThinkingChange={setDeepThinking}
         />
       </main>
 

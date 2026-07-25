@@ -191,7 +191,14 @@ class RAGPipeline:
 
         # 8. Model routing
         intent_name = intent.get("intent", "general") if intent else "general"
-        model_name, model_base_url, model_api_key = self.model_router.route(intent_name)
+        if ctx.deep_thinking and not settings.reasoning_model:
+            _pipeline_log.warning(
+                "deep_thinking_requested_but_no_reasoning_model",
+                hint="Set REASONING_MODEL in .env to enable reasoning traces",
+            )
+        model_name, model_base_url, model_api_key = self.model_router.route(
+            intent_name, deep_thinking=ctx.deep_thinking
+        )
 
         # 9. Resolve doc_name + chunk_index from PG
         await self._resolve_metadata(reranked)

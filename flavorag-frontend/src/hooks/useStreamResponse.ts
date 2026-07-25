@@ -61,8 +61,11 @@ export function createStreamResponse(
             handlers.onMeta?.(payload);
             break;
           case "message":
-            if (payload?.type === "think") handlers.onThinking?.(payload);
-            handlers.onMessage?.(payload);
+            if (payload?.type === "think") {
+              handlers.onThinking?.(payload);
+            } else {
+              handlers.onMessage?.(payload);
+            }
             break;
           case "finish":
             handlers.onFinish?.(payload);

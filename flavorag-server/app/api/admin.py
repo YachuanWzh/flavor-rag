@@ -1,16 +1,122 @@
-﻿"""Admin API — health check, trace inspection, system status."""
+"""Admin API — dashboard, health check, trace inspection."""
 from __future__ import annotations
+
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
+
 from app.database.session import get_db
 from app.auth.dependencies import get_current_user, get_admin_user
-from app.models import User, RagTraceRun, RagTraceNode
+from app.models import (
+    User, Conversation, Message, KnowledgeBase, KnowledgeDocument,
+    KnowledgeChunk, RagTraceRun, RagTraceNode,
+)
 from app.rag.trace import TraceLogger
 from app.config.settings import settings
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+# ---- Dashboard ----
+
+
+@router.get("/dashboard")
+async def dashboard_stats(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Aggregate dashboard statistics."""
+    today_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0, tzinfo=None
+    )
+
+    # Counts
+    kb_count = (await db.execute(
+        select(func.count(KnowledgeBase.id)).where(KnowledgeBase.deleted == 0)
+    )).scalar() or 0
+
+    doc_count = (await db.execute(
+        select(func.count(KnowledgeDocument.id)).where(KnowledgeDocument.deleted == 0)
+    )).scalar() or 0
+
+    chunk_count = (await db.execute(
+        select(func.count(KnowledgeChunk.id)).where(KnowledgeChunk.deleted == 0)
+    )).scalar() or 0
+
+    conv_count = (await db.execute(
+        select(func.count(Conversation.id)).where(Conversation.deleted == 0)
+    )).scalar() or 0
+
+    msg_count = (await db.execute(
+        select(func.count(Message.id)).where(Message.deleted == 0)
+    )).scalar() or 0
+
+    # Today's metrics
+    today_questions = (await db.execute(
+        select(func.count(Message.id)).where(
+            Message.deleted == 0,
+            Message.role == "user",
+            Message.create_time >= today_start,
+        )
+    )).scalar() or 0
+
+    today_traces = (await db.execute(
+        select(func.count(RagTraceRun.id)).where(RagTraceRun.create_time >= today_start)
+    )).scalar() or 0
+
+    # Average durations from recent traces (last 100)
+    avg_search = (await db.execute(
+        select(func.avg(RagTraceRun.search_duration_ms))
+        .where(RagTraceRun.status == "success")
+        .limit(100)
+    )).scalar() or 0
+
+    avg_llm = (await db.execute(
+        select(func.avg(RagTraceRun.llm_duration_ms))
+        .where(RagTraceRun.status == "success")
+        .limit(100)
+    )).scalar() or 0
+
+    avg_total = (await db.execute(
+        select(func.avg(RagTraceRun.total_duration_ms))
+        .where(RagTraceRun.status == "success")
+        .limit(100)
+    )).scalar() or 0
+
+    # Feedback stats
+    from app.models import MessageFeedback
+    positive_fb = (await db.execute(
+        select(func.count(MessageFeedback.id)).where(
+            MessageFeedback.vote == 1,
+            MessageFeedback.deleted == 0,
+        )
+    )).scalar() or 0
+    negative_fb = (await db.execute(
+        select(func.count(MessageFeedback.id)).where(
+            MessageFeedback.vote == -1,
+            MessageFeedback.deleted == 0,
+        )
+    )).scalar() or 0
+
+    return {"code": "0", "message": "success", "data": {
+        "knowledgeBases": kb_count,
+        "documents": doc_count,
+        "chunks": chunk_count,
+        "conversations": conv_count,
+        "messages": msg_count,
+        "todayQuestions": today_questions,
+        "todayTraces": today_traces,
+        "avgSearchMs": round(avg_search, 0),
+        "avgLlmMs": round(avg_llm, 0),
+        "avgTotalMs": round(avg_total, 0),
+        "positiveFeedback": positive_fb,
+        "negativeFeedback": negative_fb,
+    }}
+
+
+# ---- Health ----
 
 
 @router.get("/health")
@@ -26,7 +132,6 @@ async def health():
         "rate_limit": settings.rate_limit_enabled,
     }
 
-    # Test DB
     try:
         from app.database.session import engine
         async with engine.connect() as conn:
@@ -34,7 +139,6 @@ async def health():
     except Exception:
         status["database"] = "error"
 
-    # Test Redis
     try:
         import redis.asyncio as aioredis
         r = aioredis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=2)
@@ -43,15 +147,13 @@ async def health():
     except Exception:
         status["redis"] = "error"
 
-    # Test Milvus
     try:
         from pymilvus import connections, utility
-        connections.connect(alias="health", uri=settings.milvus_uri, timeout=5)
+        connections.connect(alias="default", uri=settings.milvus_uri, timeout=5)
         status["milvus"] = "ok" if utility.list_collections() is not None else "ok"
     except Exception:
         status["milvus"] = "error"
 
-    # Test ES
     if settings.es_enabled:
         try:
             from elasticsearch import AsyncElasticsearch
@@ -61,7 +163,6 @@ async def health():
         except Exception:
             status["es"] = "error"
 
-    # Test Graph
     if settings.graph_enabled:
         try:
             import httpx
@@ -78,6 +179,9 @@ async def health():
         "status": "healthy" if overall else "degraded",
         "components": status,
     }}
+
+
+# ---- Traces ----
 
 
 @router.get("/traces")

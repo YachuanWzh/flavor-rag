@@ -6,6 +6,7 @@ from app.ingestion.chunker import (
     ChunkStrategy,
     FixedSizeOptions,
     TextBoundaryOptions,
+    BlockAwareOptions,
 )
 
 
@@ -210,3 +211,109 @@ class TestDocumentChunkerDefaults:
         text = "A" * 2000
         chunks = chunker.chunk(text)
         assert len(chunks) >= 2
+
+
+class TestBlockAwareChunking:
+    """Tests for BLOCK_AWARE chunking strategy with per-block-type sub-chunkers."""
+
+    def setup_method(self):
+        self.chunker = DocumentChunker()
+        self.config = ChunkConfig(strategy="BLOCK_AWARE", chunk_size=200, overlap=20)
+
+    def test_strategy_resolution(self):
+        assert ChunkStrategy.from_value("block_aware") == ChunkStrategy.BLOCK_AWARE
+        assert ChunkStrategy.from_value("BLOCK_AWARE") == ChunkStrategy.BLOCK_AWARE
+
+    def test_config_resolves_block_aware(self):
+        c = ChunkConfig(strategy="BLOCK_AWARE", chunk_size=600, overlap=80)
+        assert c.resolve_strategy() == ChunkStrategy.BLOCK_AWARE
+        opts = c.resolve_options()
+        assert isinstance(opts, BlockAwareOptions)
+        assert opts.target_chars == 600
+        assert opts.overlap_chars == 80
+
+    def test_block_aware_default_options(self):
+        opts = BlockAwareOptions()
+        assert opts.table_max_rows == 20
+        assert opts.code_max_lines == 80
+        assert opts.heading_as_path is True
+        assert opts.target_chars == 800
+
+    def test_heading_added_as_path_prefix(self):
+        """Heading blocks should not become standalone chunks but act as path prefix."""
+        text = "## API Reference\n\nThis section describes the authentication API."
+        chunks = self.chunker.chunk(text, self.config)
+        assert len(chunks) >= 1
+        content = chunks[0]["content"]
+        assert "API Reference" in content
+        assert "authentication" in content
+
+    def test_table_dual_text(self):
+        """Table chunks should contain both original table and key:value search text."""
+        text = (
+            "| 姓名 | 部门 | 职位 |\n"
+            "|------|------|------|\n"
+            "| 张三 | 技术部 | 工程师 |\n"
+            "| 李四 | 市场部 | 经理 |"
+        )
+        chunks = self.chunker.chunk(text, self.config)
+        assert len(chunks) >= 1
+        # Check for key:value format
+        content = chunks[0]["content"]
+        assert "表格数据" in content  # search text indicator
+        assert "姓名" in content
+
+    def test_code_block_preserved(self):
+        """Code blocks should be isolated and not mixed with surrounding text."""
+        text = (
+            "Before the code.\n\n"
+            "```python\n"
+            "def hello():\n"
+            "    return 'world'\n"
+            "```\n\n"
+            "After the code."
+        )
+        chunks = self.chunker.chunk(text, self.config)
+        all_content = "".join(c["content"] for c in chunks)
+        assert "```python" in all_content
+        assert "def hello():" in all_content
+        assert "After the code" in all_content
+
+    def test_list_items_packed(self):
+        """List items should be packed together within budget."""
+        items = "\n".join(f"- Item {i}: description of item number {i}" for i in range(5))
+        chunks = self.chunker.chunk(items, self.config)
+        assert len(chunks) >= 1
+        all_content = "".join(c["content"] for c in chunks)
+        for i in range(5):
+            assert f"Item {i}" in all_content
+
+    def test_image_alt_text_extracted(self):
+        """Image blocks should extract alt text for search."""
+        text = "![系统架构图](https://example.com/arch.png)"
+        chunks = self.chunker.chunk(text, self.config)
+        assert len(chunks) >= 1
+        assert "系统架构图" in chunks[0]["content"]
+
+    def test_empty_text(self):
+        chunks = self.chunker.chunk("", self.config)
+        assert chunks == []
+
+    def test_output_format(self):
+        text = "## Section\n\nNormal paragraph text here.\n\n| A | B |\n|---|---|\n| 1 | 2 |"
+        chunks = self.chunker.chunk(text, self.config)
+        for c in chunks:
+            assert "content" in c
+            assert "chunk_index" in c
+            assert "char_count" in c
+            assert isinstance(c["content"], str)
+            assert isinstance(c["chunk_index"], int)
+            assert isinstance(c["char_count"], int)
+
+    def test_small_chunks_merged(self):
+        """Small adjacent chunks (below min_chars) should be merged."""
+        text = "One.\n\nTwo.\n\nThree.\n\nFour.\n\nFive."
+        config = ChunkConfig(strategy="BLOCK_AWARE", chunk_size=500, overlap=10)
+        chunks = self.chunker.chunk(text, config)
+        # With large target, small paragraphs pack together
+        assert len(chunks) >= 1

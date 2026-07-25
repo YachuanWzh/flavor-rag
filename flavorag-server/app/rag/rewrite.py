@@ -1,12 +1,19 @@
-﻿"""Query rewriting — lightweight prompt-based rewriter (no external LLM call by default)."""
+"""Query rewriting — lightweight prompt-based rewriter with optional LLM enhancement."""
+
 from __future__ import annotations
+
+from app.config.settings import settings
+from app.config.logging_config import get_logger
+
+_rewrite_log = get_logger("flavorag.rag.rewrite")
 
 
 async def rewrite_query(question: str, history: list[dict] | None = None) -> str | None:
     """Rewrite user query for better retrieval.
 
-    In standalone mode: returns the original question unchanged.
-    When LLM is configured: can call LLM to expand/normalise the query.
+    When ``settings.rewrite_enabled`` is True and an LLM API key is configured,
+    uses LLM-based rewriting (context-aware). Otherwise falls back to basic
+    text normalisation.
 
     Args:
         question: Raw user question.
@@ -18,10 +25,20 @@ async def rewrite_query(question: str, history: list[dict] | None = None) -> str
     if not question:
         return None
 
-    # Basic normalisation — trim and de-duplicate whitespace
-    cleaned = " ".join(question.split())
+    # Try LLM rewrite when enabled and API key is available
+    if settings.rewrite_enabled:
+        key = settings.bailian_api_key or settings.siliconflow_api_key
+        if key:
+            try:
+                result = await rewrite_query_with_llm(question, history)
+                if result:
+                    _rewrite_log.info("llm_rewrite", original=question[:60], rewritten=result[:60])
+                    return result
+            except Exception as exc:
+                _rewrite_log.warning("llm_rewrite_failed_fallback", error=str(exc))
 
-    # For now: return cleaned version. Full LLM rewrite can be plugged in later.
+    # Fallback: basic normalisation
+    cleaned = " ".join(question.split())
     return cleaned if cleaned != question else None
 
 
@@ -29,12 +46,16 @@ async def rewrite_query_with_llm(
     question: str,
     history: list[dict] | None = None,
 ) -> str | None:
-    """Full LLM-based query rewrite. Requires configured LLM client."""
-    from app.llm.client import get_llm_client
+    """Full LLM-based query rewrite. Requires configured LLM client.
+
+    Expands user queries by:
+    - Resolving pronouns & implicit references from history
+    - Adding synonyms & domain terminology
+    - Converting colloquial expressions to formal search queries
+    """
+    from app.llm.client import get_llm_client, MockLLMClient
 
     client = get_llm_client()
-    # Skip rewrite for mock clients
-    from app.llm.client import MockLLMClient
     if isinstance(client, MockLLMClient):
         return None
 
@@ -42,7 +63,7 @@ async def rewrite_query_with_llm(
     if history:
         recent = history[-6:]
         history_context = "\n".join(
-            f"{h['role']}: {h['content'][:200]}" for h in recent
+            f"{h['role']}: {h['content'][:200]}" for h in recent if h.get("content")
         )
 
     prompt = [
@@ -50,7 +71,12 @@ async def rewrite_query_with_llm(
             "role": "system",
             "content": (
                 "你是一个查询重写助手。将用户的模糊问题改写为更精确、更适合检索的查询语句。"
-                "保留原意，补充可能的同义词和相关术语。只返回改写后的问题，不要加任何解释。"
+                "遵循以下规则：\n"
+                "1. 将口语化表达转为书面语（如'怎么弄'→'如何操作'）\n"
+                "2. 补充可能的同义词和相关术语（如'报销'可补充'费用申请、财务审批'）\n"
+                "3. 根据对话历史补全省略的上下文（如'那个呢'→补全具体指代）\n"
+                "4. 保留原意，不要添加无关信息\n"
+                "只返回改写后的问题，不要加任何解释。"
             ),
         },
         {"role": "user", "content": f"对话历史:\n{history_context}\n\n问题: {question}\n\n改写:"},

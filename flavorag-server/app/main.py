@@ -11,6 +11,10 @@ from app.api.admin import router as admin_router
 from app.api.intent_tree import router as intent_tree_router
 from app.api.sample_question import router as sample_question_router
 from app.api.query_term_mapping import router as query_term_mapping_router
+from app.audit.api import router as audit_router
+from app.audit.middleware import AuditMiddleware
+from app.api.schedule import router as schedule_router
+from app.api.ingestion_pipeline import router as ingestion_pipeline_router
 from app.config.settings import settings
 from app.config.logging_config import get_logger, configure_root_logger
 
@@ -69,20 +73,37 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         _log.warning("url_scheduler_failed", error=str(exc))
 
+    # Start document schedule scheduler
+    global _doc_schedule_scheduler
+    try:
+        from app.services.schedule.scheduler import DocumentScheduleScheduler
+        _doc_schedule_scheduler = DocumentScheduleScheduler(poll_interval_sec=60)
+        await _doc_schedule_scheduler.start()
+        _log.info("doc_schedule_scheduler_started")
+    except Exception as exc:
+        _log.warning("doc_schedule_scheduler_failed", error=str(exc))
+
     _log.info("server_started", port=settings.server_port)
     yield
-    # Shutdown: stop scheduler
+    # Shutdown: stop schedulers
     if _url_scheduler:
         try:
             await _url_scheduler.stop()
             _log.info("url_scheduler_stopped")
         except Exception as exc:
             _log.warning("url_scheduler_stop_failed", error=str(exc))
+    if _doc_schedule_scheduler:
+        try:
+            await _doc_schedule_scheduler.stop()
+            _log.info("doc_schedule_scheduler_stopped")
+        except Exception as exc:
+            _log.warning("doc_schedule_scheduler_stop_failed", error=str(exc))
     _log.info("server_shutting_down")
 
 
 app = FastAPI(title="flavor-rag API", version="0.2.0", lifespan=lifespan)
 
+app.add_middleware(AuditMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -100,6 +121,9 @@ app.include_router(admin_router)
 app.include_router(intent_tree_router)
 app.include_router(sample_question_router)
 app.include_router(query_term_mapping_router)
+app.include_router(audit_router)
+app.include_router(schedule_router)
+app.include_router(ingestion_pipeline_router)
 
 
 @app.get("/api/health")

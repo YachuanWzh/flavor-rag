@@ -76,6 +76,7 @@ class KnowledgeBase(Base, TimestampMixin):
     name = Column(String(128), nullable=False)
     embedding_model = Column(String(64), nullable=False)
     collection_name = Column(String(64), nullable=False, unique=True)
+    pipeline_id = Column(String(20))
     created_by = Column(String(20), nullable=False)
     updated_by = Column(String(20))
 
@@ -195,3 +196,189 @@ class RagTraceNode(Base):
     status = Column(String(16), default="success")
     error_message = Column(Text)
     create_time = Column(DateTime, default=_utcnow)
+
+
+# ============================================================
+# Audit
+# ============================================================
+
+
+class BizChangeLog(Base):
+    __tablename__ = "t_biz_change_log"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    biz_type = Column(String(64), nullable=False)
+    biz_id = Column(String(64), nullable=False)
+    operation_type = Column(String(32), nullable=False)
+    action_desc = Column(String(512))
+    before_snapshot = Column(JSON)
+    after_snapshot = Column(JSON)
+    change_diff = Column(JSON)
+    operator_id = Column(String(64))
+    operator_name = Column(String(128))
+    operator_role = Column(String(64))
+    success = Column(SmallInteger, default=1)
+    error_message = Column(Text)
+    class_name = Column(String(255))
+    method_name = Column(String(255))
+    ip = Column(String(64))
+    user_agent = Column(String(512))
+    create_time = Column(DateTime, default=_utcnow)
+
+
+# ============================================================
+# Document Schedule (timed refresh)
+# ============================================================
+
+
+class KnowledgeDocumentSchedule(Base):
+    __tablename__ = "t_knowledge_document_schedule"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    doc_id = Column(String(20), nullable=False, unique=True)
+    kb_id = Column(String(20), nullable=False)
+    cron_expr = Column(String(64))
+    enabled = Column(SmallInteger, default=0)
+    next_run_time = Column(DateTime)
+    last_run_time = Column(DateTime)
+    last_success_time = Column(DateTime)
+    last_status = Column(String(16))
+    last_error = Column(String(512))
+    last_etag = Column(String(256))
+    last_modified = Column(String(256))
+    last_content_hash = Column(String(128))
+    lock_owner = Column(String(128))
+    lock_until = Column(DateTime)
+    create_time = Column(DateTime, default=_utcnow)
+    update_time = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class KnowledgeDocumentScheduleExec(Base):
+    __tablename__ = "t_knowledge_document_schedule_exec"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    schedule_id = Column(String(20), nullable=False)
+    doc_id = Column(String(20), nullable=False)
+    kb_id = Column(String(20), nullable=False)
+    status = Column(String(16), nullable=False)
+    message = Column(String(512))
+    start_time = Column(DateTime)
+    end_time = Column(DateTime)
+    file_name = Column(String(512))
+    file_size = Column(BigInteger)
+    content_hash = Column(String(128))
+    etag = Column(String(256))
+    last_modified = Column(String(256))
+    create_time = Column(DateTime, default=_utcnow)
+    update_time = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+# ============================================================
+# Document Chunk Processing Log
+# ============================================================
+
+
+class KnowledgeDocumentChunkLog(Base):
+    __tablename__ = "t_knowledge_document_chunk_log"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    doc_id = Column(String(20), nullable=False)
+    status = Column(String(16), nullable=False)
+    process_mode = Column(String(16))
+    chunk_strategy = Column(String(16))
+    pipeline_id = Column(String(20))
+    extract_duration = Column(BigInteger)
+    chunk_duration = Column(BigInteger)
+    embed_duration = Column(BigInteger)
+    persist_duration = Column(BigInteger)
+    total_duration = Column(BigInteger)
+    chunk_count = Column(Integer)
+    error_message = Column(Text)
+    start_time = Column(DateTime)
+    end_time = Column(DateTime)
+    create_time = Column(DateTime, default=_utcnow)
+    update_time = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+# ============================================================
+# Ingestion Pipeline
+# ============================================================
+
+
+class IngestionPipeline(Base):
+    __tablename__ = "t_ingestion_pipeline"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    name = Column(String(128), nullable=False)
+    description = Column(String(512))
+    created_by = Column(String(20), nullable=False)
+    updated_by = Column(String(20))
+    create_time = Column(DateTime, default=_utcnow)
+    update_time = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    deleted = Column(SmallInteger, default=0)
+
+
+class IngestionPipelineNode(Base):
+    __tablename__ = "t_ingestion_pipeline_node"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    pipeline_id = Column(String(20), nullable=False)
+    node_id = Column(String(64), nullable=False)
+    node_type = Column(String(32), nullable=False)
+    next_node_id = Column(String(64))
+    settings_json = Column(JSON)
+    condition_json = Column(JSON)
+    created_by = Column(String(20), nullable=False)
+    updated_by = Column(String(20))
+    create_time = Column(DateTime, default=_utcnow)
+    update_time = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    deleted = Column(SmallInteger, default=0)
+
+
+class IngestionTask(Base):
+    __tablename__ = "t_ingestion_task"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    pipeline_id = Column(String(20), nullable=False)
+    source_type = Column(String(32), nullable=False)
+    source_location = Column(String(1024), nullable=False)
+    source_file_name = Column(String(512))
+    status = Column(String(16), default="pending")
+    chunk_count = Column(Integer, default=0)
+    error_message = Column(Text)
+    logs_json = Column(JSON)
+    metadata_json = Column(JSON)
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    created_by = Column(String(20), nullable=False)
+    updated_by = Column(String(20))
+    create_time = Column(DateTime, default=_utcnow)
+    update_time = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    deleted = Column(SmallInteger, default=0)
+
+
+class IngestionTaskNode(Base):
+    __tablename__ = "t_ingestion_task_node"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    task_id = Column(String(20), nullable=False)
+    pipeline_id = Column(String(20), nullable=False)
+    node_id = Column(String(64), nullable=False)
+    node_type = Column(String(32), nullable=False)
+    node_order = Column(Integer, default=0)
+    status = Column(String(16), default="pending")
+    duration_ms = Column(BigInteger)
+    message = Column(String(512))
+    error_message = Column(Text)
+    output_json = Column(JSON)
+    create_time = Column(DateTime, default=_utcnow)
+    update_time = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    deleted = Column(SmallInteger, default=0)

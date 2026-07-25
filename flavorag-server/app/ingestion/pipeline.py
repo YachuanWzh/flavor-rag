@@ -132,6 +132,22 @@ class IngestionPipeline:
             total_ms=total_ms,
         )
 
+        # 9. Log chunk processing metrics
+        try:
+            await _log_chunk_processing(
+                doc_id=doc_id,
+                status="success",
+                chunk_strategy=chunk_config.strategy.value if chunk_config else "",
+                extract_duration=parse_ms,
+                chunk_duration=chunk_ms,
+                embed_duration=embed_ms,
+                total_duration=total_ms,
+                chunk_count=len(chunks),
+                db=db,
+            )
+        except Exception:
+            pass  # Non-critical: skip if log table doesn't exist
+
         return len(chunks)
 
     async def _index_to_es(self, kb_id: str, chunks: list):
@@ -164,3 +180,50 @@ class IngestionPipeline:
                     )
         except Exception:
             pass  # LightRAG is optional; silently skip
+
+
+async def _log_chunk_processing(
+    doc_id: str,
+    status: str,
+    *,
+    chunk_strategy: str = "",
+    pipeline_id: str = "",
+    extract_duration: int = 0,
+    chunk_duration: int = 0,
+    embed_duration: int = 0,
+    persist_duration: int = 0,
+    total_duration: int = 0,
+    chunk_count: int = 0,
+    error_message: str = "",
+    db=None,
+) -> None:
+    """Log chunk processing performance metrics to t_knowledge_document_chunk_log."""
+    from datetime import datetime, timezone
+    from app.models import KnowledgeDocumentChunkLog, gen_id
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    entry = KnowledgeDocumentChunkLog(
+        id=gen_id(),
+        doc_id=doc_id,
+        status=status,
+        process_mode="chunk",
+        chunk_strategy=chunk_strategy,
+        pipeline_id=pipeline_id,
+        extract_duration=extract_duration,
+        chunk_duration=chunk_duration,
+        embed_duration=embed_duration,
+        persist_duration=persist_duration,
+        total_duration=total_duration,
+        chunk_count=chunk_count,
+        error_message=error_message,
+        start_time=now,
+        end_time=now,
+    )
+    if db is not None:
+        db.add(entry)
+        await db.flush()
+    else:
+        from app.database.session import async_session_factory
+        async with async_session_factory() as session:
+            session.add(entry)
+            await session.commit()

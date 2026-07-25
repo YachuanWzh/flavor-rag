@@ -2,7 +2,8 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { ReactElement } from "react";
 import {
   LayoutDashboard, HelpCircle, ArrowLeftRight,
-  Activity, ArrowLeft, GitBranch,
+  Activity, ArrowLeft, GitBranch, ClipboardList,
+  Clock, Layers,
 } from "lucide-react";
 
 function HeartPulseIcon({ size = 16 }: { size?: number }) {
@@ -22,6 +23,9 @@ const navItems = [
   { to: "/admin/query-mapping", Icon: ArrowLeftRight, label: "查询词映射" },
   { to: "/admin/traces", Icon: Activity, label: "链路追踪" },
   { to: "/admin/health", Icon: HeartPulseIcon, label: "系统状态" },
+  { to: "/admin/audit", Icon: ClipboardList, label: "审计日志" },
+  { to: "/admin/schedule", Icon: Clock, label: "定时调度" },
+  { to: "/admin/ingestion", Icon: Layers, label: "入库流水线" },
 ];
 
 export default function AdminLayout() {

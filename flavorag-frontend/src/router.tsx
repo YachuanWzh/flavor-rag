@@ -9,6 +9,9 @@ import SampleQuestionsPage from "./pages/admin/SampleQuestionsPage";
 import QueryTermMappingPage from "./pages/admin/QueryTermMappingPage";
 import TracesPage from "./pages/admin/TracesPage";
 import HealthPage from "./pages/admin/HealthPage";
+import AuditLogPage from "./pages/admin/AuditLogPage";
+import SchedulePage from "./pages/admin/SchedulePage";
+import IngestionPipelinePage from "./pages/admin/IngestionPipelinePage";
 import KnowledgeBasePage from "./pages/knowledge/KnowledgeBasePage";
 import KnowledgeBaseDetailPage from "./pages/knowledge/KnowledgeBaseDetailPage";
 import KnowledgeChunksPage from "./pages/knowledge/KnowledgeChunksPage";
@@ -33,6 +36,9 @@ export const router = createBrowserRouter([
           { path: "query-mapping", element: <QueryTermMappingPage /> },
           { path: "traces", element: <TracesPage /> },
           { path: "health", element: <HealthPage /> },
+          { path: "audit", element: <AuditLogPage /> },
+          { path: "schedule", element: <SchedulePage /> },
+          { path: "ingestion", element: <IngestionPipelinePage /> },
         ],
       },
       { path: "knowledge", element: <KnowledgeBasePage /> },

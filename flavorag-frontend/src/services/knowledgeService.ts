@@ -9,11 +9,13 @@ export async function fetchKnowledgeBases(): Promise<KnowledgeBase[]> {
 
 export async function createKnowledgeBase(
   name: string,
-  embeddingModel: string = "qwen3-embedding-8b"
+  embeddingModel: string = "qwen3-embedding-8b",
+  pipelineId: string = ""
 ): Promise<KnowledgeBase> {
   const form = new FormData();
   form.append("name", name);
   form.append("embedding_model", embeddingModel);
+  if (pipelineId) form.append("pipeline_id", pipelineId);
   return api.post("/api/knowledge-base", form);
 }
 
@@ -71,6 +73,17 @@ export async function uploadDocumentFromUrl(
 
 export async function deleteDocument(docId: string): Promise<void> {
   return api.delete(`/api/knowledge-base/docs/${docId}`);
+}
+
+export async function reprocessDocument(
+  docId: string,
+  pipelineId: string = ""
+): Promise<{ chunkCount: number; status: string }> {
+  const form = new FormData();
+  if (pipelineId) form.append("pipeline_id", pipelineId);
+  return api.post(`/api/knowledge-base/docs/${docId}/reprocess`, form, {
+    timeout: 600000,
+  });
 }
 
 export async function fetchChunks(docId: string): Promise<KnowledgeChunk[]> {

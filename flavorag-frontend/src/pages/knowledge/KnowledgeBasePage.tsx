@@ -7,6 +7,12 @@ import {
   deleteKnowledgeBase,
 } from "@/services/knowledgeService";
 import type { KnowledgeBase } from "@/types";
+import { api } from "@/services/api";
+
+interface PipelineOption {
+  id: string;
+  name: string;
+}
 
 export default function KnowledgeBasePage() {
   const navigate = useNavigate();
@@ -16,6 +22,8 @@ export default function KnowledgeBasePage() {
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
+  const [pipelines, setPipelines] = useState<PipelineOption[]>([]);
+  const [selectedPipeline, setSelectedPipeline] = useState("");
 
   const load = async () => {
     try {
@@ -29,15 +37,23 @@ export default function KnowledgeBasePage() {
     }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); loadPipelines(); }, []);
+
+  const loadPipelines = async () => {
+    try {
+      const data: any = await api.get("/api/admin/ingestion/pipelines?pageSize=100");
+      setPipelines(data.rows || []);
+    } catch { /* ignore */ }
+  };
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
     try {
       setCreating(true);
       setError("");
-      await createKnowledgeBase(newName.trim());
+      await createKnowledgeBase(newName.trim(), undefined, selectedPipeline);
       setNewName("");
+      setSelectedPipeline("");
       setShowCreate(false);
       await load();
     } catch (err: any) {
@@ -92,16 +108,28 @@ export default function KnowledgeBasePage() {
         {showCreate && (
           <div className="mb-6 p-4 bg-white border rounded-lg shadow-sm">
             <h2 className="font-semibold mb-3 text-sm">新建知识库</h2>
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
               <input
                 type="text"
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
                 placeholder="输入知识库名称"
-                className="flex-1 px-3 py-2 border rounded-md text-sm"
+                className="flex-1 min-w-[200px] px-3 py-2 border rounded-md text-sm"
                 onKeyDown={(e) => e.key === "Enter" && handleCreate()}
                 autoFocus
               />
+              {pipelines.length > 0 && (
+                <select
+                  value={selectedPipeline}
+                  onChange={(e) => setSelectedPipeline(e.target.value)}
+                  className="px-3 py-2 border rounded-md text-sm bg-white"
+                >
+                  <option value="">默认入库流程</option>
+                  {pipelines.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              )}
               <button
                 onClick={handleCreate}
                 disabled={creating || !newName.trim()}

@@ -5,6 +5,7 @@ import ChatPage from "./pages/ChatPage";
 import AdminPage from "./pages/admin/AdminPage";
 import KnowledgeBasePage from "./pages/knowledge/KnowledgeBasePage";
 import KnowledgeBaseDetailPage from "./pages/knowledge/KnowledgeBaseDetailPage";
+import KnowledgeChunksPage from "./pages/knowledge/KnowledgeChunksPage";
 import NotFoundPage from "./pages/NotFoundPage";
 
 export const router = createBrowserRouter([
@@ -19,6 +20,7 @@ export const router = createBrowserRouter([
       { path: "admin", element: <AdminPage /> },
       { path: "knowledge", element: <KnowledgeBasePage /> },
       { path: "knowledge/:kbId", element: <KnowledgeBaseDetailPage /> },
+      { path: "knowledge/:kbId/docs/:docId", element: <KnowledgeChunksPage /> },
       { path: "*", element: <NotFoundPage /> },
     ],
   },

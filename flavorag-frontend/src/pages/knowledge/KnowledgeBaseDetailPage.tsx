@@ -1,16 +1,15 @@
 import { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
-  ArrowLeft, Upload, Trash2, FileText, Eye, X, Loader2,
+  ArrowLeft, Upload, Trash2, FileText, Eye, Loader2,
 } from "lucide-react";
 import {
   fetchDocuments,
   uploadDocument,
   deleteDocument,
-  fetchChunks,
   type ChunkOptions,
 } from "@/services/knowledgeService";
-import type { KnowledgeDocument, KnowledgeChunk } from "@/types";
+import type { KnowledgeDocument } from "@/types";
 
 export default function KnowledgeBaseDetailPage() {
   const { kbId } = useParams<{ kbId: string }>();
@@ -27,11 +26,6 @@ export default function KnowledgeBaseDetailPage() {
   const [chunkStrategy, setChunkStrategy] = useState("FIXED_WINDOW");
   const [chunkSize, setChunkSize] = useState(512);
   const [chunkOverlap, setChunkOverlap] = useState(128);
-
-  // Chunk viewer state
-  const [chunksDocId, setChunksDocId] = useState<string | null>(null);
-  const [chunks, setChunks] = useState<KnowledgeChunk[]>([]);
-  const [chunksLoading, setChunksLoading] = useState(false);
 
   const loadDocs = async () => {
     if (!kbId) return;
@@ -83,28 +77,16 @@ export default function KnowledgeBaseDetailPage() {
     if (!confirm(`确定要删除文档「${docName}」吗？`)) return;
     try {
       await deleteDocument(docId);
-      if (chunksDocId === docId) setChunksDocId(null);
       await loadDocs();
     } catch (err: any) {
       setError(err?.message || "删除失败");
     }
   };
 
-  const handleViewChunks = async (docId: string) => {
-    if (chunksDocId === docId) {
-      setChunksDocId(null);
-      return;
-    }
-    try {
-      setChunksLoading(true);
-      setChunksDocId(docId);
-      const data = await fetchChunks(docId);
-      setChunks(data);
-    } catch {
-      setError("加载分块失败");
-    } finally {
-      setChunksLoading(false);
-    }
+  const handleViewChunks = (doc: KnowledgeDocument) => {
+    navigate(`/knowledge/${kbId}/docs/${doc.id}`, {
+      state: { docName: doc.docName, chunkCount: doc.chunkCount },
+    });
   };
 
   const formatSize = (bytes: number) => {
@@ -257,12 +239,8 @@ export default function KnowledgeBaseDetailPage() {
                   </div>
                   <div className="flex items-center gap-1 ml-3">
                     <button
-                      onClick={() => handleViewChunks(doc.id)}
-                      className={`p-2 rounded-md text-sm ${
-                        chunksDocId === doc.id
-                          ? "bg-blue-100 text-blue-600"
-                          : "text-gray-400 hover:bg-gray-100"
-                      }`}
+                      onClick={() => handleViewChunks(doc)}
+                      className="p-2 text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded-md"
                       title="查看分块"
                     >
                       <Eye size={16} />
@@ -277,33 +255,7 @@ export default function KnowledgeBaseDetailPage() {
                   </div>
                 </div>
 
-                {/* Chunks panel */}
-                {chunksDocId === doc.id && (
-                  <div className="border-t bg-gray-50">
-                    {chunksLoading ? (
-                      <div className="p-4 text-center text-gray-400 text-sm">加载分块中...</div>
-                    ) : (
-                      <div className="max-h-96 overflow-y-auto">
-                        {chunks.map((chunk) => (
-                          <div
-                            key={chunk.id}
-                            className="p-4 border-b border-gray-100 last:border-b-0"
-                          >
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="text-xs font-mono bg-gray-200 px-1.5 py-0.5 rounded">
-                                #{chunk.chunkIndex}
-                              </span>
-                              <span className="text-xs text-gray-400">{chunk.charCount} 字符</span>
-                            </div>
-                            <p className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">
-                              {chunk.content}
-                            </p>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
+
               </div>
             ))}
           </div>

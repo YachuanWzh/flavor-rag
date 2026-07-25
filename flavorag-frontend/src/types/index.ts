@@ -56,4 +56,8 @@ export interface KnowledgeChunk {
   chunkIndex: number;
   content: string;
   charCount: number;
+  enabled?: number;     // 1 = enabled, 0 = disabled
+  tokenCount?: number;  // estimated token count
+  createTime?: string;
+  updateTime?: string;
 }

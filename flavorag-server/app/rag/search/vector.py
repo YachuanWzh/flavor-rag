@@ -150,6 +150,15 @@ class MilvusSearchChannel(SearchChannel):
         if collection is None:
             return
 
+        # Auto-heal dimension mismatch: when the embedding model changes
+        # (e.g. 1536 → 4096), the existing collection schema won't match
+        # the new vectors. Drop and recreate with the correct dim.
+        if vectors:
+            actual_dim = len(vectors[0])
+            schema_dim = self._collection_dim(collection)
+            if schema_dim is not None and schema_dim != actual_dim:
+                collection = self.create_collection(collection_name, dim=actual_dim)
+
         collection.insert([
             {
                 "chunk_id": chunk_ids[i],

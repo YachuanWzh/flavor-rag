@@ -196,6 +196,7 @@ export default function ChatPage() {
                 isStreaming={isStreaming}
                 streamingMessageId={streamingMessageId}
                 onViewSources={handleViewSources}
+                onRecommendedQuestion={handleSend}
               />
             )}
           </div>

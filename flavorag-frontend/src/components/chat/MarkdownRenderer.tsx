@@ -7,6 +7,8 @@ interface Props {
   content: string;
   isStreaming?: boolean;
   className?: string;
+  sourceCount?: number;
+  onSourceClick?: (index: number) => void;
 }
 
 /**
@@ -34,8 +36,20 @@ function safeForStreaming(input: string): string {
   return input;
 }
 
-export default function MarkdownRenderer({ content, isStreaming, className }: Props) {
-  const safeContent = isStreaming ? safeForStreaming(content || "") : content;
+export default function MarkdownRenderer({
+  content,
+  isStreaming,
+  className,
+  sourceCount = 0,
+  onSourceClick,
+}: Props) {
+  const streamedContent = isStreaming ? safeForStreaming(content || "") : content;
+  const safeContent = sourceCount
+    ? streamedContent.replace(
+        /\[(\d+)\](?!\()/g,
+        (whole, value) => Number(value) <= sourceCount ? `[${value}](source:${value})` : whole,
+      )
+    : streamedContent;
 
   if (!content && !isStreaming) return null;
 
@@ -99,6 +113,19 @@ export default function MarkdownRenderer({ content, isStreaming, className }: Pr
               );
             },
             a({ children, href }) {
+              if (href?.startsWith("source:")) {
+                const index = Number(href.slice("source:".length)) - 1;
+                return (
+                  <button
+                    type="button"
+                    onClick={() => onSourceClick?.(index)}
+                    className="mx-0.5 inline-flex min-w-5 items-center justify-center rounded bg-cyan-50 px-1 font-mono text-[10px] font-semibold text-cyan-700 ring-1 ring-inset ring-cyan-200 hover:bg-cyan-100"
+                    title={`查看来源 ${index + 1}`}
+                  >
+                    {children}
+                  </button>
+                );
+              }
               return (
                 <a
                   href={href}

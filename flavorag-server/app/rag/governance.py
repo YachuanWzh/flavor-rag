@@ -18,6 +18,16 @@ class RetrievalBudget:
     context_max_chars: int = 12000
     max_subqueries: int = 3
 
+    def __post_init__(self):
+        if min(
+            self.per_channel_top_k,
+            self.max_candidates,
+            self.final_top_k,
+            self.context_max_chars,
+            self.max_subqueries,
+        ) <= 0:
+            raise ValueError("retrieval budgets must be positive")
+
 
 @dataclass(frozen=True)
 class ChannelStatus:
@@ -98,7 +108,11 @@ async def run_search_channels(
                 operation(),
                 timeout=budget.channel_timeout_ms / 1000,
             )
-            items = list(items)[: budget.max_candidates]
+            items = list(items)[: budget.per_channel_top_k * budget.max_subqueries]
+            for rank, item in enumerate(items, start=1):
+                item.metadata.setdefault("retrievalChannel", name)
+                item.metadata.setdefault("channelRank", rank)
+                item.metadata.setdefault("rawScore", float(item.score))
             return name, items, ChannelStatus(
                 "success",
                 int((time.monotonic() - started) * 1000),
@@ -172,7 +186,27 @@ def select_context(
     below = len(candidates) - len(eligible)
     selected: list[SearchResult] = []
     used_chars = 0
-    for item in eligible[: budget.final_top_k]:
+    # Prefer evidence diversity before taking a second chunk from the same doc.
+    grouped: dict[str, list[SearchResult]] = {}
+    order: list[str] = []
+    for item in eligible:
+        key = item.doc_id or f"chunk:{item.chunk_id}"
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(item)
+    diversified: list[SearchResult] = []
+    while len(diversified) < len(eligible):
+        added = False
+        for key in order:
+            if grouped[key]:
+                diversified.append(grouped[key].pop(0))
+                added = True
+        if not added:
+            break
+    for item in diversified:
+        if len(selected) >= budget.final_top_k:
+            break
         length = len(item.content)
         if used_chars + length > budget.context_max_chars:
             continue

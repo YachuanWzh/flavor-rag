@@ -16,6 +16,7 @@ from app.audit.middleware import AuditMiddleware
 from app.api.schedule import router as schedule_router
 from app.api.ingestion_pipeline import router as ingestion_pipeline_router
 from app.api.security import router as security_router
+from app.api.evaluation import router as evaluation_router
 from app.api.graph import router as graph_router
 from app.config.settings import settings
 from app.config.logging_config import get_logger, configure_root_logger
@@ -158,6 +159,7 @@ app.include_router(audit_router)
 app.include_router(schedule_router)
 app.include_router(ingestion_pipeline_router)
 app.include_router(security_router)
+app.include_router(evaluation_router)
 app.include_router(graph_router)
 
 

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import httpx
+from app.config.logging_config import get_logger
 from app.config.settings import settings
 from app.rag.search.base import SearchResult
 from app.rag.governance import CircuitBreaker
 
 
+_rerank_log = get_logger("flavorag.rag.reranker")
 _rerank_breaker = CircuitBreaker(
     failure_threshold=settings.circuit_breaker_failures,
     recovery_timeout_sec=settings.circuit_breaker_recovery_sec,
@@ -55,7 +57,13 @@ class Reranker:
                 return await _rerank_breaker.call(
                     lambda: self._cross_encoder_rerank(query, candidates, top_n)
                 )
-            except Exception:
+            except Exception as exc:
+                _rerank_log.warning(
+                    "rerank_fallback",
+                    model=self.model,
+                    candidate_count=len(candidates),
+                    error=str(exc)[:500],
+                )
                 return candidates[:top_n]
         elif self.strategy == self.STRATEGY_LLM_BASED:
             return await self._llm_based_rerank(query, candidates, top_n)
@@ -95,6 +103,8 @@ class Reranker:
                     )
                     candidate.metadata["rerank_score"] = candidate.score
                     reranked.append(candidate)
+            if not reranked:
+                raise RuntimeError("reranker returned no valid results")
             return reranked[:top_n]
 
     async def _llm_based_rerank(

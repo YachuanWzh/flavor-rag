@@ -4,6 +4,7 @@ import {
   LayoutDashboard, HelpCircle, ArrowLeftRight,
   Activity, ArrowLeft, GitBranch, ClipboardList,
   Clock, Layers,
+  FlaskConical, ShieldCheck,
 } from "lucide-react";
 
 function HeartPulseIcon({ size = 16 }: { size?: number }) {
@@ -26,6 +27,8 @@ const navItems = [
   { to: "/admin/audit", Icon: ClipboardList, label: "审计日志" },
   { to: "/admin/schedule", Icon: Clock, label: "定时调度" },
   { to: "/admin/ingestion", Icon: Layers, label: "入库流水线" },
+  { to: "/admin/evaluation", Icon: FlaskConical, label: "检索评测" },
+  { to: "/admin/access", Icon: ShieldCheck, label: "访问控制" },
 ];
 
 export default function AdminLayout() {

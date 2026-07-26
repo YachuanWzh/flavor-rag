@@ -23,6 +23,10 @@ class IntentNodeCreate(BaseModel):
     collection_name: str | None = None
     search_channels: list[str] | None = None
     prompt_template: str | None = None
+    kind: str = Field(default="KB", description="KB / MCP / SYSTEM")
+    score_threshold: float = Field(default=0.3, ge=0, le=1)
+    examples: list[str] = Field(default_factory=list)
+    mcp_tool_id: str | None = None
     sort_order: int = 0
     enabled: int = 1
 
@@ -35,6 +39,10 @@ class IntentNodeUpdate(BaseModel):
     collection_name: str | None = None
     search_channels: list[str] | None = None
     prompt_template: str | None = None
+    kind: str | None = None
+    score_threshold: float | None = Field(default=None, ge=0, le=1)
+    examples: list[str] | None = None
+    mcp_tool_id: str | None = None
     sort_order: int | None = None
     enabled: int | None = None
 
@@ -49,7 +57,10 @@ async def list_intents(
     user: User = Depends(get_current_user),
 ):
     """List all intent nodes, optionally filtered by kb_id."""
-    q = select(IntentNode).where(IntentNode.deleted == 0)
+    q = select(IntentNode).where(
+        IntentNode.deleted == 0,
+        IntentNode.tenant_id == (user.tenant_id or "default"),
+    )
     if kb_id:
         q = q.where(IntentNode.kb_id == kb_id)
     q = q.order_by(IntentNode.level, IntentNode.sort_order)
@@ -69,6 +80,10 @@ async def list_intents(
             "collectionName": n.collection_name,
             "searchChannels": n.search_channels,
             "promptTemplate": n.prompt_template,
+            "kind": n.kind or "KB",
+            "scoreThreshold": (n.score_threshold or 30) / 100,
+            "examples": n.examples or [],
+            "mcpToolId": n.mcp_tool_id,
             "sortOrder": n.sort_order,
             "enabled": n.enabled,
             "createTime": str(n.create_time),
@@ -88,6 +103,7 @@ async def create_intent(
     existing = await db.execute(
         select(IntentNode).where(
             IntentNode.intent_code == req.intent_code,
+            IntentNode.tenant_id == (user.tenant_id or "default"),
             IntentNode.deleted == 0,
         )
     )
@@ -96,6 +112,7 @@ async def create_intent(
 
     node = IntentNode(
         id=gen_id(),
+        tenant_id=user.tenant_id or "default",
         intent_code=req.intent_code,
         name=req.name,
         level=req.level,
@@ -105,6 +122,10 @@ async def create_intent(
         collection_name=req.collection_name,
         search_channels=req.search_channels,
         prompt_template=req.prompt_template,
+        kind=req.kind.upper(),
+        score_threshold=round(req.score_threshold * 100),
+        examples=req.examples,
+        mcp_tool_id=req.mcp_tool_id,
         sort_order=req.sort_order,
         enabled=req.enabled,
     )
@@ -122,7 +143,11 @@ async def update_intent(
 ):
     """Update an existing intent node."""
     result = await db.execute(
-        select(IntentNode).where(IntentNode.id == node_id, IntentNode.deleted == 0)
+        select(IntentNode).where(
+            IntentNode.id == node_id,
+            IntentNode.tenant_id == (user.tenant_id or "default"),
+            IntentNode.deleted == 0,
+        )
     )
     node = result.scalar_one_or_none()
     if not node:
@@ -142,6 +167,14 @@ async def update_intent(
         node.search_channels = req.search_channels
     if req.prompt_template is not None:
         node.prompt_template = req.prompt_template
+    if req.kind is not None:
+        node.kind = req.kind.upper()
+    if req.score_threshold is not None:
+        node.score_threshold = round(req.score_threshold * 100)
+    if req.examples is not None:
+        node.examples = req.examples
+    if req.mcp_tool_id is not None:
+        node.mcp_tool_id = req.mcp_tool_id
     if req.sort_order is not None:
         node.sort_order = req.sort_order
     if req.enabled is not None:
@@ -159,7 +192,11 @@ async def delete_intent(
 ):
     """Soft-delete an intent node."""
     result = await db.execute(
-        select(IntentNode).where(IntentNode.id == node_id, IntentNode.deleted == 0)
+        select(IntentNode).where(
+            IntentNode.id == node_id,
+            IntentNode.tenant_id == (user.tenant_id or "default"),
+            IntentNode.deleted == 0,
+        )
     )
     node = result.scalar_one_or_none()
     if not node:

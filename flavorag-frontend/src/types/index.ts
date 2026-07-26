@@ -32,6 +32,26 @@ export interface SourceRef {
   chunkIndex: number;
   content: string;
   score: number;
+  fusionScore?: number | null;
+  rerankScore?: number | null;
+  channelScores?: Record<string, {
+    rank: number;
+    rawScore: number;
+    weight: number;
+    rrfContribution: number;
+  }>;
+  matchedChannels?: string[];
+  blockType?: string;
+  pageStart?: number | null;
+  pageEnd?: number | null;
+  bboxes?: Array<Record<string, number>>;
+  assets?: Array<{
+    assetId?: string;
+    url?: string;
+    storageUrl?: string;
+    mimeType?: string;
+    description?: string;
+  }>;
 }
 
 // ---- Knowledge Base ----

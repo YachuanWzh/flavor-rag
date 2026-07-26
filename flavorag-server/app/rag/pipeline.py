@@ -17,13 +17,15 @@ from app.rag.search.keyword import ESKeywordSearchChannel
 from app.rag.postprocess.fusion import rrf_fusion, deduplicate
 from app.rag.postprocess.reranker import Reranker
 from app.rag.search.base import SearchResult
-from app.rag.rewrite import rewrite_query
-from app.rag.intent import recognize_intent
+# Compatibility exports remain importable because existing integrations monkeypatch
+# these names while migrating to the structured entry points.
+from app.rag.rewrite import rewrite_query, rewrite_query_result  # noqa: F401
+from app.rag.intent import recognize_intent, resolve_intents  # noqa: F401
 from app.rag.graph.lightrag_client import LightRAGClient
 from app.rag.graph.neo4j_store import Neo4jGraphStore
 from app.rag.model_router import ModelRouter
-from app.rag.decompose import decompose_query
 from app.rag.governance import (
+    CircuitBreaker,
     RetrievalBudget,
     run_search_channels,
     select_context,
@@ -68,6 +70,9 @@ class RAGResult:
     rejection_reason: str | None = None
     channel_statuses: dict = field(default_factory=dict)
     subqueries: list[str] = field(default_factory=list)
+    response_mode: str = "rag"
+    direct_response: str | None = None
+    prompt_template: str | None = None
 
 
 class RAGPipeline:
@@ -81,6 +86,13 @@ class RAGPipeline:
         self.native_graph = Neo4jGraphStore()
         self.model_router = ModelRouter()
         self._trace = trace_logger
+        self._channel_breakers = {
+            name: CircuitBreaker(
+                failure_threshold=settings.circuit_breaker_failures,
+                recovery_timeout_sec=settings.circuit_breaker_recovery_sec,
+            )
+            for name in ("vector", "keyword", "graph")
+        }
 
     async def run(self, ctx: RAGContext) -> RAGResult:
         t0 = time.time()
@@ -98,7 +110,18 @@ class RAGPipeline:
 
         # 1. Query rewrite
         t_rewrite = datetime.now(timezone.utc).replace(tzinfo=None)
-        rewritten = await rewrite_query(ctx.question, ctx.history)
+        rewrite_result = await rewrite_query_result(
+            ctx.question,
+            ctx.history,
+            kb_id=ctx.kb_id,
+            tenant_id=ctx.tenant_id,
+            max_queries=budget.max_subqueries,
+        )
+        rewritten = (
+            rewrite_result.rewritten_query
+            if rewrite_result.rewritten_query != ctx.question
+            else None
+        )
         t_rewrite_end = datetime.now(timezone.utc).replace(tzinfo=None)
         rewrite_ms = int((t_rewrite_end - t_rewrite).total_seconds() * 1000)
         _pipeline_log.info("rewrite", original=ctx.question[:60], rewritten=(rewritten or "(unchanged)")[:60], took_ms=rewrite_ms)
@@ -106,11 +129,21 @@ class RAGPipeline:
             await self._trace.trace_node(trace_id or "", "rewrite", "query_rewrite",
                                          t_rewrite, t_rewrite_end,
                                          input_data={"query": ctx.question},
-                                         output_data={"rewritten": rewritten})
+                                         output_data={
+                                             "normalized": rewrite_result.normalized_query,
+                                             "rewritten": rewrite_result.rewritten_query,
+                                             "subqueries": rewrite_result.subqueries,
+                                             "applied_mappings": rewrite_result.applied_mappings,
+                                         })
 
         # 2. Intent recognition
         t_intent = datetime.now(timezone.utc).replace(tzinfo=None)
-        intent = await recognize_intent(rewritten or ctx.question)
+        intent_resolution = await resolve_intents(
+            rewrite_result.subqueries or [rewrite_result.rewritten_query],
+            kb_id=ctx.kb_id,
+            tenant_id=ctx.tenant_id,
+        )
+        intent = intent_resolution.to_dict()
         t_intent_end = datetime.now(timezone.utc).replace(tzinfo=None)
         intent_ms = int((t_intent_end - t_intent).total_seconds() * 1000)
         intent_name = intent.get("intent", "unknown") if intent else "unknown"
@@ -120,10 +153,62 @@ class RAGPipeline:
                                          t_intent, t_intent_end,
                                          input_data={"query": rewritten or ctx.question},
                                          output_data=intent)
+            if hasattr(self._trace, "update_understanding"):
+                await self._trace.update_understanding(
+                    trace_id or "",
+                    rewrite_query=rewrite_result.rewritten_query,
+                    intent=intent_name,
+                    metadata={
+                        "normalizedQuery": rewrite_result.normalized_query,
+                        "subqueries": rewrite_result.subqueries,
+                        "appliedMappings": rewrite_result.applied_mappings,
+                        "intentResolution": intent,
+                    },
+                )
+
+        if intent_resolution.needs_guidance:
+            model_name, model_base_url, model_api_key = self.model_router.route(
+                "general", deep_thinking=False
+            )
+            return RAGResult(
+                question=ctx.question,
+                rewrite=rewritten,
+                intent=intent,
+                context_chunks=[],
+                sources=[],
+                duration_ms=int((time.time() - t0) * 1000),
+                trace_run_id=trace_id,
+                model_name=model_name,
+                model_base_url=model_base_url,
+                model_api_key=model_api_key,
+                subqueries=rewrite_result.subqueries,
+                response_mode="guidance",
+                direct_response=intent_resolution.guidance_prompt,
+            )
+        if intent_resolution.system_only:
+            model_name, model_base_url, model_api_key = self.model_router.route(
+                "general", deep_thinking=ctx.deep_thinking
+            )
+            return RAGResult(
+                question=ctx.question,
+                rewrite=rewritten,
+                intent=intent,
+                context_chunks=[],
+                sources=[],
+                duration_ms=int((time.time() - t0) * 1000),
+                trace_run_id=trace_id,
+                model_name=model_name,
+                model_base_url=model_base_url,
+                model_api_key=model_api_key,
+                subqueries=rewrite_result.subqueries,
+                response_mode="system",
+            )
 
         # 3. Resolve collection
+        primary_intent = intent_resolution.primary
         collection_name = (
             ctx.collection_name
+            or (primary_intent.collection_name if primary_intent else None)
             or (intent.get("collection_name") if intent else None)
             or "default_store"
         )
@@ -132,36 +217,36 @@ class RAGPipeline:
         search_question = rewritten or ctx.question
 
         # 4. Bounded decomposition + concurrent multi-channel search
-        subqueries = await decompose_query(
-            search_question, max_queries=budget.max_subqueries
-        )
+        subqueries = rewrite_result.subqueries
         if not subqueries:
             subqueries = [search_question]
         t_search = datetime.now(timezone.utc).replace(tzinfo=None)
 
         async def vector_search() -> list[SearchResult]:
-            output: list[SearchResult] = []
-            for query in subqueries:
-                output.extend(
-                    await self.milvus.search(
+            batches = await asyncio.gather(
+                *(
+                    self.milvus.search(
                         query,
                         collection_name,
                         top_k=budget.per_channel_top_k,
                     )
+                    for query in subqueries
                 )
-            return output
+            )
+            return [item for batch in batches for item in batch]
 
         async def keyword_search() -> list[SearchResult]:
-            output: list[SearchResult] = []
-            for query in subqueries:
-                output.extend(
-                    await self.es.search(
+            batches = await asyncio.gather(
+                *(
+                    self.es.search(
                         query,
                         ctx.kb_id or collection_name,
                         top_k=budget.per_channel_top_k,
                     )
+                    for query in subqueries
                 )
-            return output
+            )
+            return [item for batch in batches for item in batch]
 
         async def graph_search() -> list[SearchResult]:
             output: list[SearchResult] = []
@@ -209,16 +294,37 @@ class RAGPipeline:
                     )
             return output
 
-        channels = {"vector": vector_search}
-        if settings.es_enabled:
+        requested_channels = set(intent_resolution.search_channels)
+        if "bm25" in requested_channels:
+            requested_channels.add("keyword")
+        channels = {}
+        if not requested_channels or "vector" in requested_channels:
+            channels["vector"] = vector_search
+        if settings.es_enabled and (
+            not requested_channels or "keyword" in requested_channels
+        ):
             channels["keyword"] = keyword_search
         graph_enabled = (
             settings.graph_enabled if ctx.graph_rag is None else ctx.graph_rag
         )
-        if graph_enabled:
+        if graph_enabled and (
+            not requested_channels or "graph" in requested_channels
+        ):
             channels["graph"] = graph_search
+        guarded_channels = {}
+        for name, operation in channels.items():
+            breaker = self._channel_breakers[name]
+
+            async def guarded_call(op=operation, channel_breaker=breaker):
+                return await channel_breaker.call(op)
+
+            guarded_channels[name] = guarded_call
+        channels = guarded_channels
         channel_results, channel_statuses = await run_search_channels(channels, budget)
-        all_results = [items for items in channel_results.values() if items]
+        active_channel_names = [
+            name for name, items in channel_results.items() if items
+        ]
+        all_results = [channel_results[name] for name in active_channel_names]
 
         t_search_end = datetime.now(timezone.utc).replace(tzinfo=None)
         search_ms = int((t_search_end - t_search).total_seconds() * 1000)
@@ -246,15 +352,25 @@ class RAGPipeline:
 
         # 5. RRF fusion
         t_fuse = datetime.now(timezone.utc).replace(tzinfo=None)
-        if len(all_results) > 1:
+        if all_results:
             # Log pre-fusion per-channel top scores
             for i, channel_results in enumerate(all_results):
                 if channel_results:
                     top_scores = [f"{r.score:.4f}" for r in channel_results[:3]]
                     _pipeline_log.info("rrf_pre_fusion_channel", channel=i, count=len(channel_results), top_scores=top_scores)
-            merged = rrf_fusion(*all_results)
-        elif all_results:
-            merged = all_results[0]
+            weights = {}
+            for item in settings.retrieval_channel_weights.split(","):
+                name, _, value = item.partition(":")
+                if name.strip() and value.strip():
+                    try:
+                        weights[name.strip()] = float(value)
+                    except ValueError:
+                        continue
+            merged = rrf_fusion(
+                *all_results,
+                weights=weights,
+                channel_names=active_channel_names,
+            )
         else:
             merged = []
         t_fuse_end = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -337,6 +453,10 @@ class RAGPipeline:
                 "content": r.content,
                 "chunk_id": r.chunk_id,
                 "score": r.score,
+                "fusionScore": r.metadata.get("fusionScore"),
+                "rerankScore": r.metadata.get("rerank_score"),
+                "channelScores": r.metadata.get("channelScores", {}),
+                "matchedChannels": r.metadata.get("matchedChannels", []),
                 "blockType": r.block_type,
                 "pageStart": r.page_start,
                 "pageEnd": r.page_end,
@@ -351,6 +471,10 @@ class RAGPipeline:
                 "chunkIndex": r.chunk_index,
                 "content": r.content[:300],
                 "score": r.score,
+                "fusionScore": r.metadata.get("fusionScore"),
+                "rerankScore": r.metadata.get("rerank_score"),
+                "channelScores": r.metadata.get("channelScores", {}),
+                "matchedChannels": r.metadata.get("matchedChannels", []),
                 "blockType": r.block_type,
                 "pageStart": r.page_start,
                 "pageEnd": r.page_end,
@@ -380,6 +504,7 @@ class RAGPipeline:
                 name: status.__dict__ for name, status in channel_statuses.items()
             },
             subqueries=subqueries,
+            prompt_template=primary_intent.prompt_template if primary_intent else None,
         )
 
         return RAGResult(
@@ -565,7 +690,14 @@ class RAGPipeline:
                         r.page_start = page_start
                         r.page_end = page_end
                         r.bboxes = bbox_json or []
-                        r.metadata = metadata_json or {}
+                        # Keep request-scoped retrieval metadata (RRF attribution,
+                        # fusion score, etc.) while enriching it with persisted
+                        # chunk metadata. Retrieval values win if a stored key
+                        # happens to use the same name.
+                        r.metadata = {
+                            **(metadata_json or {}),
+                            **r.metadata,
+                        }
                         r.doc_name = doc_name or "unknown"
 
                 asset_ids = {

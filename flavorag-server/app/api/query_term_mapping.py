@@ -35,7 +35,10 @@ async def list_mappings(
     user: User = Depends(get_current_user),
 ):
     """List all query term mappings, optionally filtered by kb_id."""
-    q = select(QueryTermMapping).where(QueryTermMapping.deleted == 0)
+    q = select(QueryTermMapping).where(
+        QueryTermMapping.deleted == 0,
+        QueryTermMapping.tenant_id == (user.tenant_id or "default"),
+    )
     if kb_id:
         q = q.where(QueryTermMapping.kb_id == kb_id)
     q = q.order_by(QueryTermMapping.mapping_type, QueryTermMapping.source_term)
@@ -70,6 +73,7 @@ async def create_mapping(
             QueryTermMapping.source_term == req.source_term,
             QueryTermMapping.target_term == req.target_term,
             QueryTermMapping.kb_id == req.kb_id,
+            QueryTermMapping.tenant_id == (user.tenant_id or "default"),
             QueryTermMapping.deleted == 0,
         )
     )
@@ -78,6 +82,7 @@ async def create_mapping(
 
     mapping = QueryTermMapping(
         id=gen_id(),
+        tenant_id=user.tenant_id or "default",
         source_term=req.source_term,
         target_term=req.target_term,
         kb_id=req.kb_id,
@@ -100,6 +105,7 @@ async def update_mapping(
     result = await db.execute(
         select(QueryTermMapping).where(
             QueryTermMapping.id == mapping_id,
+            QueryTermMapping.tenant_id == (user.tenant_id or "default"),
             QueryTermMapping.deleted == 0,
         )
     )
@@ -130,6 +136,7 @@ async def delete_mapping(
     result = await db.execute(
         select(QueryTermMapping).where(
             QueryTermMapping.id == mapping_id,
+            QueryTermMapping.tenant_id == (user.tenant_id or "default"),
             QueryTermMapping.deleted == 0,
         )
     )

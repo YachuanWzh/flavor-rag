@@ -7,6 +7,7 @@ interface Props {
   isStreaming?: boolean;
   streamingMessageId?: string | null;
   onViewSources?: (sources: NonNullable<Message["sources"]>) => void;
+  onRecommendedQuestion?: (question: string) => void;
 }
 
 export default function MessageList({
@@ -14,6 +15,7 @@ export default function MessageList({
   isStreaming,
   streamingMessageId,
   onViewSources,
+  onRecommendedQuestion,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -29,6 +31,7 @@ export default function MessageList({
           message={msg}
           isStreaming={isStreaming && msg.id === streamingMessageId}
           onViewSources={onViewSources}
+          onRecommendedQuestion={onRecommendedQuestion}
         />
       ))}
       <div ref={bottomRef} />

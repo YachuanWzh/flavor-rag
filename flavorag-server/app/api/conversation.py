@@ -27,6 +27,7 @@ class MessageResponse(BaseModel):
     content: str
     thinkingContent: str | None = None
     sources: list | None = None
+    recommendedQuestions: list | None = None
     agentSteps: list | None = None
     ragModes: dict | None = None
     retrievalChannels: dict | None = None
@@ -140,6 +141,7 @@ def _message_payload(message: Message) -> dict:
         "content": message.content,
         "thinkingContent": message.thinking_content,
         "sources": message.sources,
+        "recommendedQuestions": message.recommended_questions,
         "agentSteps": message.agent_steps,
         "ragModes": message.rag_modes,
         "retrievalChannels": message.retrieval_channels,

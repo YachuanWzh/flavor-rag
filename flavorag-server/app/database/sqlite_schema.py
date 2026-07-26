@@ -24,9 +24,23 @@ _COMPATIBILITY_COLUMNS: dict[str, dict[str, str]] = {
         "summary_message_count": "INTEGER DEFAULT 0",
     },
     "t_message": {
+        "recommended_questions": "JSON",
         "agent_steps": "JSON",
         "rag_modes": "JSON",
         "retrieval_channels": "JSON",
+    },
+    "t_intent_node": {
+        "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+        "kind": "VARCHAR(16) NOT NULL DEFAULT 'KB'",
+        "score_threshold": "INTEGER DEFAULT 30",
+        "examples": "JSON",
+        "mcp_tool_id": "VARCHAR(128)",
+    },
+    "t_query_term_mapping": {
+        "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+    },
+    "t_sample_question": {
+        "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",
     },
     "t_knowledge_base": {
         "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",

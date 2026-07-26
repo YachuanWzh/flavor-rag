@@ -40,16 +40,22 @@ class ParserNode:
             parser_type = ctx.settings.get("parser_type", "native")
 
             ext = self._guess_extension(ctx.source_file_name)
-            structured = ext == "pdf" and parser_type != "tika"
+            structured = parser_type != "tika"
             if structured:
-                document = await self.structured_pdf_parser.parse_bytes(
-                    ctx.raw_content,
-                    source_file=ctx.source_file_name,
-                    document_id=ctx.doc_id,
-                )
+                if ext == "pdf":
+                    document = await self.structured_pdf_parser.parse_bytes(
+                        ctx.raw_content,
+                        source_file=ctx.source_file_name,
+                        document_id=ctx.doc_id,
+                    )
+                else:
+                    document = await self._parse_structured(ctx, ext)
                 ctx.parsed_document = document
                 ctx.assets = list(document.assets)
-                ctx.metadata["structured_pdf"] = document.metadata
+                ctx.metadata["structured_document"] = {
+                    "format": ext,
+                    **document.metadata,
+                }
                 text = document.to_markdown()
             elif parser_type == "tika":
                 text = await self._parse_tika(ctx)
@@ -72,7 +78,7 @@ class ParserNode:
                 output={
                     "text_length": len(text),
                     "structured": structured,
-                    "page_count": ctx.parsed_document.page_count if structured else None,
+                    "page_count": getattr(ctx.parsed_document, "page_count", None) if structured else None,
                     "table_count": sum(
                         getattr(block.block_type, "value", block.block_type) == "TABLE"
                         for block in ctx.parsed_document.blocks
@@ -102,6 +108,35 @@ class ParserNode:
             )
             resp.raise_for_status()
             return resp.text
+
+    async def _parse_structured(self, ctx: IngestionContext, ext: str):
+        from app.ingestion.structured import (
+            parse_csv_document,
+            parse_docx_document,
+            parse_html_document,
+            parse_image_document,
+            parse_pptx_document,
+            parse_text_document,
+            parse_xlsx_document,
+        )
+
+        content = ctx.raw_content or b""
+        name = ctx.source_file_name or f"document.{ext}"
+        if ext in ("txt", "md", "markdown", "log"):
+            return parse_text_document(self._decode_text(content), name, ext)
+        if ext == "csv":
+            return parse_csv_document(content, name)
+        if ext in ("docx", "doc"):
+            return parse_docx_document(content, name)
+        if ext in ("xlsx", "xls"):
+            return parse_xlsx_document(content, name)
+        if ext in ("pptx", "ppt"):
+            return parse_pptx_document(content, name)
+        if ext in ("html", "htm"):
+            return parse_html_document(content, name)
+        if ext in ("png", "jpg", "jpeg", "webp", "gif", "bmp"):
+            return await parse_image_document(content, name, ext)
+        return parse_text_document(self._decode_text(content), name, ext or "txt")
 
     def _parse_native(self, ctx: IngestionContext) -> str:
         """Native Python parsing fallback chain."""

@@ -29,6 +29,21 @@ class TestRrfFusion:
     def test_empty_list(self):
         assert rrf_fusion([]) == []
 
+    def test_weighted_channels_preserve_score_attribution(self):
+        vector = [make_result("shared", "same evidence", 0.91)]
+        keyword = [make_result("shared", "same evidence", 12.3)]
+        fused = rrf_fusion(
+            vector,
+            keyword,
+            weights={"vector": 1.0, "keyword": 2.0},
+            channel_names=["vector", "keyword"],
+        )
+
+        assert fused[0].metadata["matchedChannels"] == ["vector", "keyword"]
+        assert fused[0].metadata["channelScores"]["vector"]["rawScore"] == 0.91
+        assert fused[0].metadata["channelScores"]["keyword"]["weight"] == 2.0
+        assert fused[0].metadata["fusionScore"] == pytest.approx(fused[0].score)
+
 
 class TestDeduplicate:
     def test_no_dupes(self):

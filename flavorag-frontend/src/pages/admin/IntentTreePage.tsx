@@ -13,6 +13,10 @@ interface IntentNode {
   collectionName: string | null;
   searchChannels: string[] | null;
   promptTemplate: string | null;
+  kind: "KB" | "MCP" | "SYSTEM";
+  scoreThreshold: number;
+  examples: string[];
+  mcpToolId: string | null;
   sortOrder: number;
   enabled: number;
 }
@@ -25,6 +29,11 @@ const emptyForm = {
   description: "",
   collection_name: "",
   prompt_template: "",
+  kind: "KB",
+  score_threshold: 0.3,
+  examples_text: "",
+  mcp_tool_id: "",
+  search_channels_text: "vector,keyword",
   sort_order: 0,
 };
 
@@ -50,9 +59,17 @@ export default function IntentTreePage() {
     if (!form.intent_code.trim() || !form.name.trim()) return;
     try {
       if (editingId) {
-        await api.put(`/api/admin/intent-tree/${editingId}`, form);
+        await api.put(`/api/admin/intent-tree/${editingId}`, {
+          ...form,
+          examples: form.examples_text.split("\n").map(item => item.trim()).filter(Boolean),
+          search_channels: form.search_channels_text.split(",").map(item => item.trim()).filter(Boolean),
+        });
       } else {
-        await api.post("/api/admin/intent-tree", form);
+        await api.post("/api/admin/intent-tree", {
+          ...form,
+          examples: form.examples_text.split("\n").map(item => item.trim()).filter(Boolean),
+          search_channels: form.search_channels_text.split(",").map(item => item.trim()).filter(Boolean),
+        });
       }
       setShowForm(false);
       setEditingId(null);
@@ -76,6 +93,11 @@ export default function IntentTreePage() {
       description: n.description || "",
       collection_name: n.collectionName || "",
       prompt_template: n.promptTemplate || "",
+      kind: n.kind || "KB",
+      score_threshold: n.scoreThreshold ?? 0.3,
+      examples_text: (n.examples || []).join("\n"),
+      mcp_tool_id: n.mcpToolId || "",
+      search_channels_text: (n.searchChannels || ["vector", "keyword"]).join(","),
       sort_order: n.sortOrder,
     });
     setEditingId(n.id);
@@ -135,6 +157,23 @@ export default function IntentTreePage() {
                     className="w-full border rounded px-2 py-1.5 text-sm" />
                 </div>
               </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-gray-500">路由类型</label>
+                  <select value={form.kind} onChange={e => setForm({...form, kind: e.target.value})}
+                    className="w-full border rounded px-2 py-1.5 text-sm">
+                    <option value="KB">知识库</option>
+                    <option value="MCP">MCP 工具</option>
+                    <option value="SYSTEM">系统对话</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500">最低置信度</label>
+                  <input type="number" min={0} max={1} step={0.05} value={form.score_threshold}
+                    onChange={e => setForm({...form, score_threshold: +e.target.value})}
+                    className="w-full border rounded px-2 py-1.5 text-sm" />
+                </div>
+              </div>
               <div>
                 <label className="text-xs text-gray-500">父意图编码</label>
                 <input value={form.parent_intent_code} onChange={e => setForm({...form, parent_intent_code: e.target.value})}
@@ -149,6 +188,26 @@ export default function IntentTreePage() {
                 <label className="text-xs text-gray-500">Collection名称</label>
                 <input value={form.collection_name} onChange={e => setForm({...form, collection_name: e.target.value})}
                   className="w-full border rounded px-2 py-1.5 text-sm" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500">检索通道</label>
+                <input value={form.search_channels_text}
+                  onChange={e => setForm({...form, search_channels_text: e.target.value})}
+                  placeholder="vector,keyword,graph" className="w-full border rounded px-2 py-1.5 text-sm" />
+              </div>
+              {form.kind === "MCP" && (
+                <div>
+                  <label className="text-xs text-gray-500">MCP Tool ID</label>
+                  <input value={form.mcp_tool_id}
+                    onChange={e => setForm({...form, mcp_tool_id: e.target.value})}
+                    className="w-full border rounded px-2 py-1.5 text-sm" />
+                </div>
+              )}
+              <div>
+                <label className="text-xs text-gray-500">示例问题（每行一条）</label>
+                <textarea value={form.examples_text}
+                  onChange={e => setForm({...form, examples_text: e.target.value})}
+                  rows={3} className="w-full border rounded px-2 py-1.5 text-sm" />
               </div>
               <div>
                 <label className="text-xs text-gray-500">Prompt模板</label>
@@ -173,6 +232,7 @@ export default function IntentTreePage() {
             <tr>
               <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500">意图编码</th>
               <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500">名称</th>
+              <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500">路由</th>
               <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500">父节点</th>
               <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500">Collection</th>
               <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500">状态</th>
@@ -183,11 +243,16 @@ export default function IntentTreePage() {
             {nodes.map(n => (
               <tr key={n.id} className="border-b last:border-0 hover:bg-gray-50">
                 <td className="py-2.5 px-4">
-                  <span className={`${n.level > 1 ? "ml-" + (n.level * 3) : ""} font-mono text-xs`}>
+                  <span className="font-mono text-xs" style={{ paddingLeft: `${Math.max(0, n.level - 1) * 14}px` }}>
                     {n.level > 1 ? "└ " : ""}{n.intentCode}
                   </span>
                 </td>
                 <td className="py-2.5 px-4">{n.name}</td>
+                <td className="py-2.5 px-4">
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                    {n.kind || "KB"} · {Math.round((n.scoreThreshold ?? 0.3) * 100)}%
+                  </span>
+                </td>
                 <td className="py-2.5 px-4 text-gray-500">{n.parentIntentCode || "—"}</td>
                 <td className="py-2.5 px-4 text-gray-500 text-xs">{n.collectionName || "—"}</td>
                 <td className="py-2.5 px-4">
@@ -204,7 +269,7 @@ export default function IntentTreePage() {
               </tr>
             ))}
             {nodes.length === 0 && (
-              <tr><td colSpan={6} className="py-8 text-center text-gray-400">暂无意图节点</td></tr>
+              <tr><td colSpan={7} className="py-8 text-center text-gray-400">暂无意图节点</td></tr>
             )}
           </tbody>
         </table>

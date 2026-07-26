@@ -151,3 +151,55 @@ class TestRAGPipeline:
         filtered = await pipeline._filter_unavailable_chunks(results)
 
         assert [item.chunk_id for item in filtered] == ["enabled-id"]
+
+    @pytest.mark.asyncio
+    async def test_metadata_resolution_preserves_retrieval_scores(self, monkeypatch):
+        import app.rag.pipeline as pipeline_module
+
+        class FakeSession:
+            async def execute(self, _statement):
+                return [
+                    (
+                        "content-hash",
+                        "chunk-1",
+                        9,
+                        "doc-1",
+                        "TEXT",
+                        None,
+                        None,
+                        [],
+                        {"section": "overview"},
+                        "guide.md",
+                    )
+                ]
+
+        class FakeSessionContext:
+            async def __aenter__(self):
+                return FakeSession()
+
+            async def __aexit__(self, _exc_type, _exc, _traceback):
+                return False
+
+        monkeypatch.setattr(
+            pipeline_module,
+            "async_session_factory",
+            lambda: FakeSessionContext(),
+        )
+        result = SearchResult(
+            chunk_id="chunk-1",
+            content="retrieved evidence",
+            score=0.016,
+            metadata={
+                "fusionScore": 0.016,
+                "matchedChannels": ["vector"],
+                "channelScores": {"vector": {"rank": 1}},
+            },
+        )
+
+        pipeline = RAGPipeline.__new__(RAGPipeline)
+        await pipeline._resolve_metadata([result], kb_id="kb-1")
+
+        assert result.metadata["section"] == "overview"
+        assert result.metadata["fusionScore"] == 0.016
+        assert result.metadata["matchedChannels"] == ["vector"]
+        assert result.metadata["channelScores"]["vector"]["rank"] == 1

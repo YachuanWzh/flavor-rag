@@ -189,6 +189,7 @@ class IntentNode(Base, TimestampMixin):
     __tablename__ = "t_intent_node"
 
     id = Column(String(20), primary_key=True, default=gen_id)
+    tenant_id = Column(String(64), nullable=False, default="default")
     kb_id = Column(String(20))
     intent_code = Column(String(64), nullable=False)
     name = Column(String(64), nullable=False)
@@ -198,6 +199,10 @@ class IntentNode(Base, TimestampMixin):
     collection_name = Column(String(64))
     search_channels = Column(JSON)
     prompt_template = Column(Text)
+    kind = Column(String(16), nullable=False, default="KB")
+    score_threshold = Column(Integer, default=30)
+    examples = Column(JSON)
+    mcp_tool_id = Column(String(128))
     sort_order = Column(Integer, default=0)
     enabled = Column(SmallInteger, default=1)
 
@@ -206,6 +211,7 @@ class QueryTermMapping(Base, TimestampMixin):
     __tablename__ = "t_query_term_mapping"
 
     id = Column(String(20), primary_key=True, default=gen_id)
+    tenant_id = Column(String(64), nullable=False, default="default")
     kb_id = Column(String(20))
     source_term = Column(String(128), nullable=False)
     target_term = Column(String(128), nullable=False)
@@ -217,6 +223,7 @@ class SampleQuestion(Base, TimestampMixin):
     __tablename__ = "t_sample_question"
 
     id = Column(String(20), primary_key=True, default=gen_id)
+    tenant_id = Column(String(64), nullable=False, default="default")
     kb_id = Column(String(20))
     question = Column(String(512), nullable=False)
     sort_order = Column(Integer, default=0)

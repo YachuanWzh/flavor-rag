@@ -33,9 +33,16 @@ class ChunkerNode:
 
             if ctx.parsed_document is not None:
                 from app.ingestion.pdf.chunker import StructuredPdfChunker
+                from app.ingestion.pdf.models import StructuredPdfDocument
+                from app.ingestion.structured import GenericStructuredChunker
                 from app.config.settings import settings as app_settings
 
-                chunker = StructuredPdfChunker(
+                chunker_class = (
+                    StructuredPdfChunker
+                    if isinstance(ctx.parsed_document, StructuredPdfDocument)
+                    else GenericStructuredChunker
+                )
+                chunker = chunker_class(
                     target_chars=int(ctx.settings.get("chunk_size", 800)),
                     table_max_rows=int(
                         ctx.settings.get("table_max_rows", app_settings.pdf_table_max_rows)

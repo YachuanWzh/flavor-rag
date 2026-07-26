@@ -69,7 +69,7 @@ class Settings(BaseSettings):
 
     # Reranker
     reranker_base_url: str = "https://api.siliconflow.cn/v1"
-    reranker_model: str = "Qwen/Qwen3-Reranker"
+    reranker_model: str = "Qwen/Qwen3-Reranker-8B"
     reranker_enabled: bool = True
     reranker_timeout_sec: float = 15.0
 
@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     retrieval_min_relevance_score: float = 0.01
     query_decomposition_enabled: bool = True
     query_decomposition_max_queries: int = 3
+    retrieval_channel_weights: str = "vector:1.0,keyword:1.0,graph:0.65"
     circuit_breaker_failures: int = 3
     circuit_breaker_recovery_sec: int = 30
 
@@ -108,6 +109,10 @@ class Settings(BaseSettings):
 
     # 意图识别
     intent_llm_enabled: bool = True  # 是否启用 LLM 意图分类
+    intent_min_score: float = 0.3
+    intent_max_matches: int = 5
+    intent_guidance_min_score: float = 0.55
+    intent_guidance_score_gap: float = 0.08
 
     # 限流
     rate_limit_enabled: bool = False
@@ -123,6 +128,8 @@ class Settings(BaseSettings):
     # Conversation and controlled agent
     conversation_summary_trigger_messages: int = 16
     conversation_summary_keep_recent_messages: int = 8
+    recommended_questions_enabled: bool = True
+    recommended_questions_count: int = 3
     agentic_rag_enabled: bool = False
     agent_max_steps: int = 4
     agent_tool_timeout_sec: int = 10

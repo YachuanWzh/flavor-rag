@@ -7,6 +7,8 @@ from app.rag.search.base import SearchResult
 def rrf_fusion(
     *result_lists: list[SearchResult],
     k: int = 60,
+    weights: dict[str, float] | None = None,
+    channel_names: list[str] | None = None,
 ) -> list[SearchResult]:
     """Fuse multiple ranked result lists using Reciprocal Rank Fusion.
 
@@ -23,24 +25,43 @@ def rrf_fusion(
     if not result_lists:
         return []
 
-    scores: dict[str, tuple[float, SearchResult]] = {}
+    scores: dict[str, dict] = {}
 
-    for result_list in result_lists:
+    for channel_index, result_list in enumerate(result_lists):
+        channel = (
+            channel_names[channel_index]
+            if channel_names and channel_index < len(channel_names)
+            else f"channel_{channel_index + 1}"
+        )
+        weight = max(0.0, float((weights or {}).get(channel, 1.0)))
         for rank, result in enumerate(result_list):
-            rrf_score = 1.0 / (k + rank + 1)
+            contribution = weight / (k + rank + 1)
             key = result.chunk_id or result.content  # fallback key
             if key in scores:
-                prev_score, prev_result = scores[key]
-                scores[key] = (
-                    prev_score + rrf_score,
-                    prev_result if prev_result.score >= result.score else result,
-                )
+                scores[key]["score"] += contribution
             else:
-                scores[key] = (rrf_score, result)
+                scores[key] = {
+                    "score": contribution,
+                    "result": result,
+                    "channels": {},
+                }
+            scores[key]["channels"][channel] = {
+                "rank": rank + 1,
+                "rawScore": float(result.score),
+                "weight": weight,
+                "rrfContribution": contribution,
+            }
 
-    # Sort by descending RRF score
-    fused = sorted(scores.values(), key=lambda x: x[0], reverse=True)
-    return [sr for _, sr in fused]
+    fused = sorted(scores.values(), key=lambda item: item["score"], reverse=True)
+    output: list[SearchResult] = []
+    for item in fused:
+        result = item["result"]
+        result.metadata["channelScores"] = item["channels"]
+        result.metadata["matchedChannels"] = list(item["channels"])
+        result.metadata["fusionScore"] = item["score"]
+        result.score = item["score"]
+        output.append(result)
+    return output
 
 
 def deduplicate(
@@ -72,5 +93,19 @@ def deduplicate(
         if not is_dup:
             deduped.append(result)
             seen_ngrams.append(grams)
+            continue
+        # Near duplicates still contribute useful channel attribution.
+        target = next(
+            (
+                item
+                for item in deduped
+                if _jaccard(grams, _ngrams(item.content)) >= content_threshold
+            ),
+            None,
+        )
+        if target is not None:
+            existing = target.metadata.setdefault("channelScores", {})
+            existing.update(result.metadata.get("channelScores", {}))
+            target.metadata["matchedChannels"] = list(existing)
 
     return deduped

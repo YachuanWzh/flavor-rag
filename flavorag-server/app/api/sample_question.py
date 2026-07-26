@@ -33,7 +33,10 @@ async def list_questions(
     user: User = Depends(get_current_user),
 ):
     """List all sample questions, optionally filtered by kb_id."""
-    q = select(SampleQuestion).where(SampleQuestion.deleted == 0)
+    q = select(SampleQuestion).where(
+        SampleQuestion.deleted == 0,
+        SampleQuestion.tenant_id == (user.tenant_id or "default"),
+    )
     if kb_id:
         q = q.where(SampleQuestion.kb_id == kb_id)
     q = q.order_by(SampleQuestion.sort_order, SampleQuestion.create_time)
@@ -63,6 +66,7 @@ async def create_question(
     """Create a new sample question."""
     sq = SampleQuestion(
         id=gen_id(),
+        tenant_id=user.tenant_id or "default",
         question=req.question,
         kb_id=req.kb_id,
         sort_order=req.sort_order,
@@ -84,6 +88,7 @@ async def update_question(
     result = await db.execute(
         select(SampleQuestion).where(
             SampleQuestion.id == question_id,
+            SampleQuestion.tenant_id == (user.tenant_id or "default"),
             SampleQuestion.deleted == 0,
         )
     )
@@ -112,6 +117,7 @@ async def delete_question(
     result = await db.execute(
         select(SampleQuestion).where(
             SampleQuestion.id == question_id,
+            SampleQuestion.tenant_id == (user.tenant_id or "default"),
             SampleQuestion.deleted == 0,
         )
     )

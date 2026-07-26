@@ -19,6 +19,7 @@ from app.rag.rate_limiter import RateLimiter
 from app.llm.client import get_llm_client
 from app.services.chat_service import ChatService
 from app.config.settings import settings
+from app.rag.recommendations import recommend_questions
 from app.security.access import Permission
 from app.security.service import (
     kb_access_predicate,
@@ -164,6 +165,7 @@ async def chat(
                         "graphRag": effective_graph_rag,
                     },
                     "channels": rag_result.channel_statuses,
+                    "queryUnderstanding": rag_result.intent,
                 }
             )
             yield f"event: meta\ndata: {meta}\n\n"
@@ -173,6 +175,55 @@ async def chat(
                     + json.dumps({"steps": agent_steps}, ensure_ascii=False)
                     + "\n\n"
                 )
+
+            if rag_result.response_mode == "guidance":
+                guidance = rag_result.direct_response or "请补充你想查询的知识范围。"
+                yield (
+                    "event: message\ndata: "
+                    + json.dumps({"type": "response", "delta": guidance}, ensure_ascii=False)
+                    + "\n\n"
+                )
+                assistant_msg_id = await chat_service.save_message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=guidance,
+                    sources=[],
+                    rag_modes={
+                        "agenticRag": effective_agentic_rag,
+                        "graphRag": effective_graph_rag,
+                    },
+                    retrieval_channels=rag_result.channel_statuses,
+                )
+                await trace.finalize(
+                    trace_run_id=trace_id,
+                    search_duration_ms=rag_result.duration_ms,
+                    total_duration_ms=int((time.time() - t_total_start) * 1000),
+                    recall_count=0,
+                    final_count=0,
+                    model_name=rag_result.model_name or "",
+                    status="guidance",
+                    metadata={"queryUnderstanding": rag_result.intent},
+                )
+                await db.flush()
+                yield (
+                    "event: finish\ndata: "
+                    + json.dumps(
+                        {
+                            "messageId": assistant_msg_id,
+                            "sources": [],
+                            "recommendedQuestions": [],
+                            "modes": {
+                                "agenticRag": effective_agentic_rag,
+                                "graphRag": effective_graph_rag,
+                            },
+                            "channels": rag_result.channel_statuses,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
+                yield "event: done\ndata: {}\n\n"
+                return
 
             if not rag_result.answerable:
                 refusal = "当前授权范围内没有找到足够可靠的资料，暂时无法回答该问题。"
@@ -228,11 +279,30 @@ async def chat(
             context_text = "\n\n---\n\n".join(
                 f"[来源 {i + 1}] {c['content']}" for i, c in enumerate(rag_result.context_chunks)
             )
-            system_prompt = (
-                "你是一个智能助手，请根据以下参考资料回答用户问题。"
-                "如果参考资料不足以回答问题，请如实告知。\n\n"
-                f"参考资料：\n{context_text}"
-            )
+            if rag_result.response_mode == "system":
+                system_prompt = "你是一个简洁、友好的企业智能助手。直接回应用户，不要声称检索了资料。"
+            else:
+                custom_prompt = (rag_result.prompt_template or "").strip()
+                if custom_prompt:
+                    rendered_prompt = custom_prompt
+                    rendered_prompt = rendered_prompt.replace("{{context}}", context_text)
+                    rendered_prompt = rendered_prompt.replace("{context}", context_text)
+                    rendered_prompt = rendered_prompt.replace("{{question}}", question)
+                    rendered_prompt = rendered_prompt.replace("{question}", question)
+                    if "{{context}}" not in custom_prompt and "{context}" not in custom_prompt:
+                        rendered_prompt += f"\n\n参考资料：\n{context_text}"
+                    system_prompt = (
+                        f"{rendered_prompt}\n\n"
+                        "请仅依据参考资料作答，关键事实用 [1]、[2] 标注来源；"
+                        "资料不足时明确说明。"
+                    )
+                else:
+                    system_prompt = (
+                        "你是一个智能助手，请严格根据以下参考资料回答用户问题。"
+                        "答案中的关键事实使用 [1]、[2] 形式标注对应来源；"
+                        "如果参考资料不足，请明确说明。\n\n"
+                        f"参考资料：\n{context_text}"
+                    )
             messages = [{"role": "system", "content": system_prompt}]
             for h in history[-16:]:
                 messages.append({"role": h["role"], "content": h["content"]})
@@ -263,11 +333,19 @@ async def chat(
             llm_duration = int((time.time() - t_llm_start) * 1000)
 
             # 9. Save assistant message
+            recommended_questions = await recommend_questions(
+                db,
+                question=question,
+                kb_id=resolved_kb_id,
+                tenant_id=user.tenant_id or "default",
+                sources=rag_result.sources,
+            )
             assistant_msg_id = await chat_service.save_message(
                 conversation_id=conversation_id,
                 role="assistant", content=full_content,
                 thinking_content=thinking_content or None,
                 sources=rag_result.sources,
+                recommended_questions=recommended_questions,
                 agent_steps=agent_steps,
                 rag_modes={
                     "agenticRag": effective_agentic_rag,
@@ -300,6 +378,7 @@ async def chat(
                 {
                     "messageId": assistant_msg_id,
                     "sources": rag_result.sources,
+                    "recommendedQuestions": recommended_questions,
                     "modes": {
                         "agenticRag": effective_agentic_rag,
                         "graphRag": effective_graph_rag,

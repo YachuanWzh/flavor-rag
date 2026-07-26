@@ -3,27 +3,35 @@ import type { Message } from "@/types";
 import MarkdownRenderer from "./MarkdownRenderer";
 import ThinkingIndicator from "./ThinkingIndicator";
 import { submitFeedback } from "@/services/feedbackService";
-import { Network, Orbit } from "lucide-react";
+import { ArrowUpRight, Network, Orbit } from "lucide-react";
 
 interface Props {
   message: Message;
   isStreaming?: boolean;
   onViewSources?: (sources: NonNullable<Message["sources"]>) => void;
+  onRecommendedQuestion?: (question: string) => void;
 }
 
-export default function MessageItem({ message, isStreaming, onViewSources }: Props) {
+export default function MessageItem({
+  message,
+  isStreaming,
+  onViewSources,
+  onRecommendedQuestion,
+}: Props) {
   const isUser = message.role === "user";
   const [feedbackVote, setFeedbackVote] = useState<number>(0); // 0=none, 1=up, -1=down
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [showFeedbackReasons, setShowFeedbackReasons] = useState(false);
 
-  const handleFeedback = useCallback(async (vote: number) => {
+  const handleFeedback = useCallback(async (vote: number, reason?: string) => {
     if (feedbackSubmitting || !message.id || message.id.startsWith("asst_")) return;
     try {
       setFeedbackSubmitting(true);
       // Toggle if same vote
       const newVote = feedbackVote === vote ? 0 : vote;
-      await submitFeedback({ message_id: message.id, vote: newVote });
+      await submitFeedback({ message_id: message.id, vote: newVote, reason });
       setFeedbackVote(newVote);
+      setShowFeedbackReasons(false);
     } catch {
       // Silently fail for feedback
     } finally {
@@ -57,6 +65,8 @@ export default function MessageItem({ message, isStreaming, onViewSources }: Pro
           <MarkdownRenderer
             content={message.content}
             isStreaming={isStreaming}
+            sourceCount={message.sources?.length || 0}
+            onSourceClick={() => message.sources && onViewSources?.(message.sources)}
           />
         )}
 
@@ -107,6 +117,27 @@ export default function MessageItem({ message, isStreaming, onViewSources }: Pro
           </div>
         )}
 
+        {!isUser && !isStreaming && !!message.recommendedQuestions?.length && (
+          <div className="mt-3 space-y-1.5 border-t border-slate-200/70 pt-3">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+              接着了解
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {message.recommendedQuestions.map((question) => (
+                <button
+                  key={question}
+                  type="button"
+                  onClick={() => onRecommendedQuestion?.(question)}
+                  className="group inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-left text-xs text-slate-600 shadow-sm transition hover:border-cyan-300 hover:text-cyan-800"
+                >
+                  {question}
+                  <ArrowUpRight className="h-3 w-3 opacity-40 transition group-hover:opacity-100" />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Feedback buttons (only for assistant messages) */}
         {!isUser && !isStreaming && message.content && (
           <div className="mt-2 flex items-center gap-1">
@@ -125,7 +156,7 @@ export default function MessageItem({ message, isStreaming, onViewSources }: Pro
               </svg>
             </button>
             <button
-              onClick={() => handleFeedback(-1)}
+              onClick={() => setShowFeedbackReasons((value) => !value)}
               disabled={feedbackSubmitting}
               title="回答不够好"
               className={`p-1 rounded transition-colors ${
@@ -138,6 +169,20 @@ export default function MessageItem({ message, isStreaming, onViewSources }: Pro
                 <path strokeLinecap="round" strokeLinejoin="round" d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5" />
               </svg>
             </button>
+            {showFeedbackReasons && (
+              <div className="ml-1 flex flex-wrap gap-1">
+                {["检索不相关", "答案不准确", "引用不足", "表达不清"].map((reason) => (
+                  <button
+                    key={reason}
+                    type="button"
+                    onClick={() => handleFeedback(-1, reason)}
+                    className="rounded-full border border-rose-200 bg-white px-2 py-1 text-[10px] text-rose-700 hover:bg-rose-50"
+                  >
+                    {reason}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
 

@@ -79,6 +79,31 @@ class TraceLogger:
         await self.db.flush()
         return node.id
 
+    async def update_understanding(
+        self,
+        trace_run_id: str,
+        *,
+        rewrite_query: str | None,
+        intent: str | None,
+        metadata: dict | None = None,
+    ) -> None:
+        """Persist structured query-understanding output on the parent trace."""
+        from sqlalchemy import select
+
+        if not trace_run_id:
+            return
+        result = await self.db.execute(
+            select(RagTraceRun).where(RagTraceRun.id == trace_run_id)
+        )
+        run = result.scalar_one_or_none()
+        if not run:
+            return
+        run.rewrite_query = rewrite_query
+        run.intent = intent
+        if metadata:
+            run.metadata_json = {**(run.metadata_json or {}), **metadata}
+        await self.db.flush()
+
     async def finalize(
         self,
         trace_run_id: str,

@@ -18,6 +18,7 @@ export interface StreamHandlers {
   onFinish?: (payload: {
     messageId: string;
     sources?: SourceRef[];
+    recommendedQuestions?: string[];
     modes?: RagModes;
     channels?: Record<string, RetrievalChannelStatus>;
   }) => void;

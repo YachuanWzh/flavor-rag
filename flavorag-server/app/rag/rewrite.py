@@ -1,90 +1,209 @@
-"""Query rewriting — lightweight prompt-based rewriter with optional LLM enhancement."""
+"""Query normalization, conversational rewriting, and bounded decomposition."""
 
 from __future__ import annotations
 
-from app.config.settings import settings
+import json
+import re
+from dataclasses import dataclass, field
+
+from sqlalchemy import or_, select
+
 from app.config.logging_config import get_logger
+from app.config.settings import settings
+from app.database.session import async_session_factory
+from app.models import QueryTermMapping
 
 _rewrite_log = get_logger("flavorag.rag.rewrite")
 
 
-async def rewrite_query(question: str, history: list[dict] | None = None) -> str | None:
-    """Rewrite user query for better retrieval.
+@dataclass(frozen=True)
+class RewriteResult:
+    original_query: str
+    normalized_query: str
+    rewritten_query: str
+    subqueries: list[str] = field(default_factory=list)
+    applied_mappings: list[dict] = field(default_factory=list)
 
-    When ``settings.rewrite_enabled`` is True and an LLM API key is configured,
-    uses LLM-based rewriting (context-aware). Otherwise falls back to basic
-    text normalisation.
 
-    Args:
-        question: Raw user question.
-        history: Recent conversation history for context.
+def _split_compound_query(question: str, limit: int) -> list[str]:
+    """Split only explicit compound questions and keep the result bounded."""
+    parts = [
+        item.strip(" ,，;；?？。")
+        for item in re.split(
+            r"(?:[?？；;\n]+|另外|以及|并且|同时|然后|再问|还有)",
+            question,
+        )
+        if item.strip(" ,，;；?？。")
+    ]
+    if len(parts) <= 1:
+        return [question] if question else []
+    return parts[: max(1, limit)]
 
-    Returns:
-        Rewritten query string, or None if no rewrite needed.
-    """
-    if not question:
-        return None
 
-    # Try LLM rewrite when enabled and API key is available
+async def load_term_mappings(
+    *,
+    kb_id: str | None,
+    tenant_id: str,
+) -> list[dict]:
+    """Load global and KB-local active mappings, preferring longer terms."""
+    try:
+        async with async_session_factory() as session:
+            rows = await session.execute(
+                select(QueryTermMapping).where(
+                    QueryTermMapping.deleted == 0,
+                    QueryTermMapping.enabled == 1,
+                    QueryTermMapping.tenant_id == tenant_id,
+                    or_(
+                        QueryTermMapping.kb_id.is_(None),
+                        QueryTermMapping.kb_id == "",
+                        *(
+                            [QueryTermMapping.kb_id == kb_id]
+                            if kb_id
+                            else []
+                        ),
+                    ),
+                )
+            )
+            mappings = [
+                {
+                    "source": row.source_term.strip(),
+                    "target": row.target_term.strip(),
+                    "type": (row.mapping_type or "EXACT").upper(),
+                }
+                for row in rows.scalars().all()
+                if row.source_term and row.target_term
+            ]
+            return sorted(mappings, key=lambda item: len(item["source"]), reverse=True)
+    except Exception as exc:
+        # A stale database migration must not make chat unavailable.
+        _rewrite_log.warning("term_mapping_load_failed", error=type(exc).__name__)
+        return []
+
+
+def normalize_query(question: str, mappings: list[dict]) -> tuple[str, list[dict]]:
+    normalized = " ".join((question or "").split()).strip()
+    applied: list[dict] = []
+    for mapping in mappings:
+        source = mapping["source"]
+        target = mapping["target"]
+        if not source or not target or target in normalized:
+            continue
+        flags = re.IGNORECASE if source.isascii() else 0
+        pattern = re.escape(source)
+        replaced, count = re.subn(pattern, target, normalized, flags=flags)
+        if count:
+            normalized = replaced
+            applied.append({**mapping, "count": count})
+    return normalized, applied
+
+
+async def rewrite_query_result(
+    question: str,
+    history: list[dict] | None = None,
+    *,
+    kb_id: str | None = None,
+    tenant_id: str = "default",
+    max_queries: int | None = None,
+) -> RewriteResult:
+    limit = max(1, max_queries or settings.query_decomposition_max_queries)
+    mappings = await load_term_mappings(kb_id=kb_id, tenant_id=tenant_id)
+    normalized, applied = normalize_query(question, mappings)
+    if not normalized:
+        return RewriteResult(question, "", "", [], applied)
+
+    rewritten = normalized
+    subqueries = _split_compound_query(normalized, limit)
     if settings.rewrite_enabled:
         key = settings.bailian_api_key or settings.siliconflow_api_key
         if key:
             try:
-                result = await rewrite_query_with_llm(question, history)
-                if result:
-                    _rewrite_log.info("llm_rewrite", original=question[:60], rewritten=result[:60])
-                    return result
+                llm_result = await rewrite_query_with_llm(
+                    normalized,
+                    history,
+                    max_queries=limit,
+                )
+                if llm_result:
+                    rewritten, llm_subqueries = llm_result
+                    subqueries = llm_subqueries or [rewritten]
             except Exception as exc:
-                _rewrite_log.warning("llm_rewrite_failed_fallback", error=str(exc))
+                _rewrite_log.warning(
+                    "llm_rewrite_failed_fallback",
+                    error=type(exc).__name__,
+                )
 
-    # Fallback: basic normalisation
-    cleaned = " ".join(question.split())
-    return cleaned if cleaned != question else None
+    return RewriteResult(
+        original_query=question,
+        normalized_query=normalized,
+        rewritten_query=rewritten or normalized,
+        subqueries=(subqueries or [rewritten or normalized])[:limit],
+        applied_mappings=applied,
+    )
+
+
+async def rewrite_query(
+    question: str,
+    history: list[dict] | None = None,
+) -> str | None:
+    """Backward-compatible single-string rewrite entry point."""
+    result = await rewrite_query_result(question, history)
+    if not result.rewritten_query:
+        return None
+    return (
+        result.rewritten_query
+        if result.rewritten_query != question
+        else None
+    )
 
 
 async def rewrite_query_with_llm(
     question: str,
     history: list[dict] | None = None,
-) -> str | None:
-    """Full LLM-based query rewrite. Requires configured LLM client.
-
-    Expands user queries by:
-    - Resolving pronouns & implicit references from history
-    - Adding synonyms & domain terminology
-    - Converting colloquial expressions to formal search queries
-    """
-    from app.llm.client import get_llm_client, MockLLMClient
+    *,
+    max_queries: int = 3,
+) -> tuple[str, list[str]] | None:
+    """Return a structured rewrite and atomic subqueries from the configured LLM."""
+    from app.llm.client import MockLLMClient, get_llm_client
 
     client = get_llm_client()
     if isinstance(client, MockLLMClient):
         return None
 
-    history_context = ""
-    if history:
-        recent = history[-6:]
-        history_context = "\n".join(
-            f"{h['role']}: {h['content'][:200]}" for h in recent if h.get("content")
-        )
-
+    recent = [
+        item
+        for item in (history or [])[-6:]
+        if item.get("content") and item.get("role") in {"user", "assistant", "system"}
+    ]
+    history_context = "\n".join(
+        f"{item['role']}: {str(item['content'])[:300]}" for item in recent
+    )
     prompt = [
         {
             "role": "system",
             "content": (
-                "你是一个查询重写助手。将用户的模糊问题改写为更精确、更适合检索的查询语句。"
-                "遵循以下规则：\n"
-                "1. 将口语化表达转为书面语（如'怎么弄'→'如何操作'）\n"
-                "2. 补充可能的同义词和相关术语（如'报销'可补充'费用申请、财务审批'）\n"
-                "3. 根据对话历史补全省略的上下文（如'那个呢'→补全具体指代）\n"
-                "4. 保留原意，不要添加无关信息\n"
-                "只返回改写后的问题，不要加任何解释。"
+                "你负责把对话问题改写成可检索查询。消解指代、补全省略、"
+                "把口语转成书面语，但不得添加用户没有表达的事实。"
+                f"复合问题最多拆成 {max_queries} 个原子问题。"
+                '只返回 JSON：{"rewrite":"...","sub_queries":["..."]}'
             ),
         },
-        {"role": "user", "content": f"对话历史:\n{history_context}\n\n问题: {question}\n\n改写:"},
+        {
+            "role": "user",
+            "content": f"最近对话：\n{history_context}\n\n当前问题：{question}",
+        },
     ]
-
-    rewritten_parts: list[str] = []
-    async for token in client.chat_stream(prompt, temperature=0.3):
-        rewritten_parts.append(token)
-
-    result = "".join(rewritten_parts).strip()
-    return result if result and result != question else None
+    tokens: list[str] = []
+    async for token in client.chat_stream(prompt, temperature=0.1):
+        if not token.startswith("__THINK__"):
+            tokens.append(token)
+    raw = "".join(tokens).strip()
+    fenced = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not fenced:
+        return None
+    payload = json.loads(fenced.group(0))
+    rewritten = str(payload.get("rewrite") or question).strip()
+    subqueries = [
+        str(item).strip()
+        for item in payload.get("sub_queries", [])
+        if str(item).strip()
+    ][:max_queries]
+    return rewritten, subqueries or [rewritten]

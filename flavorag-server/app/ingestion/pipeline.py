@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 
 from sqlalchemy import select
@@ -53,7 +54,7 @@ class IngestionPipeline:
         parsed = await self.parser.parse_document(
             file_path,
             document_id=doc_id,
-            source_file=file_path.rsplit("\\", 1)[-1],
+            source_file=os.path.basename(file_path),
         )
         structured_document = parsed if hasattr(parsed, "blocks") else None
         parsed_text = parsed.to_markdown() if structured_document else parsed
@@ -64,7 +65,15 @@ class IngestionPipeline:
         t_chunk = time.time()
         if structured_document is not None:
             from app.ingestion.pdf.chunker import StructuredPdfChunker
-            chunks = StructuredPdfChunker(
+            from app.ingestion.pdf.models import StructuredPdfDocument
+            from app.ingestion.structured import GenericStructuredChunker
+
+            chunker_class = (
+                StructuredPdfChunker
+                if isinstance(structured_document, StructuredPdfDocument)
+                else GenericStructuredChunker
+            )
+            chunks = chunker_class(
                 target_chars=chunk_config.chunk_size if chunk_config else 800,
                 table_max_rows=settings.pdf_table_max_rows,
             ).chunk(structured_document)
@@ -94,9 +103,6 @@ class IngestionPipeline:
         _ingest_log.info("embed", doc_id=doc_id, vector_count=len(vectors), dim=len(vectors[0]) if vectors else 0, took_ms=embed_ms)
 
         # 4. Save chunk metadata to PostgreSQL
-        from sqlalchemy import select
-        from app.models import KnowledgeDocument
-
         scope_result = await db.execute(
             select(
                 KnowledgeDocument.tenant_id,
@@ -168,7 +174,6 @@ class IngestionPipeline:
         )
 
         # 6. Update document status
-        from sqlalchemy import select
         result = await db.execute(
             select(KnowledgeDocument).where(KnowledgeDocument.id == doc_id)
         )

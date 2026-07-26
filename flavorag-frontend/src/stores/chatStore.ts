@@ -162,6 +162,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   ...m,
                   id: payload.messageId || m.id,
                   sources: payload.sources,
+                  recommendedQuestions: payload.recommendedQuestions,
                   ragModes: payload.modes || m.ragModes,
                   retrievalChannels: payload.channels || m.retrievalChannels,
                 }
@@ -237,6 +238,7 @@ function formatMessage(m: any): Message {
     content: m.content,
     thinkingContent: m.thinkingContent,
     sources: m.sources,
+    recommendedQuestions: m.recommendedQuestions,
     messageStatus: m.messageStatus,
     agentSteps: m.agentSteps,
     ragModes: m.ragModes,

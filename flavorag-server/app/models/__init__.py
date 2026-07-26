@@ -126,6 +126,7 @@ class KnowledgeDocument(Base, TimestampMixin):
     file_url = Column(String(1024), nullable=False)
     file_type = Column(String(16), nullable=False)
     file_size = Column(BigInteger)
+    content_hash = Column(String(64))  # SHA-256 hex digest for dedup + incremental indexing
     process_mode = Column(String(16), default="chunk")
     status = Column(String(16), default="pending")
     source_type = Column(String(16))
@@ -301,6 +302,43 @@ class IndexSyncJob(Base, TimestampMixin):
     attempts = Column(Integer, nullable=False, default=0)
     last_error = Column(Text)
     next_retry_time = Column(DateTime)
+
+
+# ============================================================
+# Batch Import
+# ============================================================
+
+
+class BatchImportJob(Base, TimestampMixin):
+    __tablename__ = "t_batch_import_job"
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    tenant_id = Column(String(64), nullable=False, default="default")
+    kb_id = Column(String(20), nullable=False)
+    total_files = Column(Integer, nullable=False, default=0)
+    completed_files = Column(Integer, nullable=False, default=0)
+    failed_files = Column(Integer, nullable=False, default=0)
+    skipped_duplicates = Column(Integer, nullable=False, default=0)
+    status = Column(String(16), nullable=False, default="pending")  # pending/running/success/partial/error
+    file_results = Column(JSON)  # list of per-file results
+    error_message = Column(Text)
+    created_by = Column(String(20), nullable=False)
+
+
+class BatchImportFileRecord(Base):
+    __tablename__ = "t_batch_import_file"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    job_id = Column(String(20), nullable=False)
+    file_name = Column(String(512), nullable=False)
+    file_size = Column(BigInteger)
+    file_type = Column(String(16))
+    status = Column(String(16), nullable=False, default="pending")  # pending/running/success/duplicate/error
+    doc_id = Column(String(20))
+    chunk_count = Column(Integer, default=0)
+    error_message = Column(Text)
+    create_time = Column(DateTime, default=_utcnow)
 
 
 # ============================================================

@@ -141,3 +141,65 @@ export interface RagCapabilities {
     status: string;
   };
 }
+
+// ---- Batch Import ----
+
+export interface BatchFileResult {
+  fileName: string;
+  status: "success" | "duplicate" | "error";
+  docId?: string;
+  chunkCount?: number;
+  existingDocId?: string;
+  error?: string;
+}
+
+export interface BatchImportResult {
+  jobId: string;
+  status: "pending" | "running" | "success" | "partial" | "error";
+  total: number;
+  success: number;
+  failed: number;
+  skippedDuplicates: number;
+  perFile: BatchFileResult[];
+}
+
+export interface BatchImportFileRecord {
+  id: string;
+  fileName: string;
+  fileType: string;
+  fileSize: number;
+  status: string;
+  docId?: string;
+  chunkCount: number;
+  errorMessage?: string;
+}
+
+export interface BatchImportJobStatus {
+  jobId: string;
+  status: string;
+  totalFiles: number;
+  completedFiles: number;
+  failedFiles: number;
+  skippedDuplicates: number;
+  errorMessage: string | null;
+  createTime: string;
+  files: BatchImportFileRecord[];
+}
+
+// ---- Dedup ----
+
+export interface DedupCheckResult {
+  isDuplicate: boolean;
+  existingDocId?: string;
+  existingDocName?: string;
+}
+
+// ---- Reindex ----
+
+export interface ReindexResult {
+  docId: string;
+  changed: boolean;
+  contentHash: string;
+  reason?: string;
+  chunkCount?: number;
+}

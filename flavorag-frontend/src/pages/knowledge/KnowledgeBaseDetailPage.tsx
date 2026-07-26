@@ -2,15 +2,18 @@ import { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   ArrowLeft, Upload, Trash2, FileText, Eye, Loader2, Link as LinkIcon, Globe,
+  Files, CheckCircle, XCircle, AlertCircle, RefreshCw,
 } from "lucide-react";
 import {
   fetchDocuments,
   uploadDocument,
   uploadDocumentFromUrl,
+  batchUploadDocuments,
   deleteDocument,
+  reindexIfChanged,
   type ChunkOptions,
 } from "@/services/knowledgeService";
-import type { KnowledgeDocument } from "@/types";
+import type { KnowledgeDocument, BatchFileResult } from "@/types";
 
 export default function KnowledgeBaseDetailPage() {
   const { kbId } = useParams<{ kbId: string }>();
@@ -28,11 +31,16 @@ export default function KnowledgeBaseDetailPage() {
   const [chunkSize, setChunkSize] = useState(512);
   const [chunkOverlap, setChunkOverlap] = useState(128);
 
-  // Upload mode: file or URL
-  const [uploadMode, setUploadMode] = useState<"file" | "url">("file");
+  // Upload mode: file / url / batch
+  const [uploadMode, setUploadMode] = useState<"file" | "url" | "batch">("batch");
   const [urlInput, setUrlInput] = useState("");
   const [urlDocName, setUrlDocName] = useState("");
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
+
+  // Batch upload state
+  const [batchFiles, setBatchFiles] = useState<File[]>([]);
+  const [batchResults, setBatchResults] = useState<BatchFileResult[] | null>(null);
+  const [batchSummary, setBatchSummary] = useState("");
 
   const loadDocs = async () => {
     if (!kbId) return;
@@ -71,11 +79,12 @@ export default function KnowledgeBaseDetailPage() {
     }
   };
 
+  // Single-file upload (backward compat)
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !kbId) return;
 
-    const supported = ["txt", "md", "pdf", "docx"];
+    const supported = ["txt", "md", "pdf", "docx", "xlsx", "csv", "pptx", "html"];
     const ext = file.name.split(".").pop()?.toLowerCase();
     if (!ext || !supported.includes(ext)) {
       setError(`不支持的文件类型: .${ext}，支持: ${supported.join(", ")}`);
@@ -100,6 +109,68 @@ export default function KnowledgeBaseDetailPage() {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
+  };
+
+  // Batch file selection
+  const handleBatchFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selected = Array.from(e.target.files || []);
+    if (selected.length === 0) return;
+
+    const supported = ["txt", "md", "pdf", "docx", "xlsx", "csv", "pptx", "html"];
+    const valid: File[] = [];
+    const rejected: string[] = [];
+    for (const f of selected) {
+      const ext = f.name.split(".").pop()?.toLowerCase();
+      if (ext && supported.includes(ext)) {
+        valid.push(f);
+      } else {
+        rejected.push(f.name);
+      }
+    }
+    if (rejected.length > 0) {
+      setError(`不支持的文件类型: ${rejected.join(", ")}`);
+    }
+    setBatchFiles(valid);
+    setBatchResults(null);
+    setBatchSummary("");
+  };
+
+  // Execute batch upload
+  const handleBatchUpload = async () => {
+    if (!kbId || batchFiles.length === 0) return;
+    try {
+      setUploading(true);
+      setError("");
+      setSuccessMsg("");
+      setBatchResults(null);
+      setBatchSummary("");
+
+      const result = await batchUploadDocuments(kbId, batchFiles, {
+        strategy: chunkStrategy,
+        chunkSize,
+        overlap: chunkOverlap,
+      });
+
+      setBatchResults(result.perFile);
+
+      const parts: string[] = [];
+      if (result.success > 0) parts.push(`成功 ${result.success} 个`);
+      if (result.skippedDuplicates > 0) parts.push(`跳过重复 ${result.skippedDuplicates} 个`);
+      if (result.failed > 0) parts.push(`失败 ${result.failed} 个`);
+      setBatchSummary(parts.join("，"));
+      setBatchFiles([]);
+      await loadDocs();
+    } catch (err: any) {
+      setError(err?.message || "批量上传失败");
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  // Remove a file from batch selection
+  const removeBatchFile = (index: number) => {
+    setBatchFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
   const handleDelete = async (docId: string, docName: string) => {
@@ -217,13 +288,22 @@ export default function KnowledgeBaseDetailPage() {
         {/* Upload mode toggle */}
         <div className="mb-4 flex gap-2">
           <button
+            onClick={() => setUploadMode("batch")}
+            className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+              uploadMode === "batch" ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+            }`}
+          >
+            <Files size={14} className="inline mr-1" />
+            批量上传
+          </button>
+          <button
             onClick={() => setUploadMode("file")}
             className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
               uploadMode === "file" ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
             }`}
           >
             <Upload size={14} className="inline mr-1" />
-            上传文件
+            单文件
           </button>
           <button
             onClick={() => setUploadMode("url")}
@@ -237,12 +317,115 @@ export default function KnowledgeBaseDetailPage() {
         </div>
 
         {/* Upload area */}
-        {uploadMode === "file" ? (
+        {uploadMode === "batch" ? (
+          <div className="mb-6 p-6 bg-white border rounded-lg">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".txt,.md,.pdf,.docx,.xlsx,.csv,.pptx,.html"
+              onChange={handleBatchFileSelect}
+              className="hidden"
+            />
+
+            {/* Selected files list */}
+            {batchFiles.length > 0 && (
+              <div className="mb-4">
+                <div className="text-sm font-medium text-gray-700 mb-2">
+                  已选择 {batchFiles.length} 个文件
+                </div>
+                <div className="max-h-48 overflow-y-auto space-y-1">
+                  {batchFiles.map((f, i) => (
+                    <div
+                      key={i}
+                      className="flex items-center justify-between text-sm text-gray-600 bg-gray-50 rounded px-3 py-1.5"
+                    >
+                      <span className="truncate">{f.name}</span>
+                      <span className="text-xs text-gray-400 ml-2 shrink-0">
+                        {(f.size / 1024).toFixed(1)} KB
+                      </span>
+                      <button
+                        onClick={() => removeBatchFile(i)}
+                        className="ml-2 text-gray-400 hover:text-red-500"
+                      >
+                        <XCircle size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {batchFiles.length === 0 && !uploading ? (
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full border-2 border-dashed border-gray-300 rounded-lg p-8 text-gray-500 hover:border-blue-400 hover:text-blue-600 transition-colors flex flex-col items-center gap-2"
+              >
+                <Files size={32} />
+                <span className="text-sm font-medium">点击选择多个文件</span>
+                <span className="text-xs text-gray-400">
+                  支持 TXT / MD / PDF / DOCX / XLSX / CSV / PPTX / HTML
+                </span>
+              </button>
+            ) : uploading ? (
+              <div className="flex items-center justify-center gap-2 text-blue-600 py-8">
+                <Loader2 size={20} className="animate-spin" />
+                <span className="text-sm">批量处理中，请稍候...</span>
+              </div>
+            ) : (
+              <button
+                onClick={handleBatchUpload}
+                className="w-full py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+              >
+                开始上传 {batchFiles.length} 个文件
+              </button>
+            )}
+
+            {/* Batch result summary */}
+            {batchResults && (
+              <div className="mt-4 border-t pt-4">
+                <div className="text-sm font-medium mb-2">
+                  批量导入完成：{batchSummary}
+                </div>
+                <div className="max-h-64 overflow-y-auto space-y-1">
+                  {batchResults.map((r, i) => (
+                    <div
+                      key={i}
+                      className={`flex items-center gap-2 text-sm rounded px-3 py-1.5 ${
+                        r.status === "success"
+                          ? "bg-green-50 text-green-700"
+                          : r.status === "duplicate"
+                          ? "bg-yellow-50 text-yellow-700"
+                          : "bg-red-50 text-red-700"
+                      }`}
+                    >
+                      {r.status === "success" ? (
+                        <CheckCircle size={14} />
+                      ) : r.status === "duplicate" ? (
+                        <AlertCircle size={14} />
+                      ) : (
+                        <XCircle size={14} />
+                      )}
+                      <span className="truncate flex-1">{r.fileName}</span>
+                      <span className="text-xs shrink-0">
+                        {r.status === "success"
+                          ? `${r.chunkCount ?? 0} 分块`
+                          : r.status === "duplicate"
+                          ? "已存在"
+                          : r.error || "失败"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : uploadMode === "file" ? (
           <div className="mb-6 p-6 bg-white border-2 border-dashed border-gray-300 rounded-lg text-center hover:border-blue-400 transition-colors">
             <input
               ref={fileInputRef}
               type="file"
-              accept=".txt,.md,.pdf,.docx"
+              accept=".txt,.md,.pdf,.docx,.xlsx,.csv,.pptx,.html"
               onChange={handleUpload}
               className="hidden"
             />
@@ -258,7 +441,7 @@ export default function KnowledgeBaseDetailPage() {
               >
                 <Upload size={32} />
                 <span className="text-sm font-medium">点击上传文档</span>
-                <span className="text-xs text-gray-400">支持 TXT / MD / PDF / DOCX</span>
+                <span className="text-xs text-gray-400">支持 TXT / MD / PDF / DOCX / XLSX / CSV / PPTX / HTML</span>
               </button>
             )}
           </div>

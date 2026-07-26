@@ -1,5 +1,13 @@
 import { api } from "./api";
-import type { KnowledgeBase, KnowledgeDocument, KnowledgeChunk } from "@/types";
+import type {
+  KnowledgeBase,
+  KnowledgeDocument,
+  KnowledgeChunk,
+  BatchImportResult,
+  BatchImportJobStatus,
+  DedupCheckResult,
+  ReindexResult,
+} from "@/types";
 
 // ---- Knowledge Base CRUD ----
 
@@ -106,4 +114,68 @@ export async function updateChunkStatus(
   return api.patch(`/api/knowledge-base/docs/${docId}/chunks/${chunkId}`, {
     enabled,
   });
+}
+
+// ---- Batch Import ----
+
+const BATCH_TIMEOUT = 600000; // 10min
+
+/**
+ * Upload multiple files in one request with progress tracking.
+ * Returns aggregate result: success/failed/skipped_duplicates counts + per-file status.
+ */
+export async function batchUploadDocuments(
+  kbId: string,
+  files: File[],
+  options: ChunkOptions = {},
+): Promise<BatchImportResult> {
+  const { strategy = "FIXED_WINDOW", chunkSize = 512, overlap = 128 } = options;
+  const form = new FormData();
+  for (const file of files) {
+    form.append("files", file);
+  }
+  form.append("chunk_strategy", strategy);
+  form.append("chunk_size", String(chunkSize));
+  form.append("overlap", String(overlap));
+  return api.post(`/api/knowledge-base/${kbId}/docs/batch-upload`, form, {
+    headers: { "Content-Type": "multipart/form-data" },
+    timeout: BATCH_TIMEOUT,
+  });
+}
+
+/** Poll batch import job status. */
+export async function getBatchImportStatus(
+  jobId: string,
+): Promise<BatchImportJobStatus> {
+  return api.get(`/api/knowledge-base/batch-import/${jobId}`);
+}
+
+// ---- Dedup Check ----
+
+/**
+ * Check if a file is a duplicate before uploading.
+ * Useful for pre-upload validation in the UI.
+ */
+export async function checkDuplicate(
+  kbId: string,
+  file: File,
+): Promise<DedupCheckResult> {
+  const form = new FormData();
+  form.append("file", file);
+  return api.post(`/api/knowledge-base/${kbId}/docs/check-duplicate`, form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+}
+
+// ---- Incremental Re-index ----
+
+/** Check if document changed and re-index only when needed. */
+export async function reindexIfChanged(
+  docId: string,
+): Promise<ReindexResult> {
+  return api.post(
+    `/api/knowledge-base/docs/${docId}/reindex-if-changed`,
+    undefined,
+    { timeout: BATCH_TIMEOUT },
+  );
 }

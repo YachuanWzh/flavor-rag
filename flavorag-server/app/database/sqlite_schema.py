@@ -51,6 +51,7 @@ _COMPATIBILITY_COLUMNS: dict[str, dict[str, str]] = {
         "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",
         "department_id": "VARCHAR(64)",
         "visibility": "VARCHAR(16) NOT NULL DEFAULT 'INHERIT'",
+        "content_hash": "VARCHAR(64)",
     },
     "t_knowledge_chunk": {
         "embedding_content": "TEXT",

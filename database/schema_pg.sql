@@ -130,6 +130,7 @@ CREATE TABLE t_knowledge_document (
     file_url         VARCHAR(1024) NOT NULL,         -- S3 存储路径
     file_type        VARCHAR(16)  NOT NULL,           -- pdf / docx / xlsx / md / txt
     file_size        BIGINT,
+    content_hash     VARCHAR(64),                     -- SHA-256 digest for dedup + incremental indexing
     process_mode     VARCHAR(16)  DEFAULT 'chunk',    -- chunk / pipeline
     status           VARCHAR(16)  DEFAULT 'pending',  -- pending/running/success/failed
     source_type      VARCHAR(16),                     -- file / url
@@ -505,3 +506,46 @@ CREATE TABLE t_ingestion_task_node (
     deleted       SMALLINT    DEFAULT 0
 );
 CREATE INDEX idx_task_node_task ON t_ingestion_task_node (task_id);
+
+-- ============================================================
+-- 批量导入与去重
+-- ============================================================
+
+-- 内容哈希索引（加速去重查询）
+CREATE INDEX IF NOT EXISTS idx_knowledge_document_content_hash
+  ON t_knowledge_document (kb_id, content_hash)
+  WHERE content_hash IS NOT NULL AND deleted = 0;
+
+-- 批量导入任务
+CREATE TABLE t_batch_import_job (
+    id                 VARCHAR(20) PRIMARY KEY,
+    tenant_id          VARCHAR(64) NOT NULL DEFAULT 'default',
+    kb_id              VARCHAR(20) NOT NULL,
+    total_files        INTEGER NOT NULL DEFAULT 0,
+    completed_files    INTEGER NOT NULL DEFAULT 0,
+    failed_files       INTEGER NOT NULL DEFAULT 0,
+    skipped_duplicates INTEGER NOT NULL DEFAULT 0,
+    status             VARCHAR(16) NOT NULL DEFAULT 'pending',
+    file_results       JSONB,
+    error_message      TEXT,
+    created_by         VARCHAR(20) NOT NULL,
+    create_time        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted            SMALLINT DEFAULT 0
+);
+CREATE INDEX idx_batch_import_job_tenant ON t_batch_import_job (tenant_id, kb_id, status);
+
+-- 批量导入文件明细
+CREATE TABLE t_batch_import_file (
+    id            VARCHAR(20) PRIMARY KEY,
+    job_id        VARCHAR(20) NOT NULL,
+    file_name     VARCHAR(512) NOT NULL,
+    file_size     BIGINT,
+    file_type     VARCHAR(16),
+    status        VARCHAR(16) NOT NULL DEFAULT 'pending',
+    doc_id        VARCHAR(20),
+    chunk_count   INTEGER DEFAULT 0,
+    error_message TEXT,
+    create_time   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_batch_import_file_job ON t_batch_import_file (job_id);

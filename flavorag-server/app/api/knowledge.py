@@ -20,12 +20,15 @@ from app.models import (
     KnowledgeBase,
     KnowledgeDocument,
     KnowledgeChunk,
+    BatchImportJob,
+    BatchImportFileRecord,
     gen_id,
 )
 from app.ingestion.chunker import ChunkConfig, ChunkStrategy
 from app.ingestion.pipeline import IngestionPipeline
 from app.ingestion.pipeline_engine import IngestionEngine
 from app.ingestion.url_fetcher import SafeURLFetcher, URLSecurityError
+from app.ingestion.dedup import DuplicateDetector, compute_content_hash
 from app.rag.search.vector import MilvusSearchChannel
 from app.config.settings import settings
 from app.config.logging_config import get_logger
@@ -37,6 +40,8 @@ from app.security.service import (
     require_document,
     require_kb,
 )
+
+_SUPPORTED_FILE_TYPES = {"txt", "md", "pdf", "docx", "xlsx", "csv", "pptx", "html", "htm"}
 
 router = APIRouter(prefix="/api/knowledge-base", tags=["knowledge-base"])
 _log = get_logger("flavorag.api.knowledge")
@@ -295,11 +300,10 @@ async def upload_document(
 
     # Determine file type
     ext = os.path.splitext(file.filename)[1].lower().lstrip(".")
-    supported = {"txt", "md", "pdf", "docx"}
-    if ext not in supported:
+    if ext not in _SUPPORTED_FILE_TYPES:
         raise HTTPException(
             status_code=400,
-            detail=f"不支持的文件类型: .{ext}，支持: {', '.join(sorted(supported))}",
+            detail=f"不支持的文件类型: .{ext}，支持: {', '.join(sorted(_SUPPORTED_FILE_TYPES))}",
         )
 
     # Save uploaded file to persistent uploads directory
@@ -309,6 +313,30 @@ async def upload_document(
     try:
         with open(file_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
+
+        # Content hash for dedup and incremental indexing
+        content_hash = compute_content_hash(file_path)
+
+        # Duplicate check
+        dedup = DuplicateDetector()
+        dup_result = await dedup.check_file(
+            file_path, kb_id, db, tenant_id=user.tenant_id or "default"
+        )
+        if dup_result.is_duplicate:
+            # Remove the saved file
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+            return {
+                "code": "0",
+                "message": "duplicate",
+                "data": {
+                    "isDuplicate": True,
+                    "existingDocId": dup_result.existing_doc_id,
+                    "existingDocName": dup_result.existing_doc_name,
+                },
+            }
 
         # Create document record
         doc = KnowledgeDocument(
@@ -320,6 +348,7 @@ async def upload_document(
             file_url=file_path,
             file_type=ext,
             file_size=os.path.getsize(file_path),
+            content_hash=content_hash,
             chunk_strategy=canonical_strategy,
             chunk_config={
                 "chunkSize": chunk_size,
@@ -434,6 +463,7 @@ async def upload_url_document(
                 file_url=file_path,
                 file_type=ext,
                 file_size=len(content),
+                content_hash=compute_content_hash(file_path),
                 source_type="url",
                 source_location=url,
                 schedule_enabled=1 if req.schedule_enabled else 0,
@@ -531,6 +561,19 @@ async def _run_ingestion(
     doc.chunk_count = chunk_count
     await db.flush()
     return chunk_count
+
+
+async def run_ingestion_for_doc(
+    kb: KnowledgeBase,
+    doc: KnowledgeDocument,
+    file_path: str,
+    source_type: str,
+    user: User,
+    db: AsyncSession,
+    chunk_config: ChunkConfig,
+) -> int:
+    """Public helper for batch import to avoid circular imports."""
+    return await _run_ingestion(kb, doc, file_path, source_type, user, db, chunk_config)
 
 
 @router.post("/docs/{doc_id}/reprocess")
@@ -884,5 +927,309 @@ async def update_chunk_status(
             "id": chunk.id,
             "enabled": chunk.enabled,
             "updateTime": str(chunk.update_time) if chunk.update_time else None,
+        },
+    }
+
+
+# ---- Dedup Check ----
+
+
+@router.post("/{kb_id}/docs/check-duplicate")
+async def check_duplicate(
+    kb_id: str,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Check if a file is a duplicate before uploading."""
+    kb = await require_kb(
+        db, principal_from_user(user), kb_id, Permission.READ
+    )
+    if not kb:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="未提供文件")
+
+    ext = os.path.splitext(file.filename)[1].lower().lstrip(".")
+    if ext not in _SUPPORTED_FILE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的文件类型: .{ext}，支持: {', '.join(sorted(_SUPPORTED_FILE_TYPES))}",
+        )
+
+    # Write to temp file for hash computation
+    tmp_id = gen_id()
+    tmp_path = os.path.join(_UPLOAD_DIR, f"dedup_{tmp_id}.{ext}")
+    try:
+        with open(tmp_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        dedup = DuplicateDetector()
+        result = await dedup.check_file(
+            tmp_path, kb_id, db, tenant_id=user.tenant_id or "default"
+        )
+
+        response = {
+            "code": "0",
+            "message": "success",
+            "data": {
+                "isDuplicate": result.is_duplicate,
+            },
+        }
+        if result.is_duplicate:
+            response["data"]["existingDocId"] = result.existing_doc_id
+            response["data"]["existingDocName"] = result.existing_doc_name
+        return response
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+# ---- Batch Import ----
+
+
+class BatchImportRequest(BaseModel):
+    doc_names: list[str] = Field(default_factory=list, description="文件名称列表(URL导入时)")
+
+
+@router.post("/{kb_id}/docs/batch-upload")
+async def batch_upload_documents(
+    kb_id: str,
+    files: list[UploadFile] = File(default_factory=list),
+    chunk_strategy: str = Form("FIXED_WINDOW"),
+    chunk_size: int = Form(512),
+    overlap: int = Form(128),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Batch upload multiple files with progress tracking and dedup."""
+    kb = await require_kb(
+        db, principal_from_user(user), kb_id, Permission.WRITE
+    )
+    if not kb:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    if not files:
+        raise HTTPException(status_code=400, detail="未提供文件")
+
+    try:
+        canonical_strategy = ChunkStrategy.from_value(chunk_strategy).name
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    from app.services.batch_import import BatchImportHandler, BatchFileSpec
+
+    handler = BatchImportHandler(_UPLOAD_DIR)
+
+    # Save files and build specs first (no DB involved yet)
+    file_specs: list[BatchFileSpec] = []
+    for file in files:
+        if not file.filename:
+            continue
+        ext = os.path.splitext(file.filename)[1].lower().lstrip(".")
+        if not ext:
+            ext = "txt"
+        if ext not in _SUPPORTED_FILE_TYPES:
+            continue
+
+        doc_id = gen_id()
+        file_path = os.path.join(_UPLOAD_DIR, f"{doc_id}.{ext}")
+        with open(file_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        file_specs.append(BatchFileSpec(
+            filename=file.filename,
+            file_path=file_path,
+            file_size=os.path.getsize(file_path),
+        ))
+
+    if not file_specs:
+        raise HTTPException(status_code=400, detail="无有效文件（不支持的格式）")
+
+    # Run batch — handler manages its own sessions internally
+    result = await handler.run_batch(
+        kb_id=kb_id,
+        file_specs=file_specs,
+        user=user,
+        chunk_strategy=canonical_strategy,
+        chunk_size=chunk_size,
+        overlap=overlap,
+    )
+
+    return {
+        "code": "0",
+        "message": "success",
+        "data": {
+            "jobId": result.job_id,
+            "status": result.status,
+            "total": result.total,
+            "success": result.success,
+            "failed": result.failed,
+            "skippedDuplicates": result.skipped_duplicates,
+            "perFile": result.per_file,
+        },
+    }
+
+
+@router.get("/batch-import/{job_id}")
+async def get_batch_import_status(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Get the status and progress of a batch import job."""
+    result = await db.execute(
+        select(BatchImportJob).where(
+            BatchImportJob.id == job_id,
+            BatchImportJob.tenant_id == (user.tenant_id or "default"),
+        )
+    )
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="批量导入任务不存在")
+
+    files_result = await db.execute(
+        select(BatchImportFileRecord).where(
+            BatchImportFileRecord.job_id == job_id,
+        ).order_by(BatchImportFileRecord.id)
+    )
+    files = files_result.scalars().all()
+
+    return {
+        "code": "0",
+        "message": "success",
+        "data": {
+            "jobId": job.id,
+            "status": job.status,
+            "totalFiles": job.total_files,
+            "completedFiles": job.completed_files,
+            "failedFiles": job.failed_files,
+            "skippedDuplicates": job.skipped_duplicates,
+            "errorMessage": job.error_message,
+            "createTime": str(job.create_time),
+            "files": [
+                {
+                    "id": f.id,
+                    "fileName": f.file_name,
+                    "fileType": f.file_type,
+                    "fileSize": f.file_size,
+                    "status": f.status,
+                    "docId": f.doc_id,
+                    "chunkCount": f.chunk_count,
+                    "errorMessage": f.error_message,
+                }
+                for f in files
+            ],
+        },
+    }
+
+
+# ---- Incremental Re-index ----
+
+
+@router.post("/docs/{doc_id}/reindex-if-changed")
+async def reindex_if_changed(
+    doc_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Check if a document has changed and re-index only if needed.
+
+    Returns skip status if content is unchanged.
+    """
+    doc = await require_document(
+        db, principal_from_user(user), doc_id, Permission.WRITE
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    from app.ingestion.incremental import IncrementalIndexer
+    from app.ingestion.chunker import ChunkConfig, ChunkStrategy
+
+    if not os.path.exists(doc.file_url):
+        raise HTTPException(status_code=400, detail=f"源文件不存在: {doc.file_url}")
+
+    change = await IncrementalIndexer.check_document_changed(
+        doc.file_url, doc_id, db
+    )
+
+    if not change.changed:
+        return {
+            "code": "0",
+            "message": "unchanged",
+            "data": {
+                "docId": doc.id,
+                "changed": False,
+                "contentHash": change.content_hash,
+                "reason": change.reason,
+            },
+        }
+
+    # Content changed — re-ingest
+    kb_result = await db.execute(
+        select(KnowledgeBase).where(
+            KnowledgeBase.id == doc.kb_id,
+            KnowledgeBase.deleted == 0,
+        )
+    )
+    kb = kb_result.scalar_one_or_none()
+    if not kb:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    # Soft-delete old chunks and remove from Milvus
+    from app.rag.search.vector import MilvusSearchChannel
+
+    chunk_result = await db.execute(
+        select(KnowledgeChunk).where(
+            KnowledgeChunk.doc_id == doc_id,
+            KnowledgeChunk.deleted == 0,
+        )
+    )
+    old_chunks = list(chunk_result.scalars().all())
+    old_chunk_ids = [c.id for c in old_chunks]
+
+    for c in old_chunks:
+        c.deleted = 1
+
+    if old_chunk_ids:
+        try:
+            MilvusSearchChannel().delete_by_ids(kb.collection_name, old_chunk_ids)
+        except Exception as exc:
+            _log.warning("milvus_delete_failed", doc_id=doc_id, error=str(exc))
+
+    # Re-run ingestion
+    ext = os.path.splitext(doc.file_url)[1].lower().lstrip(".") or doc.file_type
+    strategy = doc.chunk_strategy or "FIXED_WINDOW"
+    cfg = doc.chunk_config or {}
+    chunk_config = ChunkConfig(
+        strategy=strategy,
+        chunk_size=cfg.get("chunkSize", 512) if isinstance(cfg, dict) else 512,
+        overlap=cfg.get("overlapSize", 128) if isinstance(cfg, dict) else 128,
+    )
+
+    chunk_count = await _run_ingestion(
+        kb=kb,
+        doc=doc,
+        file_path=doc.file_url,
+        source_type=doc.source_type or "file",
+        user=user,
+        db=db,
+        chunk_config=chunk_config,
+    )
+
+    # Update hash
+    await IncrementalIndexer.update_document_hash(doc_id, change.content_hash, db)
+
+    return {
+        "code": "0",
+        "message": "reindexed",
+        "data": {
+            "docId": doc.id,
+            "changed": True,
+            "contentHash": change.content_hash,
+            "chunkCount": chunk_count,
         },
     }

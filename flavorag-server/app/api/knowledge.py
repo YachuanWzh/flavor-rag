@@ -510,6 +510,15 @@ async def reprocess_document(
     for c in old_chunks:
         c.deleted = 1
         old_ids.append(c.id)
+    from app.models import KnowledgeAsset
+    old_assets_result = await db.execute(
+        select(KnowledgeAsset).where(
+            KnowledgeAsset.doc_id == doc_id,
+            KnowledgeAsset.deleted == 0,
+        )
+    )
+    for asset in old_assets_result.scalars().all():
+        asset.deleted = 1
     if old_ids:
         try:
             milvus = MilvusSearchChannel()
@@ -627,6 +636,13 @@ async def delete_document(
     for chunk in chunk_result.scalars().all():
         chunk.deleted = 1
 
+    from app.models import KnowledgeAsset
+    asset_result = await db.execute(
+        select(KnowledgeAsset).where(KnowledgeAsset.doc_id == doc_id)
+    )
+    for asset in asset_result.scalars().all():
+        asset.deleted = 1
+
     return {"code": "0", "message": "success", "data": None}
 
 
@@ -651,6 +667,11 @@ async def list_chunks(
                 "chunkIndex": c.chunk_index,
                 "content": c.content,
                 "charCount": c.char_count,
+                "blockType": c.block_type,
+                "pageStart": c.page_start,
+                "pageEnd": c.page_end,
+                "bboxes": c.bbox_json or [],
+                "metadata": c.metadata_json or {},
             }
             for c in chunks
         ],

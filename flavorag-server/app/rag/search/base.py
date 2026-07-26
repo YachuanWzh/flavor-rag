@@ -13,6 +13,12 @@ class SearchResult:
     doc_id: str = ""
     doc_name: str = ""
     chunk_index: int = 0
+    block_type: str = ""
+    page_start: int | None = None
+    page_end: int | None = None
+    bboxes: list[dict] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
+    assets: list[dict] = field(default_factory=list)
 
 
 class SearchChannel(ABC):

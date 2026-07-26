@@ -136,6 +136,18 @@ class MilvusSearchChannel(SearchChannel):
         ]
         collection.insert(data)
 
+    def delete_by_ids(self, collection_name: str, chunk_ids: list[str]):
+        """Delete vectors by external chunk IDs during reprocessing."""
+        if not chunk_ids:
+            return
+        collection = self.get_collection(collection_name)
+        if collection is None:
+            return
+        import json
+        encoded = ", ".join(json.dumps(chunk_id) for chunk_id in chunk_ids)
+        collection.delete(expr=f"chunk_id in [{encoded}]")
+        collection.flush()
+
     def drop_collection(self, collection_name: str):
         """Drop a collection."""
         self._connect()

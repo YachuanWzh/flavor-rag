@@ -119,9 +119,15 @@ CREATE TABLE t_knowledge_chunk (
     doc_id       VARCHAR(20) NOT NULL,
     chunk_index  INTEGER     NOT NULL,
     content      TEXT        NOT NULL,
+    embedding_content TEXT,
     content_hash VARCHAR(64),
     char_count   INTEGER,
     token_count  INTEGER,
+    block_type   VARCHAR(32),
+    page_start   INTEGER,
+    page_end     INTEGER,
+    bbox_json    JSONB,
+    metadata_json JSONB,
     enabled      SMALLINT    DEFAULT 1,
     created_by   VARCHAR(20) NOT NULL,
     updated_by   VARCHAR(20),
@@ -130,6 +136,31 @@ CREATE TABLE t_knowledge_chunk (
     deleted      SMALLINT    DEFAULT 0
 );
 CREATE INDEX idx_doc_id ON t_knowledge_chunk (doc_id);
+
+-- PDF 图片等多模态资产
+CREATE TABLE t_knowledge_asset (
+    id            VARCHAR(32) PRIMARY KEY,
+    kb_id         VARCHAR(20)  NOT NULL,
+    doc_id        VARCHAR(20)  NOT NULL,
+    asset_type    VARCHAR(32)  NOT NULL DEFAULT 'IMAGE',
+    mime_type     VARCHAR(128) NOT NULL,
+    file_name     VARCHAR(512),
+    file_size     BIGINT,
+    content_hash  VARCHAR(64)  NOT NULL,
+    storage_key   VARCHAR(1024) NOT NULL,
+    storage_url   VARCHAR(2048) NOT NULL,
+    page_no       INTEGER,
+    bbox_json     JSONB,
+    description   TEXT,
+    metadata_json JSONB,
+    created_by    VARCHAR(20) NOT NULL,
+    updated_by    VARCHAR(20),
+    create_time   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted       SMALLINT DEFAULT 0
+);
+CREATE INDEX idx_knowledge_asset_doc_id ON t_knowledge_asset (doc_id);
+CREATE INDEX idx_knowledge_asset_hash ON t_knowledge_asset (content_hash);
 
 -- ============================================================
 -- 意图树与查询词映射

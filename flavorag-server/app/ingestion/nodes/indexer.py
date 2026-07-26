@@ -40,7 +40,7 @@ class IndexerNode:
             t_embed = time.time()
             from app.llm.embedding import get_embedding_client
             embedder = get_embedding_client()
-            texts = [c["content"] for c in ctx.chunks]
+            texts = [c.get("embedding_content") or c["content"] for c in ctx.chunks]
             vectors = await embedder.embed_documents(texts)
             ctx.vectors = vectors
             embed_ms = int((time.time() - t_embed) * 1000)
@@ -51,6 +51,29 @@ class IndexerNode:
             async with async_session_factory() as session:
                 from app.models import KnowledgeChunk, gen_id
 
+                if ctx.assets:
+                    from app.config.settings import settings
+                    from app.ingestion.pdf.asset_storage import (
+                        materialize_asset_urls,
+                        persist_pdf_assets,
+                    )
+                    try:
+                        asset_urls = await persist_pdf_assets(
+                            ctx.assets,
+                            kb_id=ctx.kb_id,
+                            doc_id=ctx.doc_id,
+                            created_by="pipeline",
+                            session=session,
+                        )
+                        materialize_asset_urls(ctx.chunks, asset_urls)
+                    except Exception:
+                        if settings.pdf_asset_storage_required:
+                            raise
+                        _log.warning(
+                            "pdf_asset_persistence_skipped",
+                            doc_id=ctx.doc_id,
+                        )
+
                 chunk_records = []
                 for c in ctx.chunks:
                     content = c["content"]
@@ -60,8 +83,17 @@ class IndexerNode:
                         doc_id=ctx.doc_id,
                         chunk_index=c["chunk_index"],
                         content=content,
+                        embedding_content=c.get("embedding_content"),
                         content_hash=hashlib.sha256(content.encode()).hexdigest()[:16],
                         char_count=c.get("char_count", len(content)),
+                        block_type=c.get("block_type"),
+                        page_start=c.get("page_start"),
+                        page_end=c.get("page_end"),
+                        bbox_json=c.get("bbox_json"),
+                        metadata_json={
+                            **(c.get("metadata_json") or {}),
+                            "asset_ids": c.get("asset_ids", []),
+                        },
                         created_by="pipeline",
                     )
                     session.add(record)
@@ -151,6 +183,10 @@ class IndexerNode:
                     "doc_id": c.doc_id,
                     "chunk_index": c.chunk_index,
                     "content": c.content,
+                    "embedding_content": c.embedding_content,
+                    "block_type": c.block_type,
+                    "page_start": c.page_start,
+                    "page_end": c.page_end,
                 },
             )
         await es.close()

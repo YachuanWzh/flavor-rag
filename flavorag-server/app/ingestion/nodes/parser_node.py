@@ -23,6 +23,12 @@ class ParserNode:
 
     NODE_TYPE = "parser"
 
+    def __init__(self, structured_pdf_parser=None):
+        if structured_pdf_parser is None:
+            from app.ingestion.pdf.parser import StructuredPdfParser
+            structured_pdf_parser = StructuredPdfParser()
+        self.structured_pdf_parser = structured_pdf_parser
+
     async def __call__(self, ctx: IngestionContext) -> NodeResult:
         import time
         t0 = time.time()
@@ -33,7 +39,19 @@ class ParserNode:
 
             parser_type = ctx.settings.get("parser_type", "native")
 
-            if parser_type == "tika":
+            ext = self._guess_extension(ctx.source_file_name)
+            structured = ext == "pdf" and parser_type != "tika"
+            if structured:
+                document = await self.structured_pdf_parser.parse_bytes(
+                    ctx.raw_content,
+                    source_file=ctx.source_file_name,
+                    document_id=ctx.doc_id,
+                )
+                ctx.parsed_document = document
+                ctx.assets = list(document.assets)
+                ctx.metadata["structured_pdf"] = document.metadata
+                text = document.to_markdown()
+            elif parser_type == "tika":
                 text = await self._parse_tika(ctx)
             else:
                 text = self._parse_native(ctx)
@@ -51,7 +69,16 @@ class ParserNode:
                 node_type=self.NODE_TYPE,
                 status="success",
                 duration_ms=duration_ms,
-                output={"text_length": len(text)},
+                output={
+                    "text_length": len(text),
+                    "structured": structured,
+                    "page_count": ctx.parsed_document.page_count if structured else None,
+                    "table_count": sum(
+                        getattr(block.block_type, "value", block.block_type) == "TABLE"
+                        for block in ctx.parsed_document.blocks
+                    ) if structured else 0,
+                    "image_count": len(ctx.assets) if structured else 0,
+                },
             )
         except Exception as exc:
             duration_ms = int((time.time() - t0) * 1000)

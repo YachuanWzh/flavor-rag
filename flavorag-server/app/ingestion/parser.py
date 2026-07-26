@@ -15,6 +15,29 @@ class DocumentParser:
         ".pdf": "_parse_pdf",
     }
 
+    def __init__(self, structured_pdf_parser=None):
+        if structured_pdf_parser is None:
+            from app.ingestion.pdf.parser import StructuredPdfParser
+            structured_pdf_parser = StructuredPdfParser()
+        self.structured_pdf_parser = structured_pdf_parser
+
+    async def parse_document(
+        self,
+        file_path: str,
+        *,
+        document_id: str = "",
+        source_file: str = "",
+    ):
+        """Return a StructuredPdfDocument for PDFs, plain text otherwise."""
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == ".pdf":
+            return await self.structured_pdf_parser.parse_file(
+                file_path,
+                document_id=document_id,
+                source_file=source_file or os.path.basename(file_path),
+            )
+        return await self.parse(file_path)
+
     async def parse(self, file_path: str) -> str:
         """Parse *file_path* and return plain text content.
 
@@ -27,7 +50,10 @@ class DocumentParser:
                 f"Unsupported file type: {ext}. "
                 f"Supported: {', '.join(sorted(self.EXT_PARSERS))}"
             )
-        return await getattr(self, parser_method)(file_path)
+        parsed = await getattr(self, parser_method)(file_path)
+        if hasattr(parsed, "to_markdown"):
+            return parsed.to_markdown()
+        return parsed
 
     # ---- TXT / MD ----
 
@@ -49,14 +75,7 @@ class DocumentParser:
     # ---- PDF ----
 
     async def _parse_pdf(self, file_path: str) -> str:
-        try:
-            from PyPDF2 import PdfReader
-        except ImportError:
-            raise ImportError("PyPDF2 is required to parse .pdf files")
-        reader = PdfReader(file_path)
-        pages: list[str] = []
-        for page in reader.pages:
-            text = page.extract_text()
-            if text:
-                pages.append(text.strip())
-        return "\n\n".join(pages)
+        return await self.structured_pdf_parser.parse_file(
+            file_path,
+            source_file=os.path.basename(file_path),
+        )

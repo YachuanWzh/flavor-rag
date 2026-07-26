@@ -20,6 +20,8 @@ class IngestionContext:
     # Intermediate results
     raw_content: bytes | None = None
     parsed_text: str = ""
+    parsed_document: Any | None = None
+    assets: list[Any] = field(default_factory=list)
     chunks: list[dict] = field(default_factory=list)
     vectors: list[list[float]] = field(default_factory=list)
     chunk_records: list = field(default_factory=list)

@@ -31,6 +31,36 @@ class ChunkerNode:
             if not ctx.parsed_text:
                 raise ValueError("No parsed text to chunk")
 
+            if ctx.parsed_document is not None:
+                from app.ingestion.pdf.chunker import StructuredPdfChunker
+                from app.config.settings import settings as app_settings
+
+                chunker = StructuredPdfChunker(
+                    target_chars=int(ctx.settings.get("chunk_size", 800)),
+                    table_max_rows=int(
+                        ctx.settings.get("table_max_rows", app_settings.pdf_table_max_rows)
+                    ),
+                )
+                chunks = chunker.chunk(ctx.parsed_document)
+                ctx.chunks = chunks
+                duration_ms = int((time.time() - t0) * 1000)
+                _log.info(
+                    "chunker_done",
+                    doc_id=ctx.doc_id,
+                    strategy="MULTIMODAL_BLOCK",
+                    chunk_count=len(chunks),
+                    took_ms=duration_ms,
+                )
+                return NodeResult(
+                    node_type=self.NODE_TYPE,
+                    status="success",
+                    duration_ms=duration_ms,
+                    output={
+                        "chunk_count": len(chunks),
+                        "strategy": "MULTIMODAL_BLOCK",
+                    },
+                )
+
             config = self._build_config(ctx.settings)
             chunks = self._chunker.chunk(ctx.parsed_text, config)
             ctx.chunks = chunks

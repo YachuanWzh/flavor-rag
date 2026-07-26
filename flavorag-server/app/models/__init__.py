@@ -112,10 +112,37 @@ class KnowledgeChunk(Base, TimestampMixin):
     doc_id = Column(String(20), nullable=False)
     chunk_index = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
+    embedding_content = Column(Text)
     content_hash = Column(String(64))
     char_count = Column(Integer)
     token_count = Column(Integer)
+    block_type = Column(String(32))
+    page_start = Column(Integer)
+    page_end = Column(Integer)
+    bbox_json = Column(JSON)
+    metadata_json = Column(JSON)
     enabled = Column(SmallInteger, default=1)
+    created_by = Column(String(20), nullable=False)
+    updated_by = Column(String(20))
+
+
+class KnowledgeAsset(Base, TimestampMixin):
+    __tablename__ = "t_knowledge_asset"
+
+    id = Column(String(32), primary_key=True)
+    kb_id = Column(String(20), nullable=False)
+    doc_id = Column(String(20), nullable=False)
+    asset_type = Column(String(32), nullable=False, default="IMAGE")
+    mime_type = Column(String(128), nullable=False)
+    file_name = Column(String(512))
+    file_size = Column(BigInteger)
+    content_hash = Column(String(64), nullable=False)
+    storage_key = Column(String(1024), nullable=False)
+    storage_url = Column(String(2048), nullable=False)
+    page_no = Column(Integer)
+    bbox_json = Column(JSON)
+    description = Column(Text)
+    metadata_json = Column(JSON)
     created_by = Column(String(20), nullable=False)
     updated_by = Column(String(20))
 

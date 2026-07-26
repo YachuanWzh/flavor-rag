@@ -52,13 +52,17 @@ async def lifespan(app: FastAPI):
     configure_root_logger()
     _log.info("server_starting", database_url=settings.database_url[:30] + "...")
 
-    # Startup: auto-create tables when using SQLite
+    # Startup: create tables and apply additive compatibility upgrades for SQLite.
+    # Production databases continue to use Alembic migrations.
     if settings.database_url.startswith("sqlite"):
-        from app.models import Base
         from app.database.session import engine
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        _log.info("sqlite_tables_created")
+        from app.database.sqlite_schema import initialize_sqlite_schema
+
+        added_columns = await initialize_sqlite_schema(engine)
+        _log.info(
+            "sqlite_schema_initialized",
+            added_columns=added_columns,
+        )
 
     # Seed admin user for all backends
     await _seed_admin_user()

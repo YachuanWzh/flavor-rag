@@ -205,7 +205,14 @@ class RAGPipeline:
 
         # 10. Build chunks
         chunks = [
-            {"content": r.content, "chunk_id": r.chunk_id, "score": r.score}
+            {
+                "content": r.content,
+                "chunk_id": r.chunk_id,
+                "score": r.score,
+                "blockType": r.block_type,
+                "pageStart": r.page_start,
+                "pageEnd": r.page_end,
+            }
             for r in reranked
         ]
         sources = [
@@ -216,6 +223,11 @@ class RAGPipeline:
                 "chunkIndex": r.chunk_index,
                 "content": r.content[:300],
                 "score": r.score,
+                "blockType": r.block_type,
+                "pageStart": r.page_start,
+                "pageEnd": r.page_end,
+                "bboxes": r.bboxes,
+                "assets": r.assets,
             }
             for r in reranked
         ]
@@ -280,6 +292,11 @@ class RAGPipeline:
                         KnowledgeChunk.id,
                         KnowledgeChunk.chunk_index,
                         KnowledgeChunk.doc_id,
+                        KnowledgeChunk.block_type,
+                        KnowledgeChunk.page_start,
+                        KnowledgeChunk.page_end,
+                        KnowledgeChunk.bbox_json,
+                        KnowledgeChunk.metadata_json,
                         KnowledgeDocument.doc_name,
                     )
                     .outerjoin(KnowledgeDocument, KnowledgeChunk.doc_id == KnowledgeDocument.id)
@@ -289,12 +306,66 @@ class RAGPipeline:
                     )
                 )
                 for row in rows:
-                    content_hash, chunk_id, chunk_index, doc_id, doc_name = row
+                    (
+                        content_hash,
+                        chunk_id,
+                        chunk_index,
+                        doc_id,
+                        block_type,
+                        page_start,
+                        page_end,
+                        bbox_json,
+                        metadata_json,
+                        doc_name,
+                    ) = row
                     for idx in hash_to_indices.get(content_hash, []):
                         r = results[idx]
                         r.chunk_id = chunk_id
                         r.chunk_index = chunk_index
                         r.doc_id = doc_id
+                        r.block_type = block_type or ""
+                        r.page_start = page_start
+                        r.page_end = page_end
+                        r.bboxes = bbox_json or []
+                        r.metadata = metadata_json or {}
                         r.doc_name = doc_name or "unknown"
+
+                asset_ids = {
+                    asset_id
+                    for result in results
+                    for asset_id in result.metadata.get("asset_ids", [])
+                }
+                if asset_ids:
+                    from app.models import KnowledgeAsset
+                    asset_rows = await session.execute(
+                        select(
+                            KnowledgeAsset.id,
+                            KnowledgeAsset.storage_url,
+                            KnowledgeAsset.mime_type,
+                            KnowledgeAsset.description,
+                            KnowledgeAsset.page_no,
+                            KnowledgeAsset.bbox_json,
+                        ).where(
+                            KnowledgeAsset.id.in_(asset_ids),
+                            KnowledgeAsset.deleted == 0,
+                        )
+                    )
+                    assets_by_id = {
+                        row.id: {
+                            "id": row.id,
+                            "url": row.storage_url,
+                            "mimeType": row.mime_type,
+                            "description": row.description,
+                            "pageNo": row.page_no,
+                            "bbox": row.bbox_json,
+                        }
+                        for row in asset_rows
+                    }
+                    for result in results:
+                        result.assets = [
+                            assets_by_id[asset_id]
+                            for asset_id in result.metadata.get("asset_ids", [])
+                            if asset_id in assets_by_id
+                        ]
         except Exception as exc:
             _log.warning("Failed to resolve chunk metadata from PG: %s", exc)

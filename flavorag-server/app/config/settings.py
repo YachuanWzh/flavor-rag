@@ -44,6 +44,19 @@ class Settings(BaseSettings):
     code_model: str = "deepseek-v3"
     doc_model: str = "qwen-plus-latest"
 
+    # 复杂 PDF 图片理解（写入时调用，可选）
+    vlm_enabled: bool = False
+    vlm_base_url: str = ""
+    vlm_api_key: str = ""
+    vlm_model: str = "qwen-vl-plus"
+    vlm_max_output_tokens: int = 800
+    vlm_max_concurrency: int = 2
+
+    # 复杂 PDF 入库
+    pdf_table_max_rows: int = 20
+    pdf_image_min_area_ratio: float = 0.001
+    pdf_asset_storage_required: bool = True
+
     # 深度思考 / 推理模型
     reasoning_model: str = ""
     reasoning_base_url: str = ""

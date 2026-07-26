@@ -48,17 +48,37 @@ class IngestionPipeline:
 
         # 1. Parse
         t_parse = time.time()
-        parsed_text = await self.parser.parse(file_path)
+        parsed = await self.parser.parse_document(
+            file_path,
+            document_id=doc_id,
+            source_file=file_path.rsplit("\\", 1)[-1],
+        )
+        structured_document = parsed if hasattr(parsed, "blocks") else None
+        parsed_text = parsed.to_markdown() if structured_document else parsed
         parse_ms = int((time.time() - t_parse) * 1000)
         _ingest_log.info("parse", doc_id=doc_id, text_len=len(parsed_text), took_ms=parse_ms)
 
         # 2. Chunk
         t_chunk = time.time()
-        if chunk_config is None:
-            chunk_config = ChunkConfig()
-        chunks = self.chunker.chunk(parsed_text, chunk_config)
+        if structured_document is not None:
+            from app.ingestion.pdf.chunker import StructuredPdfChunker
+            chunks = StructuredPdfChunker(
+                target_chars=chunk_config.chunk_size if chunk_config else 800,
+                table_max_rows=settings.pdf_table_max_rows,
+            ).chunk(structured_document)
+        else:
+            if chunk_config is None:
+                chunk_config = ChunkConfig()
+            chunks = self.chunker.chunk(parsed_text, chunk_config)
         chunk_ms = int((time.time() - t_chunk) * 1000)
-        _ingest_log.info("chunk", doc_id=doc_id, strategy=chunk_config.strategy, chunk_count=len(chunks), chunk_size=chunk_config.chunk_size, took_ms=chunk_ms)
+        _ingest_log.info(
+            "chunk",
+            doc_id=doc_id,
+            strategy="MULTIMODAL_BLOCK" if structured_document else chunk_config.strategy,
+            chunk_count=len(chunks),
+            chunk_size=chunk_config.chunk_size if chunk_config else 800,
+            took_ms=chunk_ms,
+        )
 
         if not chunks:
             _ingest_log.warning("ingestion_no_chunks", doc_id=doc_id)
@@ -66,12 +86,31 @@ class IngestionPipeline:
 
         # 3. Embed
         t_embed = time.time()
-        texts = [c["content"] for c in chunks]
+        texts = [c.get("embedding_content") or c["content"] for c in chunks]
         vectors = await self.embedder.embed_documents(texts)
         embed_ms = int((time.time() - t_embed) * 1000)
         _ingest_log.info("embed", doc_id=doc_id, vector_count=len(vectors), dim=len(vectors[0]) if vectors else 0, took_ms=embed_ms)
 
         # 4. Save chunk metadata to PostgreSQL
+        if structured_document and structured_document.assets:
+            from app.ingestion.pdf.asset_storage import (
+                materialize_asset_urls,
+                persist_pdf_assets,
+            )
+            try:
+                asset_urls = await persist_pdf_assets(
+                    structured_document.assets,
+                    kb_id=kb_id,
+                    doc_id=doc_id,
+                    created_by="system",
+                    session=db,
+                )
+                materialize_asset_urls(chunks, asset_urls)
+            except Exception:
+                if settings.pdf_asset_storage_required:
+                    raise
+                _ingest_log.warning("pdf_asset_persistence_skipped", doc_id=doc_id)
+
         chunk_records: list[KnowledgeChunk] = []
         for c in chunks:
             content = c["content"]
@@ -80,8 +119,17 @@ class IngestionPipeline:
                 doc_id=doc_id,
                 chunk_index=c["chunk_index"],
                 content=content,
+                embedding_content=c.get("embedding_content"),
                 content_hash=hashlib.sha256(content.encode()).hexdigest()[:16],
                 char_count=c["char_count"],
+                block_type=c.get("block_type"),
+                page_start=c.get("page_start"),
+                page_end=c.get("page_end"),
+                bbox_json=c.get("bbox_json"),
+                metadata_json={
+                    **(c.get("metadata_json") or {}),
+                    "asset_ids": c.get("asset_ids", []),
+                },
                 created_by="system",
             ))
 
@@ -161,8 +209,13 @@ class IngestionPipeline:
                     id=c.id,
                     body={
                         "kb_id": kb_id,
+                        "doc_id": c.doc_id,
                         "content": c.content,
+                        "embedding_content": c.embedding_content,
                         "chunk_index": c.chunk_index,
+                        "block_type": c.block_type,
+                        "page_start": c.page_start,
+                        "page_end": c.page_end,
                     },
                 )
         except Exception:

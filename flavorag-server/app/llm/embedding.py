@@ -4,11 +4,15 @@ from __future__ import annotations
 import asyncio
 import math
 import random
+from collections import OrderedDict
 
 import httpx
 from app.config.settings import settings
 
 _BATCH_SIZE = 16
+_QUERY_CACHE_MAX_SIZE = 256
+_query_cache: OrderedDict[tuple[str, str, str], list[float]] = OrderedDict()
+_query_cache_lock = asyncio.Lock()
 
 
 class EmbeddingClient:
@@ -26,8 +30,25 @@ class EmbeddingClient:
         self.dim = settings.embedding_dim
 
     async def embed_query(self, text: str) -> list[float]:
-        results = await self.embed_documents([text])
-        return results[0]
+        cache_key = (self.base_url, self.model, text)
+        async with _query_cache_lock:
+            cached = _query_cache.get(cache_key)
+            if cached is not None:
+                _query_cache.move_to_end(cache_key)
+                return list(cached)
+
+        results = await self._call_with_retry(
+            [text],
+            timeout_sec=settings.embedding_query_timeout_sec,
+            max_attempts=settings.embedding_query_max_attempts,
+        )
+        vector = results[0]
+        async with _query_cache_lock:
+            _query_cache[cache_key] = list(vector)
+            _query_cache.move_to_end(cache_key)
+            while len(_query_cache) > _QUERY_CACHE_MAX_SIZE:
+                _query_cache.popitem(last=False)
+        return vector
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         all_vectors: list[list[float]] = []
@@ -39,7 +60,13 @@ class EmbeddingClient:
                 await asyncio.sleep(0.05)
         return all_vectors
 
-    async def _call_with_retry(self, texts: list[str]) -> list[list[float]]:
+    async def _call_with_retry(
+        self,
+        texts: list[str],
+        *,
+        timeout_sec: float = 120.0,
+        max_attempts: int = 3,
+    ) -> list[list[float]]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -47,9 +74,10 @@ class EmbeddingClient:
         payload = {"model": self.model, "input": texts}
 
         last_err: Exception | None = None
-        for attempt in range(3):
+        attempts = max(1, max_attempts)
+        for attempt in range(attempts):
             try:
-                async with httpx.AsyncClient(timeout=120.0) as client:
+                async with httpx.AsyncClient(timeout=timeout_sec) as client:
                     resp = await client.post(
                         f"{self.base_url}/embeddings",
                         headers=headers,
@@ -64,10 +92,12 @@ class EmbeddingClient:
                     return vectors
             except Exception as e:
                 last_err = e
-                if attempt < 2:
+                if attempt + 1 < attempts:
                     await asyncio.sleep(1.0 * (attempt + 1))
 
-        raise RuntimeError(f"Embedding failed after 3 retries: {last_err}")
+        raise RuntimeError(
+            f"Embedding failed after {attempts} attempt(s): {last_err}"
+        )
 
 
 class MockEmbeddingClient:

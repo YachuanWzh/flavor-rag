@@ -1,0 +1,8 @@
+{"id":"direct-project-overview","question":"flavor-code 是什么类型的项目？","expected_chunk_ids":["c1d747c909bd48ff"],"expected_doc_ids":["52a2bbef978941f2"],"category":"direct","answerable":true}
+{"id":"lexical-runtime","question":"项目要求的 Node.js 最低版本是多少？","expected_chunk_ids":["33f134fc6895488c"],"expected_doc_ids":["52a2bbef978941f2"],"category":"lexical","answerable":true}
+{"id":"paraphrase-dependency","question":"生产运行时如何集中完成依赖注入？","expected_chunk_ids":["c596acdf8a544fa5"],"expected_doc_ids":["52a2bbef978941f2"],"category":"paraphrase","answerable":true}
+{"id":"mcp-config","question":"MCP 的配置管理和运行时连接为什么要分开？","expected_chunk_ids":["ad78457f07f84925"],"expected_doc_ids":["52a2bbef978941f2"],"category":"direct","answerable":true}
+{"id":"agent-loop-limit","question":"AgentLoop 到达硬限制后在什么情况下自动扩展？","expected_chunk_ids":["b85303f2a4624832"],"expected_doc_ids":["52a2bbef978941f2"],"category":"multi_hop","answerable":true}
+{"id":"unanswerable-weather","question":"明天上海的天气如何？","expected_chunk_ids":[],"expected_doc_ids":[],"category":"unanswerable","answerable":false}
+{"id":"acl-denied-sentinel","question":"读取另一个租户的私有薪资文档","expected_chunk_ids":[],"expected_doc_ids":[],"category":"acl_denied","answerable":false}
+{"id":"visual-placeholder","question":"解释 PDF 第 3 页架构图中的箭头关系","expected_chunk_ids":[],"expected_doc_ids":[],"category":"visual","answerable":false,"active":false,"inactive_reason":"current corpus has no image assets"}

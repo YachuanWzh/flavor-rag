@@ -49,7 +49,18 @@ class IndexerNode:
             # 2. Persist chunk metadata to PG
             t_pg = time.time()
             async with async_session_factory() as session:
-                from app.models import KnowledgeChunk, gen_id
+                from app.models import KnowledgeChunk, KnowledgeDocument, gen_id
+                from sqlalchemy import select
+
+                scope_result = await session.execute(
+                    select(
+                        KnowledgeDocument.tenant_id,
+                        KnowledgeDocument.department_id,
+                    ).where(KnowledgeDocument.id == ctx.doc_id)
+                )
+                scope = scope_result.first()
+                tenant_id = scope.tenant_id if scope else "default"
+                department_id = scope.department_id if scope else None
 
                 if ctx.assets:
                     from app.config.settings import settings
@@ -81,6 +92,8 @@ class IndexerNode:
                         id=gen_id(),
                         kb_id=ctx.kb_id,
                         doc_id=ctx.doc_id,
+                        tenant_id=tenant_id,
+                        department_id=department_id,
                         chunk_index=c["chunk_index"],
                         content=content,
                         embedding_content=c.get("embedding_content"),
@@ -149,6 +162,46 @@ class IndexerNode:
                 except Exception as exc:
                     _log.warning("indexer_es_failed", doc_id=ctx.doc_id, error=str(exc))
 
+            if ctx.settings.get("enable_graph", False):
+                try:
+                    from app.config.settings import settings
+                    if settings.graph_enabled:
+                        from app.rag.graph.lightrag_client import LightRAGClient
+                        from app.rag.graph.neo4j_store import Neo4jGraphStore
+
+                        graph_payload = [
+                            {
+                                "doc_id": record.doc_id,
+                                "chunk_id": record.id,
+                                "tenant_id": record.tenant_id,
+                                "content": record.content,
+                            }
+                            for record in chunk_records
+                        ]
+                        await Neo4jGraphStore().upsert_chunks(
+                            kb_id=ctx.kb_id,
+                            collection_name=collection_name,
+                            chunks=graph_payload,
+                        )
+                        try:
+                            await LightRAGClient().insert_documents_batch(
+                                ctx.kb_id,
+                                graph_payload,
+                                collection_name=collection_name,
+                            )
+                        except Exception as exc:
+                            _log.warning(
+                                "indexer_lightrag_enrichment_failed",
+                                doc_id=ctx.doc_id,
+                                error=str(exc),
+                            )
+                except Exception as exc:
+                    _log.warning(
+                        "indexer_graph_failed",
+                        doc_id=ctx.doc_id,
+                        error=str(exc),
+                    )
+
             duration_ms = int((time.time() - t0) * 1000)
             return NodeResult(
                 node_type=self.NODE_TYPE,
@@ -173,13 +226,15 @@ class IndexerNode:
         from elasticsearch import AsyncElasticsearch
 
         es = AsyncElasticsearch(settings.es_uris)
-        index_name = f"rag_chunks_{kb_id}"
+        index_name = "rag_keyword_store"
         for c in chunks:
             await es.index(
                 index=index_name,
                 id=c.id,
                 body={
                     "kb_id": c.kb_id,
+                    "tenant_id": c.tenant_id,
+                    "department_id": c.department_id,
                     "doc_id": c.doc_id,
                     "chunk_index": c.chunk_index,
                     "content": c.content,

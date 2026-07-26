@@ -39,6 +39,11 @@ class S3PdfAssetStorage:
     async def upload(self, asset: PdfAsset, *, kb_id: str, doc_id: str) -> StoredPdfAsset:
         return await asyncio.to_thread(self._upload_sync, asset, kb_id, doc_id)
 
+    async def delete_keys(self, storage_keys: list[str]) -> None:
+        if not storage_keys:
+            return
+        await asyncio.to_thread(self._delete_keys_sync, storage_keys)
+
     def _upload_sync(self, asset: PdfAsset, kb_id: str, doc_id: str) -> StoredPdfAsset:
         self._ensure_bucket()
         extension = _extension_for(asset.filename, asset.mime_type)
@@ -69,6 +74,14 @@ class S3PdfAssetStorage:
             self.client.create_bucket(Bucket=self.bucket)
         self._bucket_ready = True
 
+    def _delete_keys_sync(self, storage_keys: list[str]) -> None:
+        for start in range(0, len(storage_keys), 1000):
+            batch = storage_keys[start:start + 1000]
+            self.client.delete_objects(
+                Bucket=self.bucket,
+                Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True},
+            )
+
 
 async def persist_pdf_assets(
     assets: list[PdfAsset],
@@ -83,7 +96,7 @@ async def persist_pdf_assets(
     if not assets:
         return {}
     storage = storage or S3PdfAssetStorage()
-    from app.models import KnowledgeAsset
+    from app.models import KnowledgeAsset, KnowledgeDocument
     from sqlalchemy import select
 
     asset_ids = [asset.asset_id for asset in assets]
@@ -93,6 +106,15 @@ async def persist_pdf_assets(
     existing_by_id = {
         record.id: record for record in existing_result.scalars().all()
     }
+    scope_result = await session.execute(
+        select(
+            KnowledgeDocument.tenant_id,
+            KnowledgeDocument.department_id,
+        ).where(KnowledgeDocument.id == doc_id)
+    )
+    scope = scope_result.first()
+    tenant_id = scope.tenant_id if scope else "default"
+    department_id = scope.department_id if scope else None
 
     mapping: dict[str, str] = {}
     uploaded_bytes = 0
@@ -106,6 +128,8 @@ async def persist_pdf_assets(
                 id=asset.asset_id,
                 kb_id=kb_id,
                 doc_id=doc_id,
+                tenant_id=tenant_id,
+                department_id=department_id,
                 created_by=created_by,
             )
             session.add(record)

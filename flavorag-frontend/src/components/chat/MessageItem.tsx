@@ -3,6 +3,7 @@ import type { Message } from "@/types";
 import MarkdownRenderer from "./MarkdownRenderer";
 import ThinkingIndicator from "./ThinkingIndicator";
 import { submitFeedback } from "@/services/feedbackService";
+import { Network, Orbit } from "lucide-react";
 
 interface Props {
   message: Message;
@@ -57,6 +58,38 @@ export default function MessageItem({ message, isStreaming, onViewSources }: Pro
             content={message.content}
             isStreaming={isStreaming}
           />
+        )}
+
+        {!isUser && (message.ragModes?.agenticRag || message.ragModes?.graphRag) && (
+          <div className="mt-3 flex flex-wrap gap-1.5 border-t border-slate-200/70 pt-2">
+            {message.ragModes.agenticRag && (
+              <span
+                title={message.agentSteps?.map((step) => step.tool).join(" → ")}
+                className="inline-flex items-center gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-800"
+              >
+                <Orbit className="h-3 w-3" />
+                Agent {message.agentSteps?.length || 0} 步
+              </span>
+            )}
+            {message.ragModes.graphRag && (
+              <span
+                title={
+                  message.retrievalChannels?.graph?.error
+                    ? String(message.retrievalChannels.graph.error)
+                    : "Graph RAG 已参与本次召回"
+                }
+                className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium ${
+                  message.retrievalChannels?.graph?.status === "error" ||
+                  message.retrievalChannels?.graph?.status === "timeout"
+                    ? "border-rose-200 bg-rose-50 text-rose-700"
+                    : "border-cyan-200 bg-cyan-50 text-cyan-800"
+                }`}
+              >
+                <Network className="h-3 w-3" />
+                Graph {Number(message.retrievalChannels?.graph?.count || 0)} 条证据
+              </span>
+            )}
+          </div>
         )}
 
         {/* Sources button */}

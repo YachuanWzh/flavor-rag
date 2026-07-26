@@ -27,6 +27,9 @@ class MessageResponse(BaseModel):
     content: str
     thinkingContent: str | None = None
     sources: list | None = None
+    agentSteps: list | None = None
+    ragModes: dict | None = None
+    retrievalChannels: dict | None = None
     createTime: str
 
 
@@ -129,6 +132,21 @@ async def rename_conversation(
 # ---- Messages ----
 
 
+def _message_payload(message: Message) -> dict:
+    """Serialize persisted message metadata using the frontend API contract."""
+    return {
+        "id": message.id,
+        "role": message.role,
+        "content": message.content,
+        "thinkingContent": message.thinking_content,
+        "sources": message.sources,
+        "agentSteps": message.agent_steps,
+        "ragModes": message.rag_modes,
+        "retrievalChannels": message.retrieval_channels,
+        "createTime": str(message.create_time),
+    }
+
+
 @router.get("/{conv_id}/messages")
 async def list_messages(
     conv_id: str,
@@ -155,17 +173,7 @@ async def list_messages(
     return {
         "code": "0",
         "message": "success",
-        "data": [
-            {
-                "id": m.id,
-                "role": m.role,
-                "content": m.content,
-                "thinkingContent": m.thinking_content,
-                "sources": m.sources,
-                "createTime": str(m.create_time),
-            }
-            for m in messages
-        ],
+        "data": [_message_payload(message) for message in messages],
     }
 
 

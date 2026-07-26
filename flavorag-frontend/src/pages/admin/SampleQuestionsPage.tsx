@@ -21,8 +21,8 @@ export default function SampleQuestionsPage() {
 
   const loadItems = async () => {
     try {
-      const data = await api.get("/api/admin/sample-questions");
-      setItems(data as SampleQuestionItem[]);
+      const data = await api.get<SampleQuestionItem[], SampleQuestionItem[]>("/api/admin/sample-questions");
+      setItems(data);
     } catch { setError("加载失败"); }
     finally { setLoading(false); }
   };

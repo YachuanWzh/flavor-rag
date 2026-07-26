@@ -38,8 +38,8 @@ export default function IntentTreePage() {
 
   const loadNodes = async () => {
     try {
-      const data = await api.get("/api/admin/intent-tree");
-      setNodes(data as IntentNode[]);
+      const data = await api.get<IntentNode[], IntentNode[]>("/api/admin/intent-tree");
+      setNodes(data);
     } catch { setError("加载失败"); }
     finally { setLoading(false); }
   };

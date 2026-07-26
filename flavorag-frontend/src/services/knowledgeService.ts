@@ -31,7 +31,7 @@ export async function fetchDocuments(kbId: string): Promise<KnowledgeDocument[]>
 
 /** Chunking configuration for document upload. */
 export interface ChunkOptions {
-  strategy?: string;      // "FIXED_WINDOW" | "SEMANTIC"
+  strategy?: string;      // "FIXED_WINDOW" | "SEMANTIC" | "BLOCK_AWARE"
   chunkSize?: number;     // target characters per chunk, default 800
   overlap?: number;       // character overlap between chunks, default 100
 }
@@ -77,10 +77,18 @@ export async function deleteDocument(docId: string): Promise<void> {
 
 export async function reprocessDocument(
   docId: string,
-  pipelineId: string = ""
+  pipelineId: string = "",
+  options: ChunkOptions = {},
 ): Promise<{ chunkCount: number; status: string }> {
   const form = new FormData();
   if (pipelineId) form.append("pipeline_id", pipelineId);
+  if (options.strategy) form.append("chunk_strategy", options.strategy);
+  if (options.chunkSize !== undefined) {
+    form.append("chunk_size", String(options.chunkSize));
+  }
+  if (options.overlap !== undefined) {
+    form.append("overlap", String(options.overlap));
+  }
   return api.post(`/api/knowledge-base/docs/${docId}/reprocess`, form, {
     timeout: 600000,
   });
@@ -88,4 +96,14 @@ export async function reprocessDocument(
 
 export async function fetchChunks(docId: string): Promise<KnowledgeChunk[]> {
   return api.get(`/api/knowledge-base/docs/${docId}/chunks`);
+}
+
+export async function updateChunkStatus(
+  docId: string,
+  chunkId: string,
+  enabled: boolean,
+): Promise<Pick<KnowledgeChunk, "id" | "enabled" | "updateTime">> {
+  return api.patch(`/api/knowledge-base/docs/${docId}/chunks/${chunkId}`, {
+    enabled,
+  });
 }

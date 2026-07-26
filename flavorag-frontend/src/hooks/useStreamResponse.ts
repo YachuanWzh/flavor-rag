@@ -1,10 +1,26 @@
-import type { SourceRef } from "@/types";
+import type {
+  AgentStep,
+  RagModes,
+  RetrievalChannelStatus,
+  SourceRef,
+} from "@/types";
 
 export interface StreamHandlers {
-  onMeta?: (payload: { conversationId: string; taskId: string }) => void;
+  onMeta?: (payload: {
+    conversationId: string;
+    taskId: string;
+    modes?: RagModes;
+    channels?: Record<string, RetrievalChannelStatus>;
+  }) => void;
+  onAgent?: (payload: { steps: AgentStep[] }) => void;
   onMessage?: (payload: { type: string; delta: string }) => void;
   onThinking?: (payload: { type: string; delta: string }) => void;
-  onFinish?: (payload: { messageId: string; sources?: SourceRef[] }) => void;
+  onFinish?: (payload: {
+    messageId: string;
+    sources?: SourceRef[];
+    modes?: RagModes;
+    channels?: Record<string, RetrievalChannelStatus>;
+  }) => void;
   onDone?: () => void;
   onCancel?: (payload: unknown) => void;
   onError?: (error: Error) => void;
@@ -66,6 +82,9 @@ export function createStreamResponse(
             } else {
               handlers.onMessage?.(payload);
             }
+            break;
+          case "agent":
+            handlers.onAgent?.(payload);
             break;
           case "finish":
             handlers.onFinish?.(payload);

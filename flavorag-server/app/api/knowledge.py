@@ -22,12 +22,24 @@ from app.models import (
     KnowledgeChunk,
     gen_id,
 )
-from app.ingestion.chunker import ChunkConfig
+from app.ingestion.chunker import ChunkConfig, ChunkStrategy
 from app.ingestion.pipeline import IngestionPipeline
 from app.ingestion.pipeline_engine import IngestionEngine
+from app.ingestion.url_fetcher import SafeURLFetcher, URLSecurityError
 from app.rag.search.vector import MilvusSearchChannel
+from app.config.settings import settings
+from app.config.logging_config import get_logger
+from app.security.access import Permission
+from app.security.service import (
+    document_access_predicate,
+    kb_access_predicate,
+    principal_from_user,
+    require_document,
+    require_kb,
+)
 
 router = APIRouter(prefix="/api/knowledge-base", tags=["knowledge-base"])
+_log = get_logger("flavorag.api.knowledge")
 
 # Persistent storage for uploaded files (survives restarts)
 _UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "uploads")
@@ -40,6 +52,11 @@ class URLUploadRequest(BaseModel):
     schedule_enabled: bool = Field(False, description="是否启用定时刷新")
     schedule_cron: str | None = Field(None, description="Cron表达式（暂用间隔秒数）")
 
+
+class ChunkStatusUpdate(BaseModel):
+    enabled: bool = Field(..., description="是否允许该切片参与检索")
+
+
 # ---- Knowledge Base CRUD ----
 
 
@@ -49,7 +66,9 @@ async def list_knowledge_bases(
     user: User = Depends(get_current_user),
 ):
     result = await db.execute(
-        select(KnowledgeBase).where(KnowledgeBase.deleted == 0)
+        select(KnowledgeBase).where(
+            kb_access_predicate(principal_from_user(user), Permission.READ)
+        )
     )
     kbs = result.scalars().all()
     return {
@@ -84,6 +103,8 @@ async def create_knowledge_base(
         embedding_model=embedding_model,
         collection_name=collection_name,
         pipeline_id=pipeline_id or None,
+        tenant_id=user.tenant_id or "default",
+        department_id=user.department_id,
         created_by=user.id,
     )
     db.add(kb)
@@ -126,19 +147,72 @@ async def delete_knowledge_base(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(KnowledgeBase).where(KnowledgeBase.id == kb_id, KnowledgeBase.deleted == 0)
+    kb = await require_kb(
+        db, principal_from_user(user), kb_id, Permission.ADMIN
     )
-    kb = result.scalar_one_or_none()
     if not kb:
         raise HTTPException(status_code=404, detail="知识库不存在")
 
     before_snapshot = {"name": kb.name, "collectionName": kb.collection_name}
     kb.deleted = 1
 
+    from app.models import KnowledgeAsset
+    from app.services.index_sync import IndexSyncService
+
+    documents = list(
+        (
+            await db.execute(
+                select(KnowledgeDocument).where(
+                    KnowledgeDocument.kb_id == kb_id,
+                    KnowledgeDocument.deleted == 0,
+                )
+            )
+        ).scalars().all()
+    )
+    for document in documents:
+        chunks = list(
+            (
+                await db.execute(
+                    select(KnowledgeChunk).where(
+                        KnowledgeChunk.doc_id == document.id,
+                        KnowledgeChunk.deleted == 0,
+                    )
+                )
+            ).scalars().all()
+        )
+        assets = list(
+            (
+                await db.execute(
+                    select(KnowledgeAsset).where(
+                        KnowledgeAsset.doc_id == document.id,
+                        KnowledgeAsset.deleted == 0,
+                    )
+                )
+            ).scalars().all()
+        )
+        document.deleted = 1
+        for chunk in chunks:
+            chunk.deleted = 1
+        for asset in assets:
+            asset.deleted = 1
+        await IndexSyncService().delete_document(
+            db,
+            kb=kb,
+            doc_id=document.id,
+            chunks=chunks,
+            assets=assets,
+        )
+
     # Drop Milvus collection
-    milvus = MilvusSearchChannel()
-    milvus.drop_collection(kb.collection_name)
+    try:
+        milvus = MilvusSearchChannel()
+        milvus.drop_collection(kb.collection_name)
+    except Exception as exc:
+        _log.warning(
+            "kb_collection_drop_failed",
+            kb_id=kb_id,
+            error=str(exc),
+        )
 
     # Audit log
     ctx = get_audit_context()
@@ -168,10 +242,12 @@ async def list_documents(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    principal = principal_from_user(user)
+    await require_kb(db, principal, kb_id, Permission.READ)
     result = await db.execute(
         select(KnowledgeDocument).where(
             KnowledgeDocument.kb_id == kb_id,
-            KnowledgeDocument.deleted == 0,
+            document_access_predicate(principal, Permission.READ),
         )
     )
     docs = result.scalars().all()
@@ -203,19 +279,19 @@ async def upload_document(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    # Validate knowledge base
-    result = await db.execute(
-        select(KnowledgeBase).where(
-            KnowledgeBase.id == kb_id,
-            KnowledgeBase.deleted == 0,
-        )
+    kb = await require_kb(
+        db, principal_from_user(user), kb_id, Permission.WRITE
     )
-    kb = result.scalar_one_or_none()
     if not kb:
         raise HTTPException(status_code=404, detail="知识库不存在")
 
     if not file.filename:
         raise HTTPException(status_code=400, detail="未提供文件")
+
+    try:
+        canonical_strategy = ChunkStrategy.from_value(chunk_strategy).name
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # Determine file type
     ext = os.path.splitext(file.filename)[1].lower().lstrip(".")
@@ -238,11 +314,17 @@ async def upload_document(
         doc = KnowledgeDocument(
             id=doc_id,
             kb_id=kb_id,
+            tenant_id=kb.tenant_id,
+            department_id=kb.department_id,
             doc_name=file.filename,
             file_url=file_path,
             file_type=ext,
             file_size=os.path.getsize(file_path),
-            chunk_strategy=chunk_strategy,
+            chunk_strategy=canonical_strategy,
+            chunk_config={
+                "chunkSize": chunk_size,
+                "overlapSize": overlap,
+            },
             status="running",
             created_by=user.id,
         )
@@ -251,7 +333,7 @@ async def upload_document(
 
         # Run ingestion — use DAG pipeline if KB has one bound
         chunk_config = ChunkConfig(
-            strategy=chunk_strategy,
+            strategy=canonical_strategy,
             chunk_size=chunk_size,
             overlap=overlap,
         )
@@ -290,14 +372,9 @@ async def upload_url_document(
     user: User = Depends(get_current_user),
 ):
     """Upload a document from a URL. Supports scheduled refresh via ETag."""
-    # Validate knowledge base
-    result = await db.execute(
-        select(KnowledgeBase).where(
-            KnowledgeBase.id == kb_id,
-            KnowledgeBase.deleted == 0,
-        )
+    kb = await require_kb(
+        db, principal_from_user(user), kb_id, Permission.WRITE
     )
-    kb = result.scalar_one_or_none()
     if not kb:
         raise HTTPException(status_code=404, detail="知识库不存在")
 
@@ -317,28 +394,28 @@ async def upload_url_document(
         if not doc_name:
             doc_name = "untitled"
 
-    # Download URL content
+    # Download URL content with SSRF, redirect, and response-size controls.
     try:
-        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            content = resp.content
+        fetched = await SafeURLFetcher(
+            max_bytes=settings.url_ingestion_max_bytes,
+            timeout_sec=settings.url_ingestion_timeout_sec,
+            max_redirects=settings.url_ingestion_max_redirects,
+            allow_private_networks=settings.url_allow_private_networks,
+        ).fetch(url)
+        content = fetched.content
+        _validate_url_document_type(fetched.final_url, fetched.content_type)
+        ext = _guess_extension(fetched.final_url, fetched.content_type)
+        if ext not in {"txt", "md", "pdf", "docx", "html", "htm", "json", "csv"}:
+            raise URLSecurityError("unsupported URL document type")
+        etag = fetched.etag
+        last_modified = fetched.last_modified
+        if not req.doc_name:
+            doc_name = fetched.filename
 
-            # Determine file extension
-            from urllib.parse import urlparse
-            content_type = resp.headers.get("content-type", "")
-            ext = _guess_extension(url, content_type)
-
-            # Store ETag for change detection
-            etag = resp.headers.get("etag", "")
-            last_modified = resp.headers.get("last-modified", "")
-
-            # Save to persistent uploads directory
-            import hashlib
-            doc_id = gen_id()
-            file_path = os.path.join(_UPLOAD_DIR, f"{doc_id}.{ext}")
-            with open(file_path, "wb") as f:
-                f.write(content)
+        doc_id = gen_id()
+        file_path = os.path.join(_UPLOAD_DIR, f"{doc_id}.{ext}")
+        with open(file_path, "wb") as f:
+            f.write(content)
 
         try:
             # Create document record
@@ -351,6 +428,8 @@ async def upload_url_document(
             doc = KnowledgeDocument(
                 id=doc_id,
                 kb_id=kb_id,
+                tenant_id=kb.tenant_id,
+                department_id=kb.department_id,
                 doc_name=doc_name if doc_name.endswith(f".{ext}") else f"{doc_name}.{ext}",
                 file_url=file_path,
                 file_type=ext,
@@ -372,7 +451,7 @@ async def upload_url_document(
             chunk_count = await _run_ingestion(
                 kb=kb,
                 doc=doc,
-                file_path=tmp_path,
+                file_path=file_path,
                 source_type="url",
                 user=user,
                 db=db,
@@ -395,6 +474,8 @@ async def upload_url_document(
             traceback.print_exc()
             raise HTTPException(status_code=500, detail=str(e))
 
+    except URLSecurityError as exc:
+        raise HTTPException(status_code=400, detail=f"URL安全校验失败: {exc}")
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=400, detail=f"获取URL失败: HTTP {exc.response.status_code}")
     except httpx.RequestError as exc:
@@ -455,6 +536,9 @@ async def _run_ingestion(
 async def reprocess_document(
     doc_id: str,
     pipeline_id: str = Form(""),
+    chunk_strategy: str = Form(""),
+    chunk_size: int | None = Form(None),
+    overlap: int | None = Form(None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -463,13 +547,9 @@ async def reprocess_document(
     If pipeline_id is provided, use that pipeline. Otherwise use the KB's
     bound pipeline or fall back to the legacy pipeline.
     """
-    result = await db.execute(
-        select(KnowledgeDocument).where(
-            KnowledgeDocument.id == doc_id,
-            KnowledgeDocument.deleted == 0,
-        )
+    doc = await require_document(
+        db, principal_from_user(user), doc_id, Permission.WRITE
     )
-    doc = result.scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=404, detail="文档不存在")
 
@@ -484,17 +564,20 @@ async def reprocess_document(
         # For URL documents, re-download if the local copy is gone
         if doc.source_type == "url" and doc.source_location:
             try:
-                async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-                    resp = await client.get(doc.source_location)
-                    resp.raise_for_status()
-                    ext = _guess_extension(doc.source_location, resp.headers.get("content-type", ""))
-                    new_path = os.path.join(_UPLOAD_DIR, f"{doc.id}.{ext}")
-                    with open(new_path, "wb") as f:
-                        f.write(resp.content)
-                    doc.file_url = new_path
-                    doc.file_type = ext
-                    doc.file_size = len(resp.content)
-                    await db.flush()
+                fetched = await SafeURLFetcher(
+                    max_bytes=settings.url_ingestion_max_bytes,
+                    timeout_sec=settings.url_ingestion_timeout_sec,
+                    max_redirects=settings.url_ingestion_max_redirects,
+                    allow_private_networks=settings.url_allow_private_networks,
+                ).fetch(doc.source_location)
+                ext = _guess_extension(fetched.final_url, fetched.content_type)
+                new_path = os.path.join(_UPLOAD_DIR, f"{doc.id}.{ext}")
+                with open(new_path, "wb") as f:
+                    f.write(fetched.content)
+                doc.file_url = new_path
+                doc.file_type = ext
+                doc.file_size = len(fetched.content)
+                await db.flush()
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=f"下载URL失败: {str(exc)}")
         else:
@@ -505,11 +588,9 @@ async def reprocess_document(
     chunk_result = await db.execute(
         select(KnowledgeChunk).where(KnowledgeChunk.doc_id == doc_id, KnowledgeChunk.deleted == 0)
     )
-    old_chunks = chunk_result.scalars().all()
-    old_ids = []
+    old_chunks = list(chunk_result.scalars().all())
     for c in old_chunks:
         c.deleted = 1
-        old_ids.append(c.id)
     from app.models import KnowledgeAsset
     old_assets_result = await db.execute(
         select(KnowledgeAsset).where(
@@ -517,26 +598,58 @@ async def reprocess_document(
             KnowledgeAsset.deleted == 0,
         )
     )
-    for asset in old_assets_result.scalars().all():
+    old_assets = list(old_assets_result.scalars().all())
+    for asset in old_assets:
         asset.deleted = 1
-    if old_ids:
-        try:
-            milvus = MilvusSearchChannel()
-            milvus.delete_by_ids(kb.collection_name, old_ids)
-        except Exception:
-            pass
+    if old_chunks or old_assets:
+        from app.services.index_sync import IndexSyncService
+
+        await IndexSyncService().delete_document(
+            db,
+            kb=kb,
+            doc_id=doc_id,
+            chunks=old_chunks,
+            assets=old_assets,
+        )
 
     # Use pipeline_id from param, then from KB, then fallback
     effective_pipeline_id = pipeline_id or kb.pipeline_id
 
-    chunk_config = ChunkConfig(strategy=doc.chunk_strategy or "FIXED_WINDOW")
-    if doc.chunk_config and isinstance(doc.chunk_config, dict):
-        cs = doc.chunk_config.get("chunkSize")
-        if cs:
-            chunk_config.chunk_size = int(cs)
-        ov = doc.chunk_config.get("overlapSize")
-        if ov:
-            chunk_config.overlap_size = int(ov)
+    stored_config = doc.chunk_config if isinstance(doc.chunk_config, dict) else {}
+    requested_strategy = chunk_strategy or doc.chunk_strategy or "FIXED_WINDOW"
+    try:
+        canonical_strategy = ChunkStrategy.from_value(requested_strategy).name
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    effective_chunk_size = (
+        chunk_size
+        if chunk_size is not None
+        else int(stored_config.get("chunkSize") or 512)
+    )
+    effective_overlap = (
+        overlap
+        if overlap is not None
+        else int(stored_config.get("overlapSize") or 128)
+    )
+    if effective_chunk_size <= 0:
+        raise HTTPException(status_code=400, detail="chunk_size must be positive")
+    if effective_overlap < 0 or effective_overlap >= effective_chunk_size:
+        raise HTTPException(
+            status_code=400,
+            detail="overlap must be non-negative and smaller than chunk_size",
+        )
+
+    chunk_config = ChunkConfig(
+        strategy=canonical_strategy,
+        chunk_size=effective_chunk_size,
+        overlap=effective_overlap,
+    )
+    doc.chunk_strategy = canonical_strategy
+    doc.chunk_config = {
+        "chunkSize": effective_chunk_size,
+        "overlapSize": effective_overlap,
+    }
 
     doc.status = "running"
     await db.flush()
@@ -595,6 +708,7 @@ def _guess_extension(url: str, content_type: str) -> str:
         "text/plain": "txt",
         "text/markdown": "md",
         "application/pdf": "pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
         "text/html": "html",
         "application/json": "json",
         "text/csv": "csv",
@@ -603,6 +717,26 @@ def _guess_extension(url: str, content_type: str) -> str:
         if content_type.startswith(ct_prefix):
             return ext
     return "txt"
+
+
+def _validate_url_document_type(url: str, content_type: str) -> None:
+    from urllib.parse import urlparse
+
+    allowed_extensions = {"txt", "md", "pdf", "docx", "html", "htm", "json", "csv"}
+    allowed_content_types = {
+        "text/plain",
+        "text/markdown",
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "text/html",
+        "application/xhtml+xml",
+        "application/json",
+        "text/csv",
+    }
+    path = urlparse(url).path
+    extension = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    if extension not in allowed_extensions and content_type not in allowed_content_types:
+        raise URLSecurityError("unsupported URL document content type")
 
 
 def _compute_content_hash_value(etag: str, last_modified: str, url: str) -> str:
@@ -617,13 +751,9 @@ async def delete_document(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(KnowledgeDocument).where(
-            KnowledgeDocument.id == doc_id,
-            KnowledgeDocument.deleted == 0,
-        )
+    doc = await require_document(
+        db, principal_from_user(user), doc_id, Permission.WRITE
     )
-    doc = result.scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=404, detail="文档不存在")
 
@@ -633,17 +763,36 @@ async def delete_document(
     chunk_result = await db.execute(
         select(KnowledgeChunk).where(KnowledgeChunk.doc_id == doc_id)
     )
-    for chunk in chunk_result.scalars().all():
+    chunks = list(chunk_result.scalars().all())
+    for chunk in chunks:
         chunk.deleted = 1
 
     from app.models import KnowledgeAsset
     asset_result = await db.execute(
         select(KnowledgeAsset).where(KnowledgeAsset.doc_id == doc_id)
     )
-    for asset in asset_result.scalars().all():
+    assets = list(asset_result.scalars().all())
+    for asset in assets:
         asset.deleted = 1
 
-    return {"code": "0", "message": "success", "data": None}
+    kb = await require_kb(
+        db, principal_from_user(user), doc.kb_id, Permission.WRITE
+    )
+    from app.services.index_sync import IndexSyncService
+
+    sync_job = await IndexSyncService().delete_document(
+        db,
+        kb=kb,
+        doc_id=doc_id,
+        chunks=chunks,
+        assets=assets,
+    )
+
+    return {
+        "code": "0",
+        "message": "success",
+        "data": {"syncStatus": sync_job.status, "syncJobId": sync_job.id},
+    }
 
 
 @router.get("/docs/{doc_id}/chunks")
@@ -652,6 +801,9 @@ async def list_chunks(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await require_document(
+        db, principal_from_user(user), doc_id, Permission.READ
+    )
     result = await db.execute(
         select(KnowledgeChunk)
         .where(KnowledgeChunk.doc_id == doc_id, KnowledgeChunk.deleted == 0)
@@ -667,12 +819,68 @@ async def list_chunks(
                 "chunkIndex": c.chunk_index,
                 "content": c.content,
                 "charCount": c.char_count,
+                "tokenCount": c.token_count,
+                "enabled": 1 if c.enabled is None else c.enabled,
                 "blockType": c.block_type,
                 "pageStart": c.page_start,
                 "pageEnd": c.page_end,
                 "bboxes": c.bbox_json or [],
                 "metadata": c.metadata_json or {},
+                "createTime": str(c.create_time) if c.create_time else None,
+                "updateTime": str(c.update_time) if c.update_time else None,
             }
             for c in chunks
         ],
+    }
+
+
+@router.patch("/docs/{doc_id}/chunks/{chunk_id}")
+async def update_chunk_status(
+    doc_id: str,
+    chunk_id: str,
+    req: ChunkStatusUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    await require_document(
+        db, principal_from_user(user), doc_id, Permission.WRITE
+    )
+    result = await db.execute(
+        select(KnowledgeChunk).where(
+            KnowledgeChunk.id == chunk_id,
+            KnowledgeChunk.doc_id == doc_id,
+            KnowledgeChunk.deleted == 0,
+        )
+    )
+    chunk = result.scalar_one_or_none()
+    if chunk is None:
+        raise HTTPException(status_code=404, detail="切片不存在")
+
+    before_enabled = 1 if chunk.enabled is None else chunk.enabled
+    chunk.enabled = 1 if req.enabled else 0
+    chunk.updated_by = user.id
+    await db.flush()
+
+    ctx = get_audit_context()
+    await record_audit(
+        biz_type="knowledge_chunk",
+        biz_id=chunk.id,
+        operation_type="UPDATE",
+        action_desc=f"{'启用' if req.enabled else '禁用'}切片 #{chunk.chunk_index}",
+        before_snapshot={"enabled": before_enabled},
+        after_snapshot={"enabled": chunk.enabled},
+        operator_id=ctx.get("operator_id") or user.id,
+        operator_name=ctx.get("operator_name") or user.username,
+        operator_role=ctx.get("operator_role") or user.role,
+        db=db,
+    )
+
+    return {
+        "code": "0",
+        "message": "success",
+        "data": {
+            "id": chunk.id,
+            "enabled": chunk.enabled,
+            "updateTime": str(chunk.update_time) if chunk.update_time else None,
+        },
     }

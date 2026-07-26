@@ -135,11 +135,10 @@ class TestGraphClient:
         assert client is not None
 
     @pytest.mark.asyncio
-    async def test_graph_disabled_returns_empty(self):
+    async def test_graph_disabled_returns_empty(self, monkeypatch):
         from app.rag.graph.lightrag_client import LightRAGClient
         from app.config.settings import settings
-        # Should be disabled by default
-        assert settings.graph_enabled is False
+        monkeypatch.setattr(settings, "graph_enabled", False)
         client = LightRAGClient()
         result = await client.query_graph("test query")
         assert "results" in result

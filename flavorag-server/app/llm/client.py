@@ -7,6 +7,20 @@ from typing import AsyncIterator
 
 import httpx
 from app.config.settings import settings
+from app.rag.governance import CircuitBreaker
+
+
+_model_breakers: dict[tuple[str, str], CircuitBreaker] = {}
+
+
+def _model_breaker(base_url: str, model: str) -> CircuitBreaker:
+    key = (base_url, model)
+    if key not in _model_breakers:
+        _model_breakers[key] = CircuitBreaker(
+            failure_threshold=settings.circuit_breaker_failures,
+            recovery_timeout_sec=settings.circuit_breaker_recovery_sec,
+        )
+    return _model_breakers[key]
 
 
 class LLMClient:
@@ -43,31 +57,39 @@ class LLMClient:
             "temperature": temperature,
             "stream": True,
         }
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream(
-                "POST",
-                f"{self.base_url}/chat/completions",
-                headers=headers,
-                json=payload,
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if line.startswith("data: "):
-                        data_str = line[6:]
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            data = json.loads(data_str)
-                            delta = data["choices"][0]["delta"]
-                            if "content" in delta and delta["content"]:
-                                yield delta["content"]
-                            if (
-                                "reasoning_content" in delta
-                                and delta["reasoning_content"]
-                            ):
-                                yield f"__THINK__{delta['reasoning_content']}"
-                        except (json.JSONDecodeError, KeyError, IndexError):
-                            continue
+        breaker = _model_breaker(self.base_url, self.model)
+        breaker.before_call()
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if line.startswith("data: "):
+                            data_str = line[6:]
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                data = json.loads(data_str)
+                                delta = data["choices"][0]["delta"]
+                                if "content" in delta and delta["content"]:
+                                    yield delta["content"]
+                                if (
+                                    "reasoning_content" in delta
+                                    and delta["reasoning_content"]
+                                ):
+                                    yield f"__THINK__{delta['reasoning_content']}"
+                            except (json.JSONDecodeError, KeyError, IndexError):
+                                continue
+        except Exception:
+            breaker.record_failure()
+            raise
+        else:
+            breaker.record_success()
 
 
 class MockLLMClient:

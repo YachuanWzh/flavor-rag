@@ -29,6 +29,12 @@ class ESKeywordSearchChannel(SearchChannel):
     def enabled(self) -> bool:
         return bool(settings.es_enabled)
 
+    async def close(self) -> None:
+        if self._es is not None:
+            await self._es.close()
+            self._es = None
+            self._initialized = False
+
     async def search(
         self, query: str, collection_name: str, top_k: int = 10
     ) -> list[SearchResult]:
@@ -58,10 +64,15 @@ class ESKeywordSearchChannel(SearchChannel):
                     doc_id=src.get("doc_id", ""),
                     content=src.get("content", ""),
                     score=float(hit["_score"]),
+                    block_type=src.get("block_type", ""),
+                    page_start=src.get("page_start"),
+                    page_end=src.get("page_end"),
                 ))
             return results
         except Exception:
             return []
+        finally:
+            await self.close()
 
     async def insert(self, chunks: list[dict], kb_id: str):
         """Bulk-index documents into ES."""
@@ -80,6 +91,9 @@ class ESKeywordSearchChannel(SearchChannel):
                     "_id": c["id"],
                     "_source": {
                         "kb_id": kb_id,
+                        "tenant_id": c.get("tenant_id", "default"),
+                        "department_id": c.get("department_id"),
+                        "doc_id": c.get("doc_id", ""),
                         "content": c["content"],
                         "chunk_index": c.get("chunk_index", 0),
                     },
@@ -89,3 +103,29 @@ class ESKeywordSearchChannel(SearchChannel):
             await async_bulk(es, actions)
         except Exception:
             pass
+        finally:
+            await self.close()
+
+    async def delete_by_ids(self, chunk_ids: list[str]) -> None:
+        if not chunk_ids or not self.enabled:
+            return
+        es = await self._get_es()
+        if es is None:
+            return
+        from elasticsearch.helpers import async_bulk
+
+        try:
+            await async_bulk(
+                es,
+                [
+                    {
+                        "_op_type": "delete",
+                        "_index": self.INDEX_NAME,
+                        "_id": chunk_id,
+                    }
+                    for chunk_id in chunk_ids
+                ],
+                raise_on_error=False,
+            )
+        finally:
+            await self.close()

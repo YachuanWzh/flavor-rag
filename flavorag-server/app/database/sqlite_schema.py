@@ -13,13 +13,51 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.models import Base
 
 
-_KNOWLEDGE_CHUNK_COLUMNS: dict[str, str] = {
-    "embedding_content": "TEXT",
-    "block_type": "VARCHAR(32)",
-    "page_start": "INTEGER",
-    "page_end": "INTEGER",
-    "bbox_json": "JSON",
-    "metadata_json": "JSON",
+_COMPATIBILITY_COLUMNS: dict[str, dict[str, str]] = {
+    "t_user": {
+        "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+        "department_id": "VARCHAR(64)",
+    },
+    "t_conversation": {
+        "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+        "summary": "TEXT",
+        "summary_message_count": "INTEGER DEFAULT 0",
+    },
+    "t_message": {
+        "agent_steps": "JSON",
+        "rag_modes": "JSON",
+        "retrieval_channels": "JSON",
+    },
+    "t_knowledge_base": {
+        "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+        "department_id": "VARCHAR(64)",
+        "visibility": "VARCHAR(16) NOT NULL DEFAULT 'PRIVATE'",
+    },
+    "t_knowledge_document": {
+        "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+        "department_id": "VARCHAR(64)",
+        "visibility": "VARCHAR(16) NOT NULL DEFAULT 'INHERIT'",
+    },
+    "t_knowledge_chunk": {
+        "embedding_content": "TEXT",
+        "block_type": "VARCHAR(32)",
+        "page_start": "INTEGER",
+        "page_end": "INTEGER",
+        "bbox_json": "JSON",
+        "metadata_json": "JSON",
+        "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+        "department_id": "VARCHAR(64)",
+    },
+    "t_knowledge_asset": {
+        "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+        "department_id": "VARCHAR(64)",
+    },
+    "t_rag_trace_run": {
+        "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+        "kb_id": "VARCHAR(20)",
+        "rejection_reason": "VARCHAR(64)",
+        "metadata_json": "JSON",
+    },
 }
 
 
@@ -36,22 +74,84 @@ async def initialize_sqlite_schema(engine: AsyncEngine) -> list[str]:
     added_columns: list[str] = []
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        existing_columns = await conn.run_sync(
-            lambda sync_conn: {
-                column["name"]
-                for column in inspect(sync_conn).get_columns("t_knowledge_chunk")
-            }
-        )
-
-        for column_name, column_type in _KNOWLEDGE_CHUNK_COLUMNS.items():
-            if column_name in existing_columns:
-                continue
-            await conn.execute(
-                text(
-                    f"ALTER TABLE t_knowledge_chunk "
-                    f"ADD COLUMN {column_name} {column_type}"
-                )
+        for table_name, expected_columns in _COMPATIBILITY_COLUMNS.items():
+            existing_columns = await conn.run_sync(
+                lambda sync_conn, name=table_name: {
+                    column["name"]
+                    for column in inspect(sync_conn).get_columns(name)
+                }
             )
-            added_columns.append(column_name)
+            for column_name, column_type in expected_columns.items():
+                if column_name in existing_columns:
+                    continue
+                await conn.execute(
+                    text(
+                        f"ALTER TABLE {table_name} "
+                        f"ADD COLUMN {column_name} {column_type}"
+                    )
+                )
+                added_columns.append(f"{table_name}.{column_name}")
+        index_specs = (
+            (
+                "t_knowledge_base",
+                {"tenant_id", "deleted"},
+                "CREATE INDEX IF NOT EXISTS idx_kb_tenant "
+                "ON t_knowledge_base (tenant_id, deleted)",
+            ),
+            (
+                "t_knowledge_document",
+                {"tenant_id", "kb_id", "deleted"},
+                "CREATE INDEX IF NOT EXISTS idx_document_tenant "
+                "ON t_knowledge_document (tenant_id, kb_id, deleted)",
+            ),
+            (
+                "t_knowledge_chunk",
+                {"tenant_id", "kb_id", "doc_id", "deleted", "enabled"},
+                "CREATE INDEX IF NOT EXISTS idx_chunk_tenant "
+                "ON t_knowledge_chunk (tenant_id, kb_id, doc_id, deleted, enabled)",
+            ),
+            (
+                "t_resource_acl",
+                {"tenant_id", "resource_type", "resource_id"},
+                "CREATE INDEX IF NOT EXISTS idx_acl_resource "
+                "ON t_resource_acl (tenant_id, resource_type, resource_id)",
+            ),
+            (
+                "t_resource_acl",
+                {"tenant_id", "subject_type", "subject_id"},
+                "CREATE INDEX IF NOT EXISTS idx_acl_subject "
+                "ON t_resource_acl (tenant_id, subject_type, subject_id)",
+            ),
+            (
+                "t_resource_acl",
+                {
+                    "tenant_id",
+                    "subject_type",
+                    "subject_id",
+                    "resource_type",
+                    "resource_id",
+                    "deleted",
+                },
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_acl_live_grant "
+                "ON t_resource_acl "
+                "(tenant_id, subject_type, subject_id, resource_type, resource_id) "
+                "WHERE deleted = 0",
+            ),
+            (
+                "t_index_sync_job",
+                {"status", "next_retry_time"},
+                "CREATE INDEX IF NOT EXISTS idx_sync_job_status "
+                "ON t_index_sync_job (status, next_retry_time)",
+            ),
+        )
+        for table_name, required_columns, ddl in index_specs:
+            current_columns = await conn.run_sync(
+                lambda sync_conn, name=table_name: {
+                    column["name"]
+                    for column in inspect(sync_conn).get_columns(name)
+                }
+            )
+            if required_columns.issubset(current_columns):
+                await conn.execute(text(ddl))
 
     return added_columns

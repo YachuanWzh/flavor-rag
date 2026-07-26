@@ -31,72 +31,114 @@ async def dashboard_stats(
     today_start = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0, tzinfo=None
     )
+    tenant_id = user.tenant_id or "default"
+    global_access = user.role == "system_admin"
 
     # Counts
     kb_count = (await db.execute(
-        select(func.count(KnowledgeBase.id)).where(KnowledgeBase.deleted == 0)
+        select(func.count(KnowledgeBase.id)).where(
+            KnowledgeBase.deleted == 0,
+            *( [] if global_access else [KnowledgeBase.tenant_id == tenant_id] ),
+        )
     )).scalar() or 0
 
     doc_count = (await db.execute(
-        select(func.count(KnowledgeDocument.id)).where(KnowledgeDocument.deleted == 0)
+        select(func.count(KnowledgeDocument.id)).where(
+            KnowledgeDocument.deleted == 0,
+            *( [] if global_access else [KnowledgeDocument.tenant_id == tenant_id] ),
+        )
     )).scalar() or 0
 
     chunk_count = (await db.execute(
-        select(func.count(KnowledgeChunk.id)).where(KnowledgeChunk.deleted == 0)
+        select(func.count(KnowledgeChunk.id)).where(
+            KnowledgeChunk.deleted == 0,
+            *( [] if global_access else [KnowledgeChunk.tenant_id == tenant_id] ),
+        )
     )).scalar() or 0
 
     conv_count = (await db.execute(
-        select(func.count(Conversation.id)).where(Conversation.deleted == 0)
+        select(func.count(Conversation.id)).where(
+            Conversation.deleted == 0,
+            *( [] if global_access else [Conversation.tenant_id == tenant_id] ),
+        )
     )).scalar() or 0
 
     msg_count = (await db.execute(
-        select(func.count(Message.id)).where(Message.deleted == 0)
+        select(func.count(Message.id))
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(
+            Message.deleted == 0,
+            *( [] if global_access else [Conversation.tenant_id == tenant_id] ),
+        )
     )).scalar() or 0
 
     # Today's metrics
     today_questions = (await db.execute(
-        select(func.count(Message.id)).where(
+        select(func.count(Message.id))
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(
             Message.deleted == 0,
             Message.role == "user",
             Message.create_time >= today_start,
+            *( [] if global_access else [Conversation.tenant_id == tenant_id] ),
         )
     )).scalar() or 0
 
     today_traces = (await db.execute(
-        select(func.count(RagTraceRun.id)).where(RagTraceRun.create_time >= today_start)
+        select(func.count(RagTraceRun.id)).where(
+            RagTraceRun.create_time >= today_start,
+            *( [] if global_access else [RagTraceRun.tenant_id == tenant_id] ),
+        )
     )).scalar() or 0
 
     # Average durations from recent traces (last 100)
     avg_search = (await db.execute(
         select(func.avg(RagTraceRun.search_duration_ms))
-        .where(RagTraceRun.status == "success")
+        .where(
+            RagTraceRun.status == "success",
+            *( [] if global_access else [RagTraceRun.tenant_id == tenant_id] ),
+        )
         .limit(100)
     )).scalar() or 0
 
     avg_llm = (await db.execute(
         select(func.avg(RagTraceRun.llm_duration_ms))
-        .where(RagTraceRun.status == "success")
+        .where(
+            RagTraceRun.status == "success",
+            *( [] if global_access else [RagTraceRun.tenant_id == tenant_id] ),
+        )
         .limit(100)
     )).scalar() or 0
 
     avg_total = (await db.execute(
         select(func.avg(RagTraceRun.total_duration_ms))
-        .where(RagTraceRun.status == "success")
+        .where(
+            RagTraceRun.status == "success",
+            *( [] if global_access else [RagTraceRun.tenant_id == tenant_id] ),
+        )
         .limit(100)
     )).scalar() or 0
 
     # Feedback stats
     from app.models import MessageFeedback
     positive_fb = (await db.execute(
-        select(func.count(MessageFeedback.id)).where(
+        select(func.count(MessageFeedback.id))
+        .join(Message, Message.id == MessageFeedback.message_id)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(
             MessageFeedback.vote == 1,
             MessageFeedback.deleted == 0,
+            *( [] if global_access else [Conversation.tenant_id == tenant_id] ),
         )
     )).scalar() or 0
     negative_fb = (await db.execute(
-        select(func.count(MessageFeedback.id)).where(
+        select(func.count(MessageFeedback.id))
+        .join(Message, Message.id == MessageFeedback.message_id)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(
             MessageFeedback.vote == -1,
             MessageFeedback.deleted == 0,
+            *( [] if global_access else [Conversation.tenant_id == tenant_id] ),
         )
     )).scalar() or 0
 
@@ -193,15 +235,23 @@ async def list_traces(
 ):
     """List recent trace runs."""
     offset = (page - 1) * limit
+    tenant_predicate = (
+        True
+        if user.role == "system_admin"
+        else RagTraceRun.tenant_id == (user.tenant_id or "default")
+    )
     result = await db.execute(
         select(RagTraceRun)
+        .where(tenant_predicate)
         .order_by(desc(RagTraceRun.create_time))
         .offset(offset)
         .limit(limit)
     )
     traces = result.scalars().all()
 
-    count_result = await db.execute(select(func.count(RagTraceRun.id)))
+    count_result = await db.execute(
+        select(func.count(RagTraceRun.id)).where(tenant_predicate)
+    )
     total = count_result.scalar() or 0
 
     return {"code": "0", "message": "success", "data": {
@@ -230,7 +280,10 @@ async def get_trace_detail(
 ):
     """Get full trace detail with all nodes."""
     tracer = TraceLogger(db)
-    detail = await tracer.get_trace(trace_id)
+    detail = await tracer.get_trace(
+        trace_id,
+        tenant_id=None if user.role == "system_admin" else (user.tenant_id or "default"),
+    )
     if not detail:
         raise HTTPException(status_code=404, detail="Trace not found")
     return {"code": "0", "message": "success", "data": detail}

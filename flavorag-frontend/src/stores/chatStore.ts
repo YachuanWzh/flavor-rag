@@ -10,6 +10,9 @@ interface ChatState {
   isLoading: boolean;
   isStreaming: boolean;
   deepThinkingEnabled: boolean;
+  agenticRagEnabled: boolean;
+  graphRagEnabled: boolean;
+  graphRevision: number;
   streamingMessageId: string | null;
   openedSourceMessageId: string | null;
 
@@ -18,6 +21,8 @@ interface ChatState {
   setSelectedKbId: (id: string | null) => void;
   setMessages: (msgs: Message[]) => void;
   setDeepThinking: (enabled: boolean) => void;
+  setAgenticRag: (enabled: boolean) => void;
+  setGraphRag: (enabled: boolean) => void;
   toggleSourcesPanel: (messageId: string) => void;
 
   sendMessage: (content: string) => Promise<void>;
@@ -36,6 +41,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   isLoading: false,
   isStreaming: false,
   deepThinkingEnabled: false,
+  agenticRagEnabled: false,
+  graphRagEnabled: false,
+  graphRevision: 0,
   streamingMessageId: null,
   openedSourceMessageId: null,
 
@@ -58,6 +66,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
   setMessages: (msgs) => set({ messages: msgs }),
   setDeepThinking: (enabled) => set({ deepThinkingEnabled: enabled }),
+  setAgenticRag: (enabled) => set({ agenticRagEnabled: enabled }),
+  setGraphRag: (enabled) => set({ graphRagEnabled: enabled }),
   toggleSourcesPanel: (messageId) =>
     set({
       openedSourceMessageId:
@@ -90,6 +100,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const params = new URLSearchParams({
       question: content.trim(),
       deep_thinking: String(state.deepThinkingEnabled),
+      agentic_rag: String(state.agenticRagEnabled),
+      graph_rag: String(state.graphRagEnabled),
     });
     if (state.currentSessionId) {
       params.set("conversation_id", state.currentSessionId);
@@ -103,6 +115,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (payload.conversationId && !state.currentSessionId) {
           set({ currentSessionId: payload.conversationId });
         }
+        set((s) => ({
+          messages: s.messages.map((m) =>
+            m.id === s.streamingMessageId
+              ? {
+                  ...m,
+                  ragModes: payload.modes,
+                  retrievalChannels: payload.channels,
+                }
+              : m
+          ),
+        }));
+      },
+      onAgent: (payload) => {
+        set((s) => ({
+          messages: s.messages.map((m) =>
+            m.id === s.streamingMessageId
+              ? { ...m, agentSteps: payload.steps }
+              : m
+          ),
+        }));
       },
       onMessage: (payload) => {
         set((s) => ({
@@ -126,12 +158,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set((s) => ({
           messages: s.messages.map((m) =>
             m.id === s.streamingMessageId
-              ? { ...m, id: payload.messageId || m.id, sources: payload.sources }
+              ? {
+                  ...m,
+                  id: payload.messageId || m.id,
+                  sources: payload.sources,
+                  ragModes: payload.modes || m.ragModes,
+                  retrievalChannels: payload.channels || m.retrievalChannels,
+                }
               : m
           ),
           isLoading: false,
           isStreaming: false,
           streamingMessageId: null,
+          graphRevision: s.graphRevision + (state.graphRagEnabled ? 1 : 0),
         }));
       },
       onDone: () => {
@@ -199,5 +238,8 @@ function formatMessage(m: any): Message {
     thinkingContent: m.thinkingContent,
     sources: m.sources,
     messageStatus: m.messageStatus,
+    agentSteps: m.agentSteps,
+    ragModes: m.ragModes,
+    retrievalChannels: m.retrievalChannels,
   };
 }

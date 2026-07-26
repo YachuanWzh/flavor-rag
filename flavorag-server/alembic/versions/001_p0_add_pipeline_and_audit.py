@@ -17,7 +17,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     # --- Add pipeline_id column to t_knowledge_base ---
-    op.execute("ALTER TABLE t_knowledge_base ADD COLUMN pipeline_id VARCHAR(20)")
+    op.execute(
+        "ALTER TABLE t_knowledge_base "
+        "ADD COLUMN IF NOT EXISTS pipeline_id VARCHAR(20)"
+    )
 
     # --- t_biz_change_log ---
     op.execute("""

@@ -35,8 +35,8 @@ export default function QueryTermMappingPage() {
 
   const loadItems = async () => {
     try {
-      const data = await api.get("/api/admin/query-term-mapping");
-      setItems(data as TermMapping[]);
+      const data = await api.get<TermMapping[], TermMapping[]>("/api/admin/query-term-mapping");
+      setItems(data);
     } catch { setError("加载失败"); }
     finally { setLoading(false); }
   };

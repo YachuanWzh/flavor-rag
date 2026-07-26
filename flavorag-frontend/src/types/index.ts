@@ -20,6 +20,9 @@ export interface Message {
   sources?: SourceRef[];
   recommendedQuestions?: string[];
   messageStatus?: "NORMAL" | "INTERRUPTED";
+  agentSteps?: AgentStep[];
+  ragModes?: RagModes;
+  retrievalChannels?: Record<string, RetrievalChannelStatus>;
 }
 
 export interface SourceRef {
@@ -56,8 +59,65 @@ export interface KnowledgeChunk {
   chunkIndex: number;
   content: string;
   charCount: number;
-  enabled?: number;     // 1 = enabled, 0 = disabled
+  enabled: number;      // 1 = enabled, 0 = disabled
   tokenCount?: number;  // estimated token count
+  blockType?: string;
+  pageStart?: number | null;
+  pageEnd?: number | null;
   createTime?: string;
   updateTime?: string;
+}
+
+export interface RagModes {
+  agenticRag: boolean;
+  graphRag: boolean;
+}
+
+export interface AgentStep {
+  tool: string;
+  arguments: Record<string, unknown>;
+  observation: Record<string, unknown>;
+}
+
+export interface RetrievalChannelStatus {
+  ok?: boolean;
+  count?: number;
+  error?: string | null;
+  [key: string]: unknown;
+}
+
+export interface GraphNode {
+  id: string;
+  name: string;
+  type?: string;
+  description?: string;
+  documentId?: string;
+}
+
+export interface GraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  label?: string;
+  description?: string;
+}
+
+export interface GraphView {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  truncated: boolean;
+  disabled?: boolean;
+}
+
+export interface RagCapabilities {
+  agenticRag: {
+    available: boolean;
+    defaultEnabled: boolean;
+    maxSteps: number;
+  };
+  graphRag: {
+    available: boolean;
+    defaultEnabled: boolean;
+    status: string;
+  };
 }

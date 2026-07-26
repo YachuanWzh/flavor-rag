@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     embedding_base_url: str = "https://api.siliconflow.cn/v1"
     embedding_model: str = "Qwen/Qwen3-Embedding-8B"
     embedding_dim: int = 4096
+    embedding_query_timeout_sec: float = 25.0
+    embedding_query_max_attempts: int = 1
 
     # LLM
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -56,6 +58,9 @@ class Settings(BaseSettings):
     pdf_table_max_rows: int = 20
     pdf_image_min_area_ratio: float = 0.001
     pdf_asset_storage_required: bool = True
+    pdf_ocr_enabled: bool = True
+    pdf_ocr_min_native_chars: int = 20
+    pdf_ocr_dpi: int = 180
 
     # 深度思考 / 推理模型
     reasoning_model: str = ""
@@ -65,6 +70,21 @@ class Settings(BaseSettings):
     # Reranker
     reranker_base_url: str = "https://api.siliconflow.cn/v1"
     reranker_model: str = "Qwen/Qwen3-Reranker"
+    reranker_enabled: bool = True
+    reranker_timeout_sec: float = 15.0
+
+    # Retrieval governance
+    retrieval_per_channel_top_k: int = 12
+    retrieval_max_candidates: int = 40
+    retrieval_final_top_k: int = 5
+    retrieval_channel_timeout_ms: int = 30000
+    retrieval_total_timeout_ms: int = 35000
+    retrieval_context_max_chars: int = 12000
+    retrieval_min_relevance_score: float = 0.01
+    query_decomposition_enabled: bool = True
+    query_decomposition_max_queries: int = 3
+    circuit_breaker_failures: int = 3
+    circuit_breaker_recovery_sec: int = 30
 
     # Elasticsearch（可选）
     es_uris: str = "http://127.0.0.1:9200"
@@ -72,6 +92,7 @@ class Settings(BaseSettings):
 
     # LightRAG（可选）
     lightrag_base_url: str = "http://127.0.0.1:9621"
+    lightrag_api_key: str = ""
     graph_enabled: bool = False
 
     # Neo4j（可选）
@@ -92,6 +113,24 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = False
     rate_limit_user_qpm: int = 60
     rate_limit_ip_qpm: int = 600
+
+    # URL ingestion safety
+    url_ingestion_max_bytes: int = 52428800
+    url_ingestion_timeout_sec: int = 120
+    url_ingestion_max_redirects: int = 5
+    url_allow_private_networks: bool = False
+
+    # Conversation and controlled agent
+    conversation_summary_trigger_messages: int = 16
+    conversation_summary_keep_recent_messages: int = 8
+    agentic_rag_enabled: bool = False
+    agent_max_steps: int = 4
+    agent_tool_timeout_sec: int = 10
+    sql_tool_enabled: bool = False
+    sql_tool_allowed_relations: str = ""
+    mcp_tool_enabled: bool = False
+    mcp_allowed_tools: str = ""
+    mcp_tools_json: str = "{}"
 
     # flavor-code 集成
     flavor_code_integration_enabled: bool = False

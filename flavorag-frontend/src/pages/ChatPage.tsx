@@ -5,11 +5,13 @@ import { useChatStore } from "@/stores/chatStore";
 import { getCurrentUser } from "@/services/authService";
 import { fetchSessions, createSession, deleteSession } from "@/services/sessionService";
 import { fetchKnowledgeBases } from "@/services/knowledgeService";
+import { fetchRagCapabilities } from "@/services/graphService";
 import type { KnowledgeBase, SourceRef } from "@/types";
 import SessionList from "@/components/session/SessionList";
 import ChatInput from "@/components/chat/ChatInput";
 import MessageList from "@/components/chat/MessageList";
 import SourcesDrawer from "@/components/chat/SourcesDrawer";
+import KnowledgeGraphPanel from "@/components/chat/KnowledgeGraphPanel";
 
 export default function ChatPage() {
   const navigate = useNavigate();
@@ -21,6 +23,8 @@ export default function ChatPage() {
     sendMessage, cancelGeneration,
     addSession, removeSession,
     deepThinkingEnabled, setDeepThinking,
+    agenticRagEnabled, setAgenticRag,
+    graphRagEnabled, setGraphRag, graphRevision,
   } = useChatStore();
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [initLoading, setInitLoading] = useState(true);
@@ -40,6 +44,17 @@ export default function ChatPage() {
         if (sess.length > 0) setCurrentSession(sess[0].id);
         if (kbList.length > 0) setSelectedKbId(kbList[0].id);
         setInitLoading(false);
+        fetchRagCapabilities()
+          .then((capabilities) => {
+            setAgenticRag(capabilities.agenticRag.defaultEnabled);
+            setGraphRag(
+              capabilities.graphRag.available &&
+              capabilities.graphRag.defaultEnabled
+            );
+          })
+          .catch(() => {
+            // Capability discovery is advisory; per-request toggles still work.
+          });
       })
       .catch(() => { logout(); navigate("/login"); });
   }, []);
@@ -75,7 +90,7 @@ export default function ChatPage() {
   return (
     <div className="h-screen flex bg-white overflow-hidden">
       {/* Sidebar */}
-      <aside className="w-64 border-r flex flex-col bg-gray-50">
+      <aside className="hidden w-64 flex-col border-r bg-gray-50 md:flex">
         <div className="p-3 border-b flex items-center justify-between">
           <h1 className="font-bold text-sm">RAG 智能问答</h1>
           <button
@@ -134,30 +149,78 @@ export default function ChatPage() {
         </div>
       </aside>
 
-      {/* Main */}
-      <main className="flex-1 flex flex-col min-w-0">
-        <div className="flex-1 overflow-y-auto">
-          {messages.length === 0 ? (
-            <div className="flex items-center justify-center h-full text-gray-400 text-sm">
-              输入问题开始对话
+      <div className="flex min-w-0 flex-1 flex-col lg:flex-row">
+        {/* Main */}
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex h-14 shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-3 md:hidden">
+            <div className="min-w-0 flex-1">
+              <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-cyan-700">
+                RAG workspace
+              </p>
+              <select
+                value={selectedKbId || ""}
+                onChange={(event) => setSelectedKbId(event.target.value || null)}
+                aria-label="检索知识库"
+                className="mt-0.5 w-full truncate border-0 bg-transparent p-0 text-xs font-medium text-slate-800 outline-none"
+              >
+                <option value="">不检索知识库</option>
+                {kbs.map((kb) => (
+                  <option key={kb.id} value={kb.id}>{kb.name}</option>
+                ))}
+              </select>
             </div>
-          ) : (
-            <MessageList
-              messages={messages}
-              isStreaming={isStreaming}
-              streamingMessageId={streamingMessageId}
-              onViewSources={handleViewSources}
-            />
-          )}
-        </div>
-        <ChatInput
-          onSend={handleSend}
-          onCancel={cancelGeneration}
-          isStreaming={isStreaming}
-          deepThinking={deepThinkingEnabled}
-          onDeepThinkingChange={setDeepThinking}
-        />
-      </main>
+            <button
+              type="button"
+              onClick={handleNewSession}
+              className="shrink-0 rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white"
+            >
+              新对话
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {messages.length === 0 ? (
+              <div className="flex h-full flex-col items-center justify-center px-6 text-center">
+                <span className="mb-3 text-xs font-medium uppercase tracking-[0.22em] text-cyan-700">
+                  Evidence workspace
+                </span>
+                <h2 className="text-xl font-semibold tracking-tight text-slate-900">
+                  从知识、工具与关系中找到答案
+                </h2>
+                <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">
+                  在输入框下方按需开启 Agentic RAG 或 Graph RAG。开启图谱后，关系网络会在右侧同步展开。
+                </p>
+              </div>
+            ) : (
+              <MessageList
+                messages={messages}
+                isStreaming={isStreaming}
+                streamingMessageId={streamingMessageId}
+                onViewSources={handleViewSources}
+              />
+            )}
+          </div>
+          <ChatInput
+            onSend={handleSend}
+            onCancel={cancelGeneration}
+            isStreaming={isStreaming}
+            deepThinking={deepThinkingEnabled}
+            onDeepThinkingChange={setDeepThinking}
+            agenticRag={agenticRagEnabled}
+            onAgenticRagChange={setAgenticRag}
+            graphRag={graphRagEnabled}
+            onGraphRagChange={setGraphRag}
+          />
+        </main>
+
+        {graphRagEnabled && (
+          <KnowledgeGraphPanel
+            kbId={selectedKbId}
+            kbName={kbs.find((kb) => kb.id === selectedKbId)?.name}
+            refreshKey={graphRevision}
+            onClose={() => setGraphRag(false)}
+          />
+        )}
+      </div>
 
       {/* Sources Drawer */}
       <SourcesDrawer

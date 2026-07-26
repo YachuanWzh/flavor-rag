@@ -36,7 +36,11 @@ class StructuredPdfChunker:
                     outline.append(title)
                 continue
 
-            if block.block_type == PdfBlockType.PARAGRAPH:
+            if block.block_type in (
+                PdfBlockType.PARAGRAPH,
+                PdfBlockType.LIST,
+                PdfBlockType.FORMULA,
+            ):
                 projected = sum(len(item.content) for item in paragraph_buffer) + len(block.content)
                 if paragraph_buffer and projected > self.target_chars:
                     flush_paragraphs()
@@ -76,6 +80,11 @@ class StructuredPdfChunker:
             "metadata_json": {
                 "outline_path": list(outline),
                 "source_block_ids": [block.block_id for block in blocks],
+                "source_block_types": [block.block_type.value for block in blocks],
+                "extraction_methods": sorted({
+                    block.metadata.get("extraction_method", "native")
+                    for block in blocks
+                }),
             },
             "asset_ids": [],
         }

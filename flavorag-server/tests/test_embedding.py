@@ -40,3 +40,38 @@ class TestFactory:
         client = get_embedding_client(api_key="sk-fake-xxx")
         from app.llm.embedding import EmbeddingClient
         assert isinstance(client, EmbeddingClient)
+
+
+@pytest.mark.asyncio
+async def test_query_embedding_uses_bounded_attempts_and_cache(monkeypatch):
+    from app.llm import embedding as embedding_module
+
+    embedding_module._query_cache.clear()
+    client = embedding_module.EmbeddingClient(
+        api_key="test-key",
+        base_url="https://embedding.invalid/v1",
+        model="test-model",
+    )
+    calls = []
+
+    async def fake_call(texts, *, timeout_sec=120.0, max_attempts=3):
+        calls.append((list(texts), timeout_sec, max_attempts))
+        return [[0.25, 0.75]]
+
+    monkeypatch.setattr(client, "_call_with_retry", fake_call)
+    monkeypatch.setattr(
+        embedding_module.settings,
+        "embedding_query_timeout_sec",
+        7.0,
+    )
+    monkeypatch.setattr(
+        embedding_module.settings,
+        "embedding_query_max_attempts",
+        1,
+    )
+
+    first = await client.embed_query("cache-me")
+    second = await client.embed_query("cache-me")
+
+    assert first == second == [0.25, 0.75]
+    assert calls == [(["cache-me"], 7.0, 1)]

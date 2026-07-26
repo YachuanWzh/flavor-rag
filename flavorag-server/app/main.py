@@ -15,21 +15,32 @@ from app.audit.api import router as audit_router
 from app.audit.middleware import AuditMiddleware
 from app.api.schedule import router as schedule_router
 from app.api.ingestion_pipeline import router as ingestion_pipeline_router
+from app.api.security import router as security_router
+from app.api.graph import router as graph_router
 from app.config.settings import settings
 from app.config.logging_config import get_logger, configure_root_logger
 
 _log = get_logger("flavorag.server")
+_url_scheduler = None
+_doc_schedule_scheduler = None
+_index_sync_scheduler = None
 
 
 async def _seed_admin_user():
     """Create default admin user (admin/admin123) if no users exist."""
     from app.database.session import async_session_factory
-    from app.models import User
+    from app.models import Tenant, User
     from app.auth.jwt import hash_password
     from sqlalchemy import select, func
 
     try:
         async with async_session_factory() as session:
+            tenant = (
+                await session.execute(select(Tenant).where(Tenant.id == "default"))
+            ).scalar_one_or_none()
+            if tenant is None:
+                session.add(Tenant(id="default", name="Default Tenant", enabled=1))
+                await session.flush()
             result = await session.execute(select(func.count(User.id)))
             user_count = result.scalar()
             if user_count == 0:
@@ -37,6 +48,7 @@ async def _seed_admin_user():
                     username="admin",
                     password=hash_password("admin123"),
                     role="admin",
+                    tenant_id="default",
                 )
                 session.add(admin)
                 await session.commit()
@@ -50,12 +62,13 @@ async def _seed_admin_user():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_root_logger()
-    _log.info("server_starting", database_url=settings.database_url[:30] + "...")
+    from app.database.session import engine
+
+    _log.info("server_starting", database_backend=engine.url.get_backend_name())
 
     # Startup: create tables and apply additive compatibility upgrades for SQLite.
     # Production databases continue to use Alembic migrations.
     if settings.database_url.startswith("sqlite"):
-        from app.database.session import engine
         from app.database.sqlite_schema import initialize_sqlite_schema
 
         added_columns = await initialize_sqlite_schema(engine)
@@ -87,6 +100,16 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         _log.warning("doc_schedule_scheduler_failed", error=str(exc))
 
+    global _index_sync_scheduler
+    try:
+        from app.services.index_sync import IndexSyncRetryScheduler
+
+        _index_sync_scheduler = IndexSyncRetryScheduler()
+        await _index_sync_scheduler.start()
+        _log.info("index_sync_retry_scheduler_started")
+    except Exception as exc:
+        _log.warning("index_sync_retry_scheduler_failed", error=str(exc))
+
     _log.info("server_started", port=settings.server_port)
     yield
     # Shutdown: stop schedulers
@@ -102,6 +125,12 @@ async def lifespan(app: FastAPI):
             _log.info("doc_schedule_scheduler_stopped")
         except Exception as exc:
             _log.warning("doc_schedule_scheduler_stop_failed", error=str(exc))
+    if _index_sync_scheduler:
+        try:
+            await _index_sync_scheduler.stop()
+            _log.info("index_sync_retry_scheduler_stopped")
+        except Exception as exc:
+            _log.warning("index_sync_retry_scheduler_stop_failed", error=str(exc))
     _log.info("server_shutting_down")
 
 
@@ -128,6 +157,8 @@ app.include_router(query_term_mapping_router)
 app.include_router(audit_router)
 app.include_router(schedule_router)
 app.include_router(ingestion_pipeline_router)
+app.include_router(security_router)
+app.include_router(graph_router)
 
 
 @app.get("/api/health")

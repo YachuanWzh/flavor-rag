@@ -16,8 +16,11 @@ from typing import Any
 class PdfBlockType(str, Enum):
     HEADING = "HEADING"
     PARAGRAPH = "PARAGRAPH"
+    LIST = "LIST"
     TABLE = "TABLE"
     IMAGE = "IMAGE"
+    FORMULA = "FORMULA"
+    HEADER_FOOTER = "HEADER_FOOTER"
 
 
 @dataclass(frozen=True)
@@ -164,8 +167,8 @@ class PdfBlock:
         content: str,
         metadata: dict[str, Any] | None = None,
     ) -> "PdfBlock":
-        if block_type not in (PdfBlockType.HEADING, PdfBlockType.PARAGRAPH):
-            raise ValueError("text block type must be HEADING or PARAGRAPH")
+        if block_type in (PdfBlockType.TABLE, PdfBlockType.IMAGE):
+            raise ValueError("text block type cannot be TABLE or IMAGE")
         clean = content.strip()
         return cls(
             block_id=block_id,

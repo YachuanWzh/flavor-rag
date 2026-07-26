@@ -19,6 +19,12 @@ from app.rag.rate_limiter import RateLimiter
 from app.llm.client import get_llm_client
 from app.services.chat_service import ChatService
 from app.config.settings import settings
+from app.security.access import Permission
+from app.security.service import (
+    kb_access_predicate,
+    principal_from_user,
+    require_kb,
+)
 
 router = APIRouter(prefix="/api/rag/v3", tags=["chat"])
 
@@ -30,11 +36,19 @@ async def chat(
     conversation_id: str | None = Query(None, description="会话ID"),
     kb_id: str | None = Query(None, description="知识库ID"),
     deep_thinking: bool = Query(False, description="启用深度思考"),
+    agentic_rag: bool | None = Query(None, description="本次请求启用 Agentic RAG"),
+    graph_rag: bool | None = Query(None, description="本次请求启用 Graph RAG"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """SSE streaming RAG chat endpoint with trace + rate limiting."""
     t_total_start = time.time()
+    effective_agentic_rag = (
+        settings.agentic_rag_enabled if agentic_rag is None else agentic_rag
+    )
+    effective_graph_rag = (
+        settings.graph_enabled if graph_rag is None else graph_rag
+    )
 
     # Rate limiting
     if settings.rate_limit_enabled:
@@ -51,6 +65,8 @@ async def chat(
         query=question,
         user_id=user.id,
         conversation_id=conversation_id or "",
+        tenant_id=user.tenant_id or "default",
+        kb_id=kb_id,
     )
 
     rag_pipeline = RAGPipeline(trace_logger=trace)
@@ -61,6 +77,7 @@ async def chat(
             id=gen_id(),
             conversation_id=gen_id(),
             user_id=user.id,
+            tenant_id=user.tenant_id or "default",
             title=question[:30] + ("..." if len(question) > 30 else ""),
             last_time=datetime.now(timezone.utc).replace(tzinfo=None),
         )
@@ -68,12 +85,12 @@ async def chat(
         await db.flush()
         conversation_id = conv.id
 
-    chat_service = ChatService(db)
+    chat_service = ChatService(db, user_id=user.id)
 
     async def event_stream():
         try:
             # 1. History
-            history = await chat_service.get_recent_messages(conversation_id, turns=8)
+            history = await chat_service.get_context(conversation_id, turns=8)
 
             # 2. Save user message
             await chat_service.save_message(conversation_id=conversation_id, role="user", content=question)
@@ -86,7 +103,11 @@ async def chat(
                 # Auto-select first available knowledge base
                 first_kb = await db.execute(
                     select(KnowledgeBase.id, KnowledgeBase.collection_name)
-                    .where(KnowledgeBase.deleted == 0)
+                    .where(
+                        kb_access_predicate(
+                            principal_from_user(user), Permission.READ
+                        )
+                    )
                     .limit(1)
                 )
                 first_row = first_kb.first()
@@ -94,27 +115,114 @@ async def chat(
                     resolved_kb_id = first_row[0]
                     collection_name = first_row[1]
             else:
-                kb_result = await db.execute(
-                    select(KnowledgeBase.collection_name).where(
-                        KnowledgeBase.id == resolved_kb_id,
-                        KnowledgeBase.deleted == 0,
-                    )
+                kb = await require_kb(
+                    db,
+                    principal_from_user(user),
+                    resolved_kb_id,
+                    Permission.READ,
                 )
-                row = kb_result.scalar_one_or_none()
-                if row:
-                    collection_name = row
+                collection_name = kb.collection_name
 
             # 4. RAG retrieval
             ctx = RAGContext(
                 question=question, conversation_id=conversation_id,
                 kb_id=resolved_kb_id, collection_name=collection_name,
                 history=history, deep_thinking=deep_thinking,
+                graph_rag=effective_graph_rag,
+                trace_run_id=trace_id,
+                user_id=user.id,
+                tenant_id=user.tenant_id or "default",
+                department_id=user.department_id or "",
+                role=user.role,
             )
-            rag_result = await rag_pipeline.run(ctx)
+            agent_steps: list[dict] = []
+            if effective_agentic_rag:
+                from app.agent.rag_agent import ControlledRAGAgent
+
+                agent_started = datetime.now(timezone.utc).replace(tzinfo=None)
+                rag_result, agent_steps = await ControlledRAGAgent(rag_pipeline).run(ctx)
+                agent_ended = datetime.now(timezone.utc).replace(tzinfo=None)
+                await trace.trace_node(
+                    trace_id,
+                    "agent",
+                    "controlled_agentic_rag",
+                    agent_started,
+                    agent_ended,
+                    input_data={"max_steps": settings.agent_max_steps},
+                    output_data={"steps": agent_steps},
+                )
+            else:
+                rag_result = await rag_pipeline.run(ctx)
 
             # 5. Send meta
-            meta = json.dumps({"conversationId": conversation_id, "taskId": trace_id})
+            meta = json.dumps(
+                {
+                    "conversationId": conversation_id,
+                    "taskId": trace_id,
+                    "modes": {
+                        "agenticRag": effective_agentic_rag,
+                        "graphRag": effective_graph_rag,
+                    },
+                    "channels": rag_result.channel_statuses,
+                }
+            )
             yield f"event: meta\ndata: {meta}\n\n"
+            if effective_agentic_rag:
+                yield (
+                    "event: agent\ndata: "
+                    + json.dumps({"steps": agent_steps}, ensure_ascii=False)
+                    + "\n\n"
+                )
+
+            if not rag_result.answerable:
+                refusal = "当前授权范围内没有找到足够可靠的资料，暂时无法回答该问题。"
+                yield (
+                    "event: message\ndata: "
+                    + json.dumps({"type": "response", "delta": refusal})
+                    + "\n\n"
+                )
+                assistant_msg_id = await chat_service.save_message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=refusal,
+                    sources=[],
+                    agent_steps=agent_steps,
+                    rag_modes={
+                        "agenticRag": effective_agentic_rag,
+                        "graphRag": effective_graph_rag,
+                    },
+                    retrieval_channels=rag_result.channel_statuses,
+                )
+                await trace.finalize(
+                    trace_run_id=trace_id,
+                    search_duration_ms=rag_result.duration_ms,
+                    total_duration_ms=int((time.time() - t_total_start) * 1000),
+                    recall_count=0,
+                    final_count=0,
+                    model_name=rag_result.model_name or "",
+                    status="rejected",
+                    rejection_reason=rag_result.rejection_reason,
+                    metadata={
+                        "channels": rag_result.channel_statuses,
+                        "agenticRag": effective_agentic_rag,
+                        "graphRag": effective_graph_rag,
+                    },
+                )
+                await db.flush()
+                finish = json.dumps(
+                    {
+                        "messageId": assistant_msg_id,
+                        "sources": [],
+                        "modes": {
+                            "agenticRag": effective_agentic_rag,
+                            "graphRag": effective_graph_rag,
+                        },
+                        "channels": rag_result.channel_statuses,
+                    }
+                )
+                yield f"event: finish\ndata: {finish}\n\n"
+                yield "event: done\ndata: {}\n\n"
+                return
 
             # 6. Build prompt with context
             context_text = "\n\n---\n\n".join(
@@ -160,8 +268,15 @@ async def chat(
                 role="assistant", content=full_content,
                 thinking_content=thinking_content or None,
                 sources=rag_result.sources,
+                agent_steps=agent_steps,
+                rag_modes={
+                    "agenticRag": effective_agentic_rag,
+                    "graphRag": effective_graph_rag,
+                },
+                retrieval_channels=rag_result.channel_statuses,
             )
             await db.flush()
+            await chat_service.maybe_summarize(conversation_id)
 
             # 10. Finalize trace
             total_duration = int((time.time() - t_total_start) * 1000)
@@ -173,10 +288,25 @@ async def chat(
                 recall_count=len(rag_result.context_chunks),
                 final_count=len(rag_result.sources),
                 model_name=rag_result.model_name or "",
+                metadata={
+                    "channels": rag_result.channel_statuses,
+                    "agenticRag": effective_agentic_rag,
+                    "graphRag": effective_graph_rag,
+                },
             )
 
             # 11. Send finish
-            finish = json.dumps({"messageId": assistant_msg_id, "sources": rag_result.sources})
+            finish = json.dumps(
+                {
+                    "messageId": assistant_msg_id,
+                    "sources": rag_result.sources,
+                    "modes": {
+                        "agenticRag": effective_agentic_rag,
+                        "graphRag": effective_graph_rag,
+                    },
+                    "channels": rag_result.channel_statuses,
+                }
+            )
             yield f"event: finish\ndata: {finish}\n\n"
             yield "event: done\ndata: {}\n\n"
 

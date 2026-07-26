@@ -4,6 +4,13 @@ from __future__ import annotations
 import httpx
 from app.config.settings import settings
 from app.rag.search.base import SearchResult
+from app.rag.governance import CircuitBreaker
+
+
+_rerank_breaker = CircuitBreaker(
+    failure_threshold=settings.circuit_breaker_failures,
+    recovery_timeout_sec=settings.circuit_breaker_recovery_sec,
+)
 
 
 class Reranker:
@@ -37,11 +44,19 @@ class Reranker:
         if not candidates:
             return []
 
+        if not settings.reranker_enabled:
+            return candidates[:top_n]
+
         if not self.api_key:
             return candidates[:top_n]
 
         if self.strategy == self.STRATEGY_CROSS_ENCODER:
-            return await self._cross_encoder_rerank(query, candidates, top_n)
+            try:
+                return await _rerank_breaker.call(
+                    lambda: self._cross_encoder_rerank(query, candidates, top_n)
+                )
+            except Exception:
+                return candidates[:top_n]
         elif self.strategy == self.STRATEGY_LLM_BASED:
             return await self._llm_based_rerank(query, candidates, top_n)
         else:
@@ -50,36 +65,37 @@ class Reranker:
     async def _cross_encoder_rerank(
         self, query: str, candidates: list[SearchResult], top_n: int
     ) -> list[SearchResult]:
-        try:
-            documents = [c.content for c in candidates]
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "model": self.model,
-                "query": query,
-                "documents": documents,
-                "top_n": top_n,
-            }
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    f"{self.base_url}/rerank",
-                    headers=headers,
-                    json=payload,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                results = data.get("results", [])
-                # Map back to original SearchResult order
-                reranked: list[SearchResult] = []
-                for r in results:
-                    idx = r["index"]
-                    if idx < len(candidates):
-                        reranked.append(candidates[idx])
-                return reranked[:top_n]
-        except Exception:
-            return candidates[:top_n]
+        documents = [c.content for c in candidates]
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "query": query,
+            "documents": documents,
+            "top_n": top_n,
+        }
+        async with httpx.AsyncClient(timeout=settings.reranker_timeout_sec) as client:
+            resp = await client.post(
+                f"{self.base_url}/rerank",
+                headers=headers,
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("results", [])
+            reranked: list[SearchResult] = []
+            for r in results:
+                idx = r["index"]
+                if idx < len(candidates):
+                    candidate = candidates[idx]
+                    candidate.score = float(
+                        r.get("relevance_score", r.get("score", candidate.score))
+                    )
+                    candidate.metadata["rerank_score"] = candidate.score
+                    reranked.append(candidate)
+            return reranked[:top_n]
 
     async def _llm_based_rerank(
         self, query: str, candidates: list[SearchResult], top_n: int

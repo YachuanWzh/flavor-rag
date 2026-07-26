@@ -36,6 +36,8 @@ class UserInfo(BaseModel):
     username: str
     role: str
     avatar: str | None = None
+    tenant_id: str
+    department_id: str | None = None
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -116,4 +118,11 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 @router.get("/current", response_model=UserInfo)
 async def current_user(user: User = Depends(get_current_user)):
     _log.info("current_user", username=user.username, user_id=user.id, role=user.role)
-    return UserInfo(id=user.id, username=user.username, role=user.role, avatar=user.avatar)
+    return UserInfo(
+        id=user.id,
+        username=user.username,
+        role=user.role,
+        avatar=user.avatar,
+        tenant_id=user.tenant_id or "default",
+        department_id=user.department_id,
+    )

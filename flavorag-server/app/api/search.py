@@ -14,6 +14,15 @@ from app.rag.search.keyword import ESKeywordSearchChannel
 from app.rag.postprocess.fusion import rrf_fusion, deduplicate
 from app.rag.search.base import SearchResult
 from app.config.settings import settings
+from app.rag.governance import RetrievalBudget, run_search_channels, select_context
+from app.rag.pipeline import RAGPipeline
+from app.rag.postprocess.reranker import Reranker
+from app.security.access import Permission
+from app.security.service import (
+    filter_authorized_results,
+    kb_access_predicate,
+    principal_from_user,
+)
 
 router = APIRouter(prefix="/api/rag/v3", tags=["search"])
 
@@ -50,44 +59,45 @@ async def rag_search(
     Called by flavor-code's RagSearch tool to find relevant code/docs.
     Returns top-K chunks sorted by relevance.
     """
-    # Resolve collection_name from kb_id if needed
-    collection_name = req.collection_name
-    if not collection_name and req.kb_id:
-        result = await db.execute(
-            select(KnowledgeBase.collection_name).where(
-                KnowledgeBase.id == req.kb_id,
-                KnowledgeBase.deleted == 0,
-            )
-        )
-        row = result.scalar_one_or_none()
-        if not row:
-            raise HTTPException(status_code=404, detail="知识库不存在")
-        collection_name = row
+    principal = principal_from_user(user)
+    kb_stmt = select(KnowledgeBase).where(
+        kb_access_predicate(principal, Permission.READ)
+    )
+    if req.kb_id:
+        kb_stmt = kb_stmt.where(KnowledgeBase.id == req.kb_id)
+    elif req.collection_name:
+        kb_stmt = kb_stmt.where(KnowledgeBase.collection_name == req.collection_name)
+    else:
+        kb_stmt = kb_stmt.limit(1)
+    kb = (await db.execute(kb_stmt)).scalar_one_or_none()
+    if kb is None:
+        raise HTTPException(status_code=404, detail="知识库不存在或无权访问")
+    collection_name = kb.collection_name
 
-    if not collection_name:
-        collection_name = "rag_default_store"
-
-    # Execute search channels
-    all_results: list[list[SearchResult]] = []
+    budget = RetrievalBudget(
+        per_channel_top_k=max(req.top_k * 2, req.top_k),
+        max_candidates=settings.retrieval_max_candidates,
+        final_top_k=req.top_k,
+        channel_timeout_ms=settings.retrieval_channel_timeout_ms,
+        context_max_chars=settings.retrieval_context_max_chars,
+    )
     milvus = MilvusSearchChannel()
-
+    channels = {}
     if "vector" in req.channels:
-        vector_results = await milvus.search(
+        channels["vector"] = lambda: milvus.search(
             query=req.query,
             collection_name=collection_name,
-            top_k=req.top_k,
+            top_k=budget.per_channel_top_k,
         )
-        all_results.append(vector_results)
-
     if "keyword" in req.channels and settings.es_enabled:
         es = ESKeywordSearchChannel()
-        kw_results = await es.search(
+        channels["keyword"] = lambda: es.search(
             query=req.query,
-            collection_name=collection_name,
-            top_k=req.top_k,
+            collection_name=kb.id,
+            top_k=budget.per_channel_top_k,
         )
-        if kw_results:
-            all_results.append(kw_results)
+    channel_results, channel_statuses = await run_search_channels(channels, budget)
+    all_results = [items for items in channel_results.values() if items]
 
     # Fuse multi-channel results
     if len(all_results) > 1:
@@ -101,6 +111,19 @@ async def rag_search(
 
     # Deduplicate
     deduped = deduplicate(merged)
+    pipeline = RAGPipeline()
+    await pipeline._resolve_metadata(deduped, kb_id=kb.id)
+    deduped = await filter_authorized_results(
+        db, principal, deduped, kb_id=kb.id
+    )
+    reranked = await Reranker().rerank(
+        req.query, deduped, top_n=max(req.top_k * 2, req.top_k)
+    )
+    deduped, decision = select_context(
+        reranked,
+        budget,
+        min_score=settings.retrieval_min_relevance_score,
+    )
 
     chunks = [
         ChunkResult(
@@ -116,5 +139,10 @@ async def rag_search(
         data={
             "chunks": [c.model_dump() for c in chunks],
             "total": len(chunks),
+            "answerable": decision.answerable,
+            "rejectionReason": decision.reason or None,
+            "channels": {
+                name: status.__dict__ for name, status in channel_statuses.items()
+            },
         },
     )

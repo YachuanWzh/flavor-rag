@@ -22,6 +22,26 @@ class TimestampMixin:
     deleted = Column(SmallInteger, default=0)
 
 
+class Tenant(Base):
+    __tablename__ = "t_tenant"
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    name = Column(String(128), nullable=False)
+    enabled = Column(SmallInteger, default=1)
+    create_time = Column(DateTime, default=_utcnow)
+    update_time = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class Department(Base, TimestampMixin):
+    __tablename__ = "t_department"
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    tenant_id = Column(String(64), nullable=False)
+    parent_id = Column(String(20))
+    name = Column(String(128), nullable=False)
+    created_by = Column(String(20), nullable=False)
+
+
 class User(Base, TimestampMixin):
     __tablename__ = "t_user"
 
@@ -30,6 +50,8 @@ class User(Base, TimestampMixin):
     password = Column(String(128), nullable=False)
     role = Column(String(32), nullable=False, default="user")
     avatar = Column(String(128))
+    tenant_id = Column(String(64), nullable=False, default="default")
+    department_id = Column(String(64))
 
 
 class Conversation(Base, TimestampMixin):
@@ -38,8 +60,11 @@ class Conversation(Base, TimestampMixin):
     id = Column(String(20), primary_key=True, default=gen_id)
     conversation_id = Column(String(20), nullable=False)
     user_id = Column(String(20), nullable=False)
+    tenant_id = Column(String(64), nullable=False, default="default")
     title = Column(String(128), nullable=False, default="新对话")
     last_time = Column(DateTime)
+    summary = Column(Text)
+    summary_message_count = Column(Integer, default=0)
 
 
 class Message(Base, TimestampMixin):
@@ -55,6 +80,9 @@ class Message(Base, TimestampMixin):
     sources = Column(JSON)
     recommended_questions = Column(JSON)
     message_status = Column(String(16), default="NORMAL")
+    agent_steps = Column(JSON)
+    rag_modes = Column(JSON)
+    retrieval_channels = Column(JSON)
 
 
 class MessageFeedback(Base, TimestampMixin):
@@ -77,6 +105,9 @@ class KnowledgeBase(Base, TimestampMixin):
     embedding_model = Column(String(64), nullable=False)
     collection_name = Column(String(64), nullable=False, unique=True)
     pipeline_id = Column(String(20))
+    tenant_id = Column(String(64), nullable=False, default="default")
+    department_id = Column(String(64))
+    visibility = Column(String(16), nullable=False, default="PRIVATE")
     created_by = Column(String(20), nullable=False)
     updated_by = Column(String(20))
 
@@ -86,6 +117,9 @@ class KnowledgeDocument(Base, TimestampMixin):
 
     id = Column(String(20), primary_key=True, default=gen_id)
     kb_id = Column(String(20), nullable=False)
+    tenant_id = Column(String(64), nullable=False, default="default")
+    department_id = Column(String(64))
+    visibility = Column(String(16), nullable=False, default="INHERIT")
     doc_name = Column(String(256), nullable=False)
     enabled = Column(SmallInteger, default=1)
     chunk_count = Column(Integer, default=0)
@@ -110,6 +144,8 @@ class KnowledgeChunk(Base, TimestampMixin):
     id = Column(String(20), primary_key=True, default=gen_id)
     kb_id = Column(String(20), nullable=False)
     doc_id = Column(String(20), nullable=False)
+    tenant_id = Column(String(64), nullable=False, default="default")
+    department_id = Column(String(64))
     chunk_index = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
     embedding_content = Column(Text)
@@ -132,6 +168,8 @@ class KnowledgeAsset(Base, TimestampMixin):
     id = Column(String(32), primary_key=True)
     kb_id = Column(String(20), nullable=False)
     doc_id = Column(String(20), nullable=False)
+    tenant_id = Column(String(64), nullable=False, default="default")
+    department_id = Column(String(64))
     asset_type = Column(String(32), nullable=False, default="IMAGE")
     mime_type = Column(String(128), nullable=False)
     file_name = Column(String(512))
@@ -193,6 +231,8 @@ class RagTraceRun(Base):
     conversation_id = Column(String(20), nullable=False)
     message_id = Column(String(20))
     user_id = Column(String(20), nullable=False)
+    tenant_id = Column(String(64), nullable=False, default="default")
+    kb_id = Column(String(20))
     query = Column(Text, nullable=False)
     rewrite_query = Column(Text)
     intent = Column(String(64))
@@ -204,6 +244,8 @@ class RagTraceRun(Base):
     model_name = Column(String(64))
     status = Column(String(16), default="success")
     error_message = Column(Text)
+    rejection_reason = Column(String(64))
+    metadata_json = Column(JSON)
     create_time = Column(DateTime, default=_utcnow)
 
 
@@ -223,6 +265,35 @@ class RagTraceNode(Base):
     status = Column(String(16), default="success")
     error_message = Column(Text)
     create_time = Column(DateTime, default=_utcnow)
+
+
+class ResourceACL(Base, TimestampMixin):
+    __tablename__ = "t_resource_acl"
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    tenant_id = Column(String(64), nullable=False)
+    subject_type = Column(String(24), nullable=False)
+    subject_id = Column(String(64), nullable=False)
+    resource_type = Column(String(24), nullable=False)
+    resource_id = Column(String(20), nullable=False)
+    permission = Column(String(16), nullable=False, default="READ")
+    created_by = Column(String(20), nullable=False)
+
+
+class IndexSyncJob(Base, TimestampMixin):
+    __tablename__ = "t_index_sync_job"
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    tenant_id = Column(String(64), nullable=False)
+    kb_id = Column(String(20), nullable=False)
+    doc_id = Column(String(20), nullable=False)
+    operation = Column(String(24), nullable=False)
+    payload_json = Column(JSON)
+    channel_status_json = Column(JSON)
+    status = Column(String(16), nullable=False, default="PENDING")
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text)
+    next_retry_time = Column(DateTime)
 
 
 # ============================================================

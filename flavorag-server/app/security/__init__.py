@@ -1,0 +1,2 @@
+"""Tenant and resource authorization."""
+

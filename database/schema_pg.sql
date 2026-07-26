@@ -10,12 +10,34 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- ============================================================
 
 -- 用户表
+CREATE TABLE t_tenant (
+    id           VARCHAR(20) PRIMARY KEY,
+    name         VARCHAR(128) NOT NULL,
+    enabled      SMALLINT DEFAULT 1,
+    create_time  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE t_department (
+    id           VARCHAR(20) PRIMARY KEY,
+    tenant_id    VARCHAR(64) NOT NULL,
+    parent_id    VARCHAR(20),
+    name         VARCHAR(128) NOT NULL,
+    created_by   VARCHAR(20) NOT NULL,
+    create_time  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted      SMALLINT DEFAULT 0
+);
+CREATE INDEX idx_department_tenant ON t_department (tenant_id);
+
 CREATE TABLE t_user (
     id           VARCHAR(20)  PRIMARY KEY,
     username     VARCHAR(64)  NOT NULL UNIQUE,
     password     VARCHAR(128) NOT NULL,
     role         VARCHAR(32)  NOT NULL DEFAULT 'user',  -- admin / user
     avatar       VARCHAR(128),
+    tenant_id    VARCHAR(64)  NOT NULL DEFAULT 'default',
+    department_id VARCHAR(64),
     create_time  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     update_time  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     deleted      SMALLINT    DEFAULT 0
@@ -26,8 +48,11 @@ CREATE TABLE t_conversation (
     id              VARCHAR(20) PRIMARY KEY,
     conversation_id VARCHAR(20) NOT NULL,
     user_id         VARCHAR(20) NOT NULL,
+    tenant_id       VARCHAR(64) NOT NULL DEFAULT 'default',
     title           VARCHAR(128) NOT NULL DEFAULT '新对话',
     last_time       TIMESTAMP,
+    summary         TEXT,
+    summary_message_count INTEGER DEFAULT 0,
     create_time     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     update_time     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     deleted         SMALLINT    DEFAULT 0,
@@ -47,6 +72,9 @@ CREATE TABLE t_message (
     sources           JSONB,                         -- 引用来源
     recommended_questions JSONB,                    -- 推荐问题
     message_status    VARCHAR(16) DEFAULT 'NORMAL', -- NORMAL / INTERRUPTED
+    agent_steps       JSONB,
+    rag_modes         JSONB,
+    retrieval_channels JSONB,
     create_time       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     update_time       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     deleted           SMALLINT    DEFAULT 0
@@ -79,6 +107,9 @@ CREATE TABLE t_knowledge_base (
     embedding_model VARCHAR(64)  NOT NULL,          -- 嵌入模型标识
     collection_name VARCHAR(64)  NOT NULL UNIQUE,    -- Milvus Collection 名
     pipeline_id     VARCHAR(20),
+    tenant_id       VARCHAR(64) NOT NULL DEFAULT 'default',
+    department_id   VARCHAR(64),
+    visibility      VARCHAR(16) NOT NULL DEFAULT 'PRIVATE',
     created_by      VARCHAR(20)  NOT NULL,
     updated_by      VARCHAR(20),
     create_time     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -90,6 +121,9 @@ CREATE TABLE t_knowledge_base (
 CREATE TABLE t_knowledge_document (
     id               VARCHAR(20) PRIMARY KEY,
     kb_id            VARCHAR(20)  NOT NULL,
+    tenant_id        VARCHAR(64) NOT NULL DEFAULT 'default',
+    department_id    VARCHAR(64),
+    visibility       VARCHAR(16) NOT NULL DEFAULT 'INHERIT',
     doc_name         VARCHAR(256) NOT NULL,
     enabled          SMALLINT     DEFAULT 1,
     chunk_count      INTEGER      DEFAULT 0,
@@ -117,6 +151,8 @@ CREATE TABLE t_knowledge_chunk (
     id           VARCHAR(20) PRIMARY KEY,
     kb_id        VARCHAR(20) NOT NULL,
     doc_id       VARCHAR(20) NOT NULL,
+    tenant_id    VARCHAR(64) NOT NULL DEFAULT 'default',
+    department_id VARCHAR(64),
     chunk_index  INTEGER     NOT NULL,
     content      TEXT        NOT NULL,
     embedding_content TEXT,
@@ -139,9 +175,12 @@ CREATE INDEX idx_doc_id ON t_knowledge_chunk (doc_id);
 
 -- PDF 图片等多模态资产
 CREATE TABLE t_knowledge_asset (
+CREATE TABLE t_knowledge_asset (
     id            VARCHAR(32) PRIMARY KEY,
     kb_id         VARCHAR(20)  NOT NULL,
     doc_id        VARCHAR(20)  NOT NULL,
+    tenant_id     VARCHAR(64) NOT NULL DEFAULT 'default',
+    department_id VARCHAR(64),
     asset_type    VARCHAR(32)  NOT NULL DEFAULT 'IMAGE',
     mime_type     VARCHAR(128) NOT NULL,
     file_name     VARCHAR(512),
@@ -161,6 +200,46 @@ CREATE TABLE t_knowledge_asset (
 );
 CREATE INDEX idx_knowledge_asset_doc_id ON t_knowledge_asset (doc_id);
 CREATE INDEX idx_knowledge_asset_hash ON t_knowledge_asset (content_hash);
+
+CREATE TABLE t_resource_acl (
+    id             VARCHAR(20) PRIMARY KEY,
+    tenant_id      VARCHAR(64) NOT NULL,
+    subject_type   VARCHAR(24) NOT NULL,
+    subject_id     VARCHAR(64) NOT NULL,
+    resource_type  VARCHAR(24) NOT NULL,
+    resource_id    VARCHAR(20) NOT NULL,
+    permission     VARCHAR(16) NOT NULL DEFAULT 'READ',
+    created_by     VARCHAR(20) NOT NULL,
+    create_time    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted        SMALLINT DEFAULT 0
+);
+CREATE INDEX idx_acl_resource ON t_resource_acl (tenant_id, resource_type, resource_id);
+CREATE INDEX idx_acl_subject ON t_resource_acl (tenant_id, subject_type, subject_id);
+
+CREATE TABLE t_index_sync_job (
+    id                  VARCHAR(20) PRIMARY KEY,
+    tenant_id           VARCHAR(64) NOT NULL,
+    kb_id               VARCHAR(20) NOT NULL,
+    doc_id              VARCHAR(20) NOT NULL,
+    operation           VARCHAR(24) NOT NULL,
+    payload_json        JSONB,
+    channel_status_json JSONB,
+    status              VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+    attempts            INTEGER NOT NULL DEFAULT 0,
+    last_error          TEXT,
+    next_retry_time     TIMESTAMP,
+    create_time         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted             SMALLINT DEFAULT 0
+);
+CREATE INDEX idx_sync_job_status ON t_index_sync_job (status, next_retry_time);
+CREATE INDEX idx_kb_tenant ON t_knowledge_base (tenant_id, deleted);
+CREATE INDEX idx_document_tenant ON t_knowledge_document (tenant_id, kb_id, deleted);
+CREATE INDEX idx_chunk_tenant ON t_knowledge_chunk (tenant_id, kb_id, doc_id, deleted, enabled);
+CREATE UNIQUE INDEX uq_acl_live_grant ON t_resource_acl
+    (tenant_id, subject_type, subject_id, resource_type, resource_id)
+    WHERE deleted = 0;
 
 -- ============================================================
 -- 意图树与查询词映射
@@ -219,6 +298,8 @@ CREATE TABLE t_rag_trace_run (
     conversation_id   VARCHAR(20) NOT NULL,
     message_id        VARCHAR(20),
     user_id           VARCHAR(20) NOT NULL,
+    tenant_id         VARCHAR(64) NOT NULL DEFAULT 'default',
+    kb_id             VARCHAR(20),
     query             TEXT NOT NULL,
     rewrite_query     TEXT,
     intent            VARCHAR(64),
@@ -230,6 +311,8 @@ CREATE TABLE t_rag_trace_run (
     model_name        VARCHAR(64),
     status            VARCHAR(16) DEFAULT 'success',
     error_message     TEXT,
+    rejection_reason  VARCHAR(64),
+    metadata_json     JSONB,
     create_time       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

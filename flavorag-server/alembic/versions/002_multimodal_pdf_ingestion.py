@@ -16,12 +16,30 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.execute("ALTER TABLE t_knowledge_chunk ADD COLUMN embedding_content TEXT")
-    op.execute("ALTER TABLE t_knowledge_chunk ADD COLUMN block_type VARCHAR(32)")
-    op.execute("ALTER TABLE t_knowledge_chunk ADD COLUMN page_start INTEGER")
-    op.execute("ALTER TABLE t_knowledge_chunk ADD COLUMN page_end INTEGER")
-    op.execute("ALTER TABLE t_knowledge_chunk ADD COLUMN bbox_json JSON")
-    op.execute("ALTER TABLE t_knowledge_chunk ADD COLUMN metadata_json JSON")
+    op.execute(
+        "ALTER TABLE t_knowledge_chunk "
+        "ADD COLUMN IF NOT EXISTS embedding_content TEXT"
+    )
+    op.execute(
+        "ALTER TABLE t_knowledge_chunk "
+        "ADD COLUMN IF NOT EXISTS block_type VARCHAR(32)"
+    )
+    op.execute(
+        "ALTER TABLE t_knowledge_chunk "
+        "ADD COLUMN IF NOT EXISTS page_start INTEGER"
+    )
+    op.execute(
+        "ALTER TABLE t_knowledge_chunk "
+        "ADD COLUMN IF NOT EXISTS page_end INTEGER"
+    )
+    op.execute(
+        "ALTER TABLE t_knowledge_chunk "
+        "ADD COLUMN IF NOT EXISTS bbox_json JSON"
+    )
+    op.execute(
+        "ALTER TABLE t_knowledge_chunk "
+        "ADD COLUMN IF NOT EXISTS metadata_json JSON"
+    )
     op.execute("""
         CREATE TABLE IF NOT EXISTS t_knowledge_asset (
             id            VARCHAR(32) PRIMARY KEY,

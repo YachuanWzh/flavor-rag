@@ -4,9 +4,11 @@ from __future__ import annotations
 import hashlib
 import time
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import settings
+from app.database.session import async_session_factory
 from app.ingestion.parser import DocumentParser
 from app.ingestion.chunker import DocumentChunker, ChunkConfig
 from app.llm.embedding import get_embedding_client
@@ -92,6 +94,19 @@ class IngestionPipeline:
         _ingest_log.info("embed", doc_id=doc_id, vector_count=len(vectors), dim=len(vectors[0]) if vectors else 0, took_ms=embed_ms)
 
         # 4. Save chunk metadata to PostgreSQL
+        from sqlalchemy import select
+        from app.models import KnowledgeDocument
+
+        scope_result = await db.execute(
+            select(
+                KnowledgeDocument.tenant_id,
+                KnowledgeDocument.department_id,
+            ).where(KnowledgeDocument.id == doc_id)
+        )
+        scope = scope_result.first()
+        tenant_id = scope.tenant_id if scope else "default"
+        department_id = scope.department_id if scope else None
+
         if structured_document and structured_document.assets:
             from app.ingestion.pdf.asset_storage import (
                 materialize_asset_urls,
@@ -117,6 +132,8 @@ class IngestionPipeline:
             chunk_records.append(KnowledgeChunk(
                 kb_id=kb_id,
                 doc_id=doc_id,
+                tenant_id=tenant_id,
+                department_id=department_id,
                 chunk_index=c["chunk_index"],
                 content=content,
                 embedding_content=c.get("embedding_content"),
@@ -209,6 +226,8 @@ class IngestionPipeline:
                     id=c.id,
                     body={
                         "kb_id": kb_id,
+                        "tenant_id": c.tenant_id,
+                        "department_id": c.department_id,
                         "doc_id": c.doc_id,
                         "content": c.content,
                         "embedding_content": c.embedding_content,
@@ -222,17 +241,61 @@ class IngestionPipeline:
             pass  # ES is optional; silently skip on failure
 
     async def _sync_to_lightrag(self, kb_id: str, chunks: list):
-        """Sync chunks to LightRAG knowledge graph."""
+        """Sync the reliable Neo4j graph, then enqueue LightRAG enrichment."""
         try:
-            import httpx
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                for c in chunks:
-                    await client.post(
-                        f"{settings.lightrag_base_url}/documents",
-                        json={"kb_id": kb_id, "content": c.content},
+            from app.models import KnowledgeBase
+            from app.rag.graph.lightrag_client import LightRAGClient
+            from app.rag.graph.neo4j_store import Neo4jGraphStore
+
+            collection_name = ""
+            async with async_session_factory() as session:
+                row = (
+                    await session.execute(
+                        select(KnowledgeBase.collection_name).where(
+                            KnowledgeBase.id == kb_id,
+                            KnowledgeBase.deleted == 0,
+                        )
                     )
-        except Exception:
-            pass  # LightRAG is optional; silently skip
+                ).first()
+                if row:
+                    collection_name = row[0]
+            payload = [
+                {
+                    "doc_id": chunk.doc_id,
+                    "chunk_id": chunk.id,
+                    "tenant_id": chunk.tenant_id,
+                    "content": chunk.content,
+                }
+                for chunk in chunks
+            ]
+            native_result = await Neo4jGraphStore().upsert_chunks(
+                kb_id=kb_id,
+                collection_name=collection_name,
+                chunks=payload,
+            )
+            _ingest_log.info(
+                "native_graph_sync_complete",
+                kb_id=kb_id,
+                **native_result,
+            )
+            try:
+                await LightRAGClient().insert_documents_batch(
+                    kb_id,
+                    payload,
+                    collection_name=collection_name,
+                )
+            except Exception as exc:
+                _ingest_log.warning(
+                    "lightrag_enrichment_enqueue_failed",
+                    kb_id=kb_id,
+                    error=str(exc),
+                )
+        except Exception as exc:
+            _ingest_log.warning(
+                "graph_sync_failed",
+                kb_id=kb_id,
+                error=str(exc),
+            )
 
 
 async def _log_chunk_processing(

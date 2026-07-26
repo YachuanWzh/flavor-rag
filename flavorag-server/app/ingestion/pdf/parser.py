@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import re
 import statistics
 from io import BytesIO
 from typing import Any
@@ -23,6 +24,7 @@ from app.ingestion.pdf.models import (
 )
 from app.ingestion.pdf.table_merger import CrossPageTableMerger
 from app.ingestion.pdf.vlm import ImageDescriber, get_image_describer
+from app.ingestion.pdf.ocr import OCRProvider, get_ocr_provider
 
 _log = get_logger("flavorag.ingestion.pdf")
 
@@ -34,14 +36,20 @@ class StructuredPdfParser:
         self,
         *,
         image_describer: ImageDescriber | None = None,
+        ocr_provider: OCRProvider | None = None,
+        ocr_min_native_chars: int | None = None,
         vlm_max_concurrency: int | None = None,
         image_min_area_ratio: float = 0.001,
     ):
         self.image_describer = image_describer or get_image_describer()
+        self.ocr_provider = ocr_provider or get_ocr_provider()
         if vlm_max_concurrency is None:
             from app.config.settings import settings
             vlm_max_concurrency = settings.vlm_max_concurrency
+            if ocr_min_native_chars is None:
+                ocr_min_native_chars = settings.pdf_ocr_min_native_chars
         self.vlm_max_concurrency = max(1, vlm_max_concurrency)
+        self.ocr_min_native_chars = max(0, ocr_min_native_chars or 0)
         self.image_min_area_ratio = max(0.0, image_min_area_ratio)
         self.table_merger = CrossPageTableMerger()
 
@@ -78,6 +86,8 @@ class StructuredPdfParser:
         text_blocks: list[PdfBlock] = []
         assets: list[PdfAsset] = []
         image_boxes_by_page: dict[int, list[PdfBoundingBox]] = {}
+        page_dimensions: dict[int, tuple[float, float]] = {}
+        native_chars_by_page: dict[int, int] = {}
 
         with pdfplumber.open(BytesIO(content)) as pdf:
             page_count = len(pdf.pages)
@@ -86,9 +96,25 @@ class StructuredPdfParser:
                 table_blocks.extend(page_tables)
                 table_boxes = [block.first_bbox for block in page_tables if block.first_bbox]
                 page_text_blocks = self._extract_text_blocks(page, page_index, table_boxes)
+                page_dimensions[page_index] = (float(page.width), float(page.height))
+                native_chars_by_page[page_index] = sum(
+                    len(block.content) for block in page_text_blocks
+                ) + sum(
+                    len(cell)
+                    for block in page_tables
+                    for row in [block.table_headers, *block.table_rows]
+                    for cell in row
+                )
                 self._annotate_table_context(page_tables, page_text_blocks)
                 text_blocks.extend(page_text_blocks)
                 image_boxes_by_page[page_index] = self._extract_image_boxes(page, page_index)
+
+        ocr_blocks = await self._extract_ocr_blocks(
+            content,
+            page_dimensions=page_dimensions,
+            native_chars_by_page=native_chars_by_page,
+        )
+        text_blocks.extend(ocr_blocks)
 
         reader = PdfReader(BytesIO(content))
         assets = self._extract_image_assets(reader, image_boxes_by_page)
@@ -130,6 +156,8 @@ class StructuredPdfParser:
                 "cross_page_table_count": cross_page_count,
                 "image_count": len(assets),
                 "vlm_enriched_image_count": sum(bool(asset.description) for asset in assets),
+                "ocr_block_count": len(ocr_blocks),
+                "ocr_page_count": len({block.page_start for block in ocr_blocks}),
             },
         )
         _log.info(
@@ -142,6 +170,77 @@ class StructuredPdfParser:
             images=len(assets),
         )
         return document
+
+    async def _extract_ocr_blocks(
+        self,
+        content: bytes,
+        *,
+        page_dimensions: dict[int, tuple[float, float]],
+        native_chars_by_page: dict[int, int],
+    ) -> list[PdfBlock]:
+        if not self.ocr_provider.enabled:
+            return []
+        pages = [
+            page_no
+            for page_no in sorted(page_dimensions)
+            if native_chars_by_page.get(page_no, 0) < self.ocr_min_native_chars
+        ]
+        if not pages:
+            return []
+
+        async def process(page_no: int) -> list[PdfBlock]:
+            page_width, page_height = page_dimensions[page_no]
+            try:
+                image = await asyncio.to_thread(
+                    _render_pdf_page_png,
+                    content,
+                    page_no,
+                )
+                recognized = await self.ocr_provider.recognize(
+                    image,
+                    page_no=page_no,
+                    page_width=page_width,
+                    page_height=page_height,
+                )
+            except Exception as exc:
+                _log.warning("pdf_ocr_failed", page=page_no, error=str(exc))
+                return []
+
+            blocks: list[PdfBlock] = []
+            for index, item in enumerate(recognized):
+                if item.normalized:
+                    x0 = item.x0 * page_width
+                    top = item.top * page_height
+                    x1 = item.x1 * page_width
+                    bottom = item.bottom * page_height
+                else:
+                    x0, top, x1, bottom = item.x0, item.top, item.x1, item.bottom
+                box = PdfBoundingBox(
+                    page_no=page_no,
+                    x0=max(0.0, min(page_width, x0)),
+                    top=max(0.0, min(page_height, top)),
+                    x1=max(0.0, min(page_width, x1)),
+                    bottom=max(0.0, min(page_height, bottom)),
+                    page_width=page_width,
+                    page_height=page_height,
+                )
+                blocks.append(
+                    PdfBlock.text(
+                        block_id=f"ocr_p{page_no}_{index + 1}",
+                        block_type=PdfBlockType.PARAGRAPH,
+                        page_no=page_no,
+                        bbox=box,
+                        content=item.text,
+                        metadata={
+                            "extraction_method": "ocr",
+                            "confidence": item.confidence,
+                        },
+                    )
+                )
+            return blocks
+
+        grouped = await asyncio.gather(*(process(page_no) for page_no in pages))
+        return [block for page_blocks in grouped for block in page_blocks]
 
     def _extract_tables(self, page, page_no: int) -> list[PdfBlock]:
         try:
@@ -197,6 +296,8 @@ class StructuredPdfParser:
                 rows=data_rows,
                 metadata={
                     "parser": "pdfplumber",
+                    "extraction_method": "native",
+                    "confidence": 1.0,
                     "table_index_on_page": index,
                 },
             ))
@@ -256,15 +357,27 @@ class StructuredPdfParser:
                 page_width=float(page.width),
                 page_height=float(page.height),
             )
+            if box.top <= 24 or box.bottom >= float(page.height) - 24:
+                block_type = PdfBlockType.HEADER_FOOTER
+            elif is_heading:
+                block_type = PdfBlockType.HEADING
+            elif re.match(r"^(?:[-*•·]|\d+[.)、])\s*", text):
+                block_type = PdfBlockType.LIST
+            elif _looks_like_formula(text):
+                block_type = PdfBlockType.FORMULA
+            else:
+                block_type = PdfBlockType.PARAGRAPH
             output.append(PdfBlock.text(
                 block_id=f"text_p{page_no}_{line_index + 1}",
-                block_type=PdfBlockType.HEADING if is_heading else PdfBlockType.PARAGRAPH,
+                block_type=block_type,
                 page_no=page_no,
                 bbox=box,
                 content=text,
                 metadata={
                     "font_size": round(max_size, 2),
                     "heading_level": 1 if is_heading else None,
+                    "extraction_method": "native",
+                    "confidence": 1.0,
                 },
             ))
         return output
@@ -404,8 +517,34 @@ def _pad(row: list[str], width: int) -> list[str]:
     return list(row[:width]) + [""] * max(0, width - len(row))
 
 
+def _looks_like_formula(text: str) -> bool:
+    if len(text) > 240:
+        return False
+    math_symbols = sum(text.count(symbol) for symbol in ("=", "∑", "√", "≤", "≥", "±", "∫"))
+    return math_symbols >= 1 and len(text.split()) <= 24
+
+
 def _caption_from_filename(filename: str) -> str:
     return filename.rsplit(".", 1)[0] if "." in filename else filename
+
+
+def _render_pdf_page_png(content: bytes, page_no: int) -> bytes:
+    """Render one page for OCR without a system binary dependency."""
+    import pypdfium2 as pdfium
+
+    document = pdfium.PdfDocument(content)
+    try:
+        page = document[page_no - 1]
+        try:
+            bitmap = page.render(scale=2.5)
+            image = bitmap.to_pil()
+            output = BytesIO()
+            image.save(output, format="PNG")
+            return output.getvalue()
+        finally:
+            page.close()
+    finally:
+        document.close()
 
 
 def _guess_image_mime(filename: str, data: bytes) -> str:

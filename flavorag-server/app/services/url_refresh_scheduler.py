@@ -18,10 +18,11 @@ from sqlalchemy import select
 from app.config.settings import settings
 from app.config.logging_config import get_logger
 from app.database.session import async_session_factory
-from app.models import KnowledgeDocument, KnowledgeBase, KnowledgeChunk, gen_id
+from app.models import KnowledgeDocument, KnowledgeBase, KnowledgeChunk, KnowledgeAsset, gen_id
 from app.ingestion.pipeline import IngestionPipeline
 from app.ingestion.chunker import ChunkConfig
 from app.rag.search.vector import MilvusSearchChannel
+from app.ingestion.url_fetcher import SafeURLFetcher
 
 _log = get_logger("flavorag.scheduler.url_refresh")
 
@@ -91,7 +92,14 @@ class URLRefreshScheduler:
         _log.info("checking_document", doc_id=doc.id, doc_name=doc.doc_name, url=url[:120])
 
         try:
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            fetcher = SafeURLFetcher(
+                max_bytes=settings.url_ingestion_max_bytes,
+                timeout_sec=settings.url_ingestion_timeout_sec,
+                max_redirects=settings.url_ingestion_max_redirects,
+                allow_private_networks=settings.url_allow_private_networks,
+            )
+            await fetcher.validate_url(url)
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
                 head_resp = await client.head(url)
                 head_resp.raise_for_status()
 
@@ -108,10 +116,9 @@ class URLRefreshScheduler:
 
                 _log.info("document_changed", doc_id=doc.id)
 
-                get_resp = await client.get(url)
-                get_resp.raise_for_status()
-                content = get_resp.content
-                ext = self._guess_extension(url, get_resp.headers.get("content-type", ""))
+                fetched = await fetcher.fetch(url)
+                content = fetched.content
+                ext = self._guess_extension(fetched.final_url, fetched.content_type)
 
                 tmp_path = os.path.join(tempfile.gettempdir(), f"rag_url_{gen_id()}.{ext}")
                 with open(tmp_path, "wb") as f:
@@ -120,23 +127,46 @@ class URLRefreshScheduler:
                 try:
                     # Get collection name
                     kb_result = await session.execute(
-                        select(KnowledgeBase.collection_name).where(
+                        select(KnowledgeBase).where(
                             KnowledgeBase.id == doc.kb_id,
                             KnowledgeBase.deleted == 0,
                         )
                     )
-                    kb_row = kb_result.first()
-                    collection_name = kb_row[0] if kb_row else "default_store"
+                    kb = kb_result.scalar_one_or_none()
+                    if kb is None:
+                        raise RuntimeError("knowledge base no longer exists")
+                    collection_name = kb.collection_name
 
                     # Soft-delete old chunks
-                    await session.execute(
-                        select(KnowledgeChunk).where(KnowledgeChunk.doc_id == doc.id)
-                    )
                     chunks_result = await session.execute(
-                        select(KnowledgeChunk).where(KnowledgeChunk.doc_id == doc.id)
+                        select(KnowledgeChunk).where(
+                            KnowledgeChunk.doc_id == doc.id,
+                            KnowledgeChunk.deleted == 0,
+                        )
                     )
-                    for chunk in chunks_result.scalars().all():
+                    old_chunks = list(chunks_result.scalars().all())
+                    for chunk in old_chunks:
                         chunk.deleted = 1
+                    assets_result = await session.execute(
+                        select(KnowledgeAsset).where(
+                            KnowledgeAsset.doc_id == doc.id,
+                            KnowledgeAsset.deleted == 0,
+                        )
+                    )
+                    old_assets = list(assets_result.scalars().all())
+                    for asset in old_assets:
+                        asset.deleted = 1
+
+                    if old_chunks or old_assets:
+                        from app.services.index_sync import IndexSyncService
+
+                        await IndexSyncService().delete_document(
+                            session,
+                            kb=kb,
+                            doc_id=doc.id,
+                            chunks=old_chunks,
+                            assets=old_assets,
+                        )
 
                     await session.flush()
 
@@ -199,6 +229,7 @@ class URLRefreshScheduler:
             "text/plain": "txt",
             "text/markdown": "md",
             "application/pdf": "pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
             "text/html": "html",
             "application/json": "json",
             "text/csv": "csv",

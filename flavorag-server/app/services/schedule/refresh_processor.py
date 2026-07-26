@@ -18,11 +18,13 @@ from app.models import (
     KnowledgeDocument,
     KnowledgeBase,
     KnowledgeChunk,
+    KnowledgeAsset,
     KnowledgeDocumentSchedule,
     KnowledgeDocumentScheduleExec,
     gen_id,
 )
 from app.rag.search.vector import MilvusSearchChannel
+from app.ingestion.url_fetcher import SafeURLFetcher
 
 _log = get_logger("flavorag.schedule.refresh")
 
@@ -75,16 +77,18 @@ class RefreshProcessor:
 
                 # Get collection name
                 kb_result = await session.execute(
-                    select(KnowledgeBase.collection_name).where(
+                    select(KnowledgeBase).where(
                         KnowledgeBase.id == doc.kb_id,
                         KnowledgeBase.deleted == 0,
                     )
                 )
-                kb_row = kb_result.first()
-                collection_name = kb_row[0] if kb_row else "default_store"
+                kb = kb_result.scalar_one_or_none()
+                if kb is None:
+                    raise RuntimeError("knowledge base no longer exists")
+                collection_name = kb.collection_name
 
                 # Soft-delete old chunks
-                await self._cleanup_old_chunks(session, doc.id, collection_name)
+                await self._cleanup_old_chunks(session, doc.id, kb)
 
                 # Re-ingest
                 from app.ingestion.pipeline import IngestionPipeline
@@ -158,7 +162,14 @@ class RefreshProcessor:
         if not url:
             return False
         try:
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            fetcher = SafeURLFetcher(
+                max_bytes=settings.url_ingestion_max_bytes,
+                timeout_sec=settings.url_ingestion_timeout_sec,
+                max_redirects=settings.url_ingestion_max_redirects,
+                allow_private_networks=settings.url_allow_private_networks,
+            )
+            await fetcher.validate_url(url)
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
                 head_resp = await client.head(url)
                 head_resp.raise_for_status()
                 etag = head_resp.headers.get("etag", "")
@@ -187,18 +198,21 @@ class RefreshProcessor:
         # URL documents: download to temp
         if doc.source_type == "url" and doc.source_location:
             try:
-                async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-                    resp = await client.get(doc.source_location)
-                    resp.raise_for_status()
-                    ext = doc.file_type or "tmp"
-                    tmp_path = os.path.join(
-                        os.path.dirname(__file__), "..", "..", "..", "uploads",
-                        f"{doc.id}.{ext}"
-                    )
-                    os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
-                    with open(tmp_path, "wb") as f:
-                        f.write(resp.content)
-                    return tmp_path
+                fetched = await SafeURLFetcher(
+                    max_bytes=settings.url_ingestion_max_bytes,
+                    timeout_sec=settings.url_ingestion_timeout_sec,
+                    max_redirects=settings.url_ingestion_max_redirects,
+                    allow_private_networks=settings.url_allow_private_networks,
+                ).fetch(doc.source_location)
+                ext = doc.file_type or "tmp"
+                tmp_path = os.path.join(
+                    os.path.dirname(__file__), "..", "..", "..", "uploads",
+                    f"{doc.id}.{ext}"
+                )
+                os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
+                with open(tmp_path, "wb") as f:
+                    f.write(fetched.content)
+                return tmp_path
             except Exception as exc:
                 _log.error("url_download_failed", doc_id=doc.id, error=str(exc))
                 return None
@@ -206,7 +220,7 @@ class RefreshProcessor:
         return None
 
     async def _cleanup_old_chunks(
-        self, session: AsyncSession, doc_id: str, collection_name: str
+        self, session: AsyncSession, doc_id: str, kb: KnowledgeBase
     ) -> None:
         """Soft-delete old chunks and remove from Milvus."""
         result = await session.execute(
@@ -216,18 +230,27 @@ class RefreshProcessor:
             )
         )
         old_chunks = result.scalars().all()
-        if old_chunks:
-            # Soft-delete in PG
-            for c in old_chunks:
-                c.deleted = 1
+        assets_result = await session.execute(
+            select(KnowledgeAsset).where(
+                KnowledgeAsset.doc_id == doc_id,
+                KnowledgeAsset.deleted == 0,
+            )
+        )
+        old_assets = list(assets_result.scalars().all())
+        for chunk in old_chunks:
+            chunk.deleted = 1
+        for asset in old_assets:
+            asset.deleted = 1
+        if old_chunks or old_assets:
+            from app.services.index_sync import IndexSyncService
 
-            # Delete from Milvus
-            try:
-                milvus = MilvusSearchChannel()
-                chunk_ids = [c.id for c in old_chunks]
-                milvus.delete_by_ids(collection_name, chunk_ids)
-            except Exception as exc:
-                _log.warning("milvus_cleanup_failed", doc_id=doc_id, error=str(exc))
+            await IndexSyncService().delete_document(
+                session,
+                kb=kb,
+                doc_id=doc_id,
+                chunks=list(old_chunks),
+                assets=old_assets,
+            )
 
     async def _record_exec(
         self,

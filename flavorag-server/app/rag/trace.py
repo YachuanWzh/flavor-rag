@@ -20,6 +20,8 @@ class TraceLogger:
         *,
         conversation_id: str = "",
         message_id: str | None = None,
+        tenant_id: str = "default",
+        kb_id: str | None = None,
         rewrite_query: str | None = None,
         intent: str | None = None,
     ) -> str:
@@ -29,6 +31,8 @@ class TraceLogger:
             conversation_id=conversation_id,
             message_id=message_id,
             user_id=user_id,
+            tenant_id=tenant_id,
+            kb_id=kb_id,
             query=query,
             rewrite_query=rewrite_query,
             intent=intent,
@@ -51,8 +55,12 @@ class TraceLogger:
         output_data: dict | None = None,
         status: str = "success",
         error_message: str | None = None,
+        rejection_reason: str | None = None,
+        metadata: dict | None = None,
     ) -> str:
         """Log a pipeline node."""
+        if not trace_run_id:
+            return ""
         node = RagTraceNode(
             id=gen_id(),
             trace_run_id=trace_run_id,
@@ -83,6 +91,8 @@ class TraceLogger:
         model_name: str = "",
         status: str = "success",
         error_message: str | None = None,
+        rejection_reason: str | None = None,
+        metadata: dict | None = None,
     ):
         """Update the trace run with final metrics."""
         from sqlalchemy import select
@@ -103,14 +113,22 @@ class TraceLogger:
             run.model_name = model_name
             run.status = status
             run.error_message = error_message
+            run.rejection_reason = rejection_reason
+            run.metadata_json = metadata
 
-    async def get_trace(self, trace_run_id: str) -> dict | None:
+    async def get_trace(
+        self,
+        trace_run_id: str,
+        *,
+        tenant_id: str | None = None,
+    ) -> dict | None:
         """Retrieve full trace with nodes."""
         from sqlalchemy import select
 
-        result = await self.db.execute(
-            select(RagTraceRun).where(RagTraceRun.id == trace_run_id)
-        )
+        predicates = [RagTraceRun.id == trace_run_id]
+        if tenant_id is not None:
+            predicates.append(RagTraceRun.tenant_id == tenant_id)
+        result = await self.db.execute(select(RagTraceRun).where(*predicates))
         run = result.scalar_one_or_none()
         if not run:
             return None
@@ -133,6 +151,8 @@ class TraceLogger:
                 "final_count": run.final_count,
                 "model_name": run.model_name,
                 "status": run.status,
+                "rejection_reason": run.rejection_reason,
+                "metadata": run.metadata_json,
                 "create_time": str(run.create_time),
             },
             "nodes": [

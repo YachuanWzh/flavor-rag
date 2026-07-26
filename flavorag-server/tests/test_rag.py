@@ -1,8 +1,10 @@
 ﻿"""Unit tests for RAG rewrite, intent, pipeline — no external deps."""
 import pytest
+import hashlib
 from app.rag.rewrite import rewrite_query
 from app.rag.intent import recognize_intent
 from app.rag.pipeline import RAGPipeline, RAGContext, RAGResult
+from app.rag.search.base import SearchResult
 
 
 class TestRewrite:
@@ -101,3 +103,51 @@ class TestRAGPipeline:
         assert r.intent["intent"] == "general"
         assert len(r.context_chunks) == 1
         assert r.duration_ms == 100
+
+    @pytest.mark.asyncio
+    async def test_disabled_chunks_are_filtered_without_reindexing(self, monkeypatch):
+        import app.rag.pipeline as pipeline_module
+
+        disabled_content = "disabled by its content hash"
+        disabled_hash = hashlib.sha256(disabled_content.encode()).hexdigest()[:16]
+
+        class FakeRows:
+            def __iter__(self):
+                return iter(
+                    [
+                        ("enabled-id", "enabled-hash", 1, 0),
+                        ("disabled-id", "disabled-id-hash", 0, 0),
+                        ("hash-match-id", disabled_hash, 0, 0),
+                        ("deleted-id", "deleted-hash", 1, 1),
+                    ]
+                )
+
+        class FakeSession:
+            async def execute(self, _statement):
+                return FakeRows()
+
+        class FakeSessionContext:
+            async def __aenter__(self):
+                return FakeSession()
+
+            async def __aexit__(self, _exc_type, _exc, _traceback):
+                return False
+
+        monkeypatch.setattr(
+            pipeline_module,
+            "async_session_factory",
+            lambda: FakeSessionContext(),
+        )
+
+        results = [
+            SearchResult(chunk_id="enabled-id", content="enabled", score=1.0),
+            SearchResult(chunk_id="disabled-id", content="disabled", score=0.9),
+            SearchResult(chunk_id="deleted-id", content="deleted", score=0.8),
+            SearchResult(chunk_id="stale-search-id", content=disabled_content, score=0.7),
+            SearchResult(chunk_id="graph-only", content="not in database", score=0.6),
+        ]
+
+        pipeline = RAGPipeline.__new__(RAGPipeline)
+        filtered = await pipeline._filter_unavailable_chunks(results)
+
+        assert [item.chunk_id for item in filtered] == ["enabled-id"]

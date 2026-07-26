@@ -72,6 +72,27 @@ _COMPATIBILITY_COLUMNS: dict[str, dict[str, str]] = {
         "rejection_reason": "VARCHAR(64)",
         "metadata_json": "JSON",
     },
+    "t_ingestion_pipeline": {
+        "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+        "enabled": "SMALLINT NOT NULL DEFAULT 1",
+    },
+    "t_ingestion_task": {
+        "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+        "kb_id": "VARCHAR(20)",
+        "doc_id": "VARCHAR(20)",
+        "trace_id": "VARCHAR(32)",
+        "idempotency_key": "VARCHAR(128)",
+        "parent_task_id": "VARCHAR(20)",
+        "attempt": "INTEGER NOT NULL DEFAULT 1",
+        "total_duration_ms": "BIGINT",
+        "sla_ms": "BIGINT NOT NULL DEFAULT 300000",
+        "heartbeat_at": "DATETIME",
+    },
+    "t_ingestion_task_node": {
+        "attempt": "INTEGER NOT NULL DEFAULT 1",
+        "started_at": "DATETIME",
+        "completed_at": "DATETIME",
+    },
 }
 
 
@@ -156,6 +177,19 @@ async def initialize_sqlite_schema(engine: AsyncEngine) -> list[str]:
                 {"status", "next_retry_time"},
                 "CREATE INDEX IF NOT EXISTS idx_sync_job_status "
                 "ON t_index_sync_job (status, next_retry_time)",
+            ),
+            (
+                "t_ingestion_task",
+                {"tenant_id", "status", "create_time"},
+                "CREATE INDEX IF NOT EXISTS idx_ingestion_task_monitor "
+                "ON t_ingestion_task (tenant_id, status, create_time)",
+            ),
+            (
+                "t_ingestion_task",
+                {"tenant_id", "idempotency_key"},
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_ingestion_task_idempotency "
+                "ON t_ingestion_task (tenant_id, idempotency_key) "
+                "WHERE idempotency_key IS NOT NULL AND deleted = 0",
             ),
         )
         for table_name, required_columns, ddl in index_specs:

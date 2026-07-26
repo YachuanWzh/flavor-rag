@@ -25,6 +25,7 @@ _log = get_logger("flavorag.server")
 _url_scheduler = None
 _doc_schedule_scheduler = None
 _index_sync_scheduler = None
+_ingestion_watchdog = None
 
 
 async def _seed_admin_user():
@@ -111,6 +112,16 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         _log.warning("index_sync_retry_scheduler_failed", error=str(exc))
 
+    global _ingestion_watchdog
+    try:
+        from app.services.ingestion_watchdog import IngestionWatchdog
+
+        _ingestion_watchdog = IngestionWatchdog()
+        await _ingestion_watchdog.start()
+        _log.info("ingestion_watchdog_started")
+    except Exception as exc:
+        _log.warning("ingestion_watchdog_failed", error=str(exc))
+
     _log.info("server_started", port=settings.server_port)
     yield
     # Shutdown: stop schedulers
@@ -132,6 +143,12 @@ async def lifespan(app: FastAPI):
             _log.info("index_sync_retry_scheduler_stopped")
         except Exception as exc:
             _log.warning("index_sync_retry_scheduler_stop_failed", error=str(exc))
+    if _ingestion_watchdog:
+        try:
+            await _ingestion_watchdog.stop()
+            _log.info("ingestion_watchdog_stopped")
+        except Exception as exc:
+            _log.warning("ingestion_watchdog_stop_failed", error=str(exc))
     _log.info("server_shutting_down")
 
 

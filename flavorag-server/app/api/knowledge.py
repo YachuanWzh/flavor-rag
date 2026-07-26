@@ -506,6 +506,7 @@ async def _run_ingestion(
             kb_id=kb.id,
             doc_id=doc.id,
             user_id=user.id,
+            tenant_id=user.tenant_id or "default",
             db=db,
         )
         if result.status == "error":
@@ -666,6 +667,7 @@ async def reprocess_document(
                 kb_id=kb.id,
                 doc_id=doc.id,
                 user_id=user.id,
+                tenant_id=user.tenant_id or "default",
                 db=db,
             )
             if result.status == "error":

@@ -10,3 +10,25 @@ __pycache__/
 *.egg-info/
 node_modules/
 .env
+
+# Logs
+*.log
+
+# Database files
+*.db
+*.sqlite
+
+# Uploads / user data
+uploads/
+
+# Build output
+dist/
+
+# IDE / editor local settings
+.claude/
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db

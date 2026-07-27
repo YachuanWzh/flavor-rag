@@ -1,4 +1,4 @@
-﻿"""Document ingestion pipeline — Parse → Chunk → Embed → Index → PG save."""
+"""Document ingestion pipeline — Parse → Chunk → Embed → Index → PG save."""
 from __future__ import annotations
 
 import hashlib
@@ -207,7 +207,11 @@ class IngestionPipeline:
             await _log_chunk_processing(
                 doc_id=doc_id,
                 status="success",
-                chunk_strategy=chunk_config.strategy.value if chunk_config else "",
+                chunk_strategy=(
+                    getattr(chunk_config.strategy, "value", chunk_config.strategy)
+                    if chunk_config
+                    else ""
+                ),
                 extract_duration=parse_ms,
                 chunk_duration=chunk_ms,
                 embed_duration=embed_ms,
@@ -221,29 +225,37 @@ class IngestionPipeline:
         return len(chunks)
 
     async def _index_to_es(self, kb_id: str, chunks: list):
-        """Index chunk content to Elasticsearch for BM25 keyword search."""
+        """Index chunk content to Elasticsearch for BM25 keyword search.
+
+        Best-effort: failures are logged (never silently swallowed) and do
+        not fail the ingestion — chunks can be re-indexed later.
+        """
+        from app.rag.search.keyword import ESKeywordSearchChannel
+
         try:
-            from elasticsearch import AsyncElasticsearch
-            es = AsyncElasticsearch(settings.es_uris)
-            for c in chunks:
-                await es.index(
-                    index="rag_keyword_store",
-                    id=c.id,
-                    body={
-                        "kb_id": kb_id,
-                        "tenant_id": c.tenant_id,
-                        "department_id": c.department_id,
-                        "doc_id": c.doc_id,
-                        "content": c.content,
-                        "embedding_content": c.embedding_content,
-                        "chunk_index": c.chunk_index,
-                        "block_type": c.block_type,
-                        "page_start": c.page_start,
-                        "page_end": c.page_end,
-                    },
-                )
-        except Exception:
-            pass  # ES is optional; silently skip on failure
+            payload = [
+                {
+                    "id": c.id,
+                    "tenant_id": c.tenant_id,
+                    "department_id": c.department_id,
+                    "doc_id": c.doc_id,
+                    "content": c.content,
+                    "embedding_content": c.embedding_content,
+                    "chunk_index": c.chunk_index,
+                    "block_type": c.block_type,
+                    "page_start": c.page_start,
+                    "page_end": c.page_end,
+                }
+                for c in chunks
+            ]
+            await ESKeywordSearchChannel().insert(payload, kb_id)
+        except Exception as exc:
+            _ingest_log.warning(
+                "es_index_failed",
+                kb_id=kb_id,
+                chunk_count=len(chunks),
+                error=str(exc),
+            )
 
     async def _sync_to_lightrag(self, kb_id: str, chunks: list):
         """Sync the reliable Neo4j graph, then enqueue LightRAG enrichment."""

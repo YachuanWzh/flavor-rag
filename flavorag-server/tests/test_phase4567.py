@@ -62,15 +62,19 @@ class TestModelRouter:
 # ========== ES Keyword Channel ==========
 
 class TestESKeywordChannel:
-    def test_import(self):
+    def test_import(self, monkeypatch):
+        from app.config.settings import settings
         from app.rag.search.keyword import ESKeywordSearchChannel
+        monkeypatch.setattr(settings, "es_enabled", False)
         chan = ESKeywordSearchChannel()
         assert chan is not None
-        assert chan.enabled is False  # ES_ENABLED=False by default
+        assert chan.enabled is False
 
     @pytest.mark.asyncio
-    async def test_search_disabled_returns_empty(self):
+    async def test_search_disabled_returns_empty(self, monkeypatch):
+        from app.config.settings import settings
         from app.rag.search.keyword import ESKeywordSearchChannel
+        monkeypatch.setattr(settings, "es_enabled", False)
         chan = ESKeywordSearchChannel()
         results = await chan.search("test query", "test_collection")
         assert results == []

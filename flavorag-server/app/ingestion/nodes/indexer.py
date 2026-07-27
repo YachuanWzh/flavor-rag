@@ -222,26 +222,24 @@ class IndexerNode:
             )
 
     async def _index_to_es(self, kb_id: str, chunks: list):
-        from app.config.settings import settings
-        from elasticsearch import AsyncElasticsearch
+        """Index chunks to ES via the shared keyword channel (explicit
+        mapping + singleton client). Raises on failure; the call site
+        degrades with a warning log."""
+        from app.rag.search.keyword import ESKeywordSearchChannel
 
-        es = AsyncElasticsearch(settings.es_uris)
-        index_name = "rag_keyword_store"
-        for c in chunks:
-            await es.index(
-                index=index_name,
-                id=c.id,
-                body={
-                    "kb_id": c.kb_id,
-                    "tenant_id": c.tenant_id,
-                    "department_id": c.department_id,
-                    "doc_id": c.doc_id,
-                    "chunk_index": c.chunk_index,
-                    "content": c.content,
-                    "embedding_content": c.embedding_content,
-                    "block_type": c.block_type,
-                    "page_start": c.page_start,
-                    "page_end": c.page_end,
-                },
-            )
-        await es.close()
+        payload = [
+            {
+                "id": c.id,
+                "tenant_id": c.tenant_id,
+                "department_id": c.department_id,
+                "doc_id": c.doc_id,
+                "content": c.content,
+                "embedding_content": c.embedding_content,
+                "chunk_index": c.chunk_index,
+                "block_type": c.block_type,
+                "page_start": c.page_start,
+                "page_end": c.page_end,
+            }
+            for c in chunks
+        ]
+        await ESKeywordSearchChannel().insert(payload, kb_id)

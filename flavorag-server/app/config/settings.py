@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     # Elasticsearch（可选）
     es_uris: str = "http://127.0.0.1:9200"
     es_enabled: bool = True
+    # 中文分词器（需安装 IK 插件；未安装时自动降级 standard）
+    es_analyzer: str = "ik_max_word"
+    es_search_analyzer: str = "ik_smart"
 
     # LightRAG（可选）
     lightrag_base_url: str = "http://127.0.0.1:9621"

@@ -27,7 +27,9 @@ class ChunkStrategy(Enum):
         self.label = label
 
     @classmethod
-    def from_value(cls, value: str) -> "ChunkStrategy":
+    def from_value(cls, value) -> "ChunkStrategy":
+        if isinstance(value, cls):
+            return value
         if not value:
             raise ValueError("Chunk strategy value must not be empty")
         normalized = value.strip().lower().replace("-", "_")
@@ -163,19 +165,37 @@ class ChunkConfig:
 # ============================================================================
 @dataclass
 class ChunkRecord:
+    """Chunk output aligned with ragent VectorChunk:
+
+    - content: human-readable text (stored / shown / fed to LLM)
+    - embedding_text: search-optimized text (embedded / BM25); empty means
+      content doubles as the embedding text
+    - block_type: source block type (PARAGRAPH/TABLE/CODE/LIST/IMAGE/HEADING)
+    - outline_path: heading path from document root to this chunk
+    """
     content: str
     chunk_index: int
+    block_type: str = ""
+    embedding_text: str = ""
+    outline_path: list[str] = field(default_factory=list)
 
     @property
     def char_count(self) -> int:
         return len(self.content)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "content": self.content,
             "chunk_index": self.chunk_index,
             "char_count": self.char_count,
         }
+        if self.block_type:
+            d["block_type"] = self.block_type
+        if self.embedding_text:
+            d["embedding_content"] = self.embedding_text
+        if self.outline_path:
+            d["metadata_json"] = {"outline_path": list(self.outline_path)}
+        return d
 
 
 # ============================================================================
@@ -724,6 +744,11 @@ class _BlockAwareChunker:
         # 2) Dispatch each block to its sub-chunker
         raw_chunks: list[ChunkRecord] = []
         current_heading_path: list[str] = []
+        # kind → chunk block_type label
+        kind_labels = {
+            "TABLE": "TABLE", "CODE": "CODE", "LIST": "LIST",
+            "IMAGE": "IMAGE", "PARA": "PARAGRAPH",
+        }
 
         for blk in blocks:
             body = text[blk.start:blk.end]
@@ -735,7 +760,9 @@ class _BlockAwareChunker:
                     if len(current_heading_path) > 4:
                         current_heading_path.pop(0)
                 else:
-                    raw_chunks.append(ChunkRecord(content=body, chunk_index=0))
+                    raw_chunks.append(ChunkRecord(
+                        content=body, chunk_index=0, block_type="HEADING",
+                    ))
                 continue
 
             if blk.kind == "TABLE":
@@ -749,11 +776,19 @@ class _BlockAwareChunker:
             else:  # PARA
                 sub = self._chunk_paragraph(body, options)
 
-            # Prepend heading path to each chunk
+            block_type = kind_labels.get(blk.kind, "PARAGRAPH")
+            for r in sub:
+                if not r.block_type:
+                    r.block_type = block_type
+                r.outline_path = list(current_heading_path)
+
+            # Prepend heading path to each chunk (content + embedding text)
             if current_heading_path:
                 path_str = " > ".join(current_heading_path)
                 for r in sub:
                     r.content = f"[{path_str}]\n{r.content}"
+                    if r.embedding_text:
+                        r.embedding_text = f"[{path_str}]\n{r.embedding_text}"
 
             raw_chunks.extend(sub)
 
@@ -919,13 +954,14 @@ class _BlockAwareChunker:
     # ------------------------------------------------------------------
 
     def _chunk_table(self, text: str, options: BlockAwareOptions) -> list[ChunkRecord]:
-        """Chunk a markdown table by rows. Each chunk stores two versions:
-        - content: original table fragment (human-readable)
-        - The key:value version is appended as search hint text.
+        """Chunk a markdown table by rows with dual-text separation:
+        - content: original table fragment (human-readable, full header)
+        - embedding_text: key:value rows (embedding models can't align
+          markdown table columns positionally, so embed "col: val" pairs)
         """
         lines = text.split('\n')
         if len(lines) < 2:
-            return [ChunkRecord(content=text, chunk_index=0)]
+            return [ChunkRecord(content=text, chunk_index=0, block_type="TABLE")]
 
         # Separate header + separator from data rows
         header_rows: list[str] = []
@@ -947,10 +983,11 @@ class _BlockAwareChunker:
                 data_rows.append(stripped)
 
         if not data_rows:
-            return [ChunkRecord(content=text, chunk_index=0)]
+            return [ChunkRecord(content=text, chunk_index=0, block_type="TABLE")]
 
         # Parse header column names for key:value conversion
         col_names = self._parse_table_header(header_rows[0] if header_rows else "")
+        header_ctx = "headers: " + ", ".join(col_names) if col_names else ""
 
         records: list[ChunkRecord] = []
         batch_size = max(1, options.table_max_rows)
@@ -959,11 +996,11 @@ class _BlockAwareChunker:
         for batch_start in range(0, len(data_rows), batch_size):
             batch = data_rows[batch_start:batch_start + batch_size]
 
-            # Build original table fragment
+            # Build original table fragment (content, human-readable)
             orig_lines = header_rows + [sep_row] + batch if sep_row else header_rows + batch
             orig = '\n'.join(orig_lines)
 
-            # Build key:value search text
+            # Build key:value embedding text (search-optimized)
             kv_lines: list[str] = []
             for row in batch:
                 cells = self._parse_table_cells(row)
@@ -973,13 +1010,21 @@ class _BlockAwareChunker:
                     kv_pairs.append(f"{col_name}: {cell}")
                 kv_lines.append("; ".join(kv_pairs))
 
-            # Combined content: human-readable + search-optimized
-            combined = orig + "\n\n[表格数据: " + " | ".join(kv_lines) + "]"
+            embedding_text = '\n'.join(
+                part for part in [header_ctx, *kv_lines] if part
+            )
 
-            records.append(ChunkRecord(content=combined, chunk_index=idx))
+            records.append(ChunkRecord(
+                content=orig,
+                chunk_index=idx,
+                block_type="TABLE",
+                embedding_text=embedding_text,
+            ))
             idx += 1
 
-        return records if records else [ChunkRecord(content=text, chunk_index=0)]
+        return records if records else [
+            ChunkRecord(content=text, chunk_index=0, block_type="TABLE")
+        ]
 
     def _parse_table_header(self, header_line: str) -> list[str]:
         """Extract column names from a | col1 | col2 | header."""
@@ -1026,13 +1071,16 @@ class _BlockAwareChunker:
         return records
 
     def _chunk_image(self, text: str) -> list[ChunkRecord]:
-        """Extract alt text from image markup for search."""
-        # Try to extract alt text from `![alt](url)`
+        """Keep original image markup (URL preserved) as content; use the
+        alt text as embedding text for search."""
         m = re.match(r'^!\[([^\]]*)\]', text)
         alt = m.group(1) if m else ""
-        if alt:
-            return [ChunkRecord(content=f"[图片: {alt}]", chunk_index=0)]
-        return [ChunkRecord(content=text, chunk_index=0)]
+        return [ChunkRecord(
+            content=text,
+            chunk_index=0,
+            block_type="IMAGE",
+            embedding_text=f"[图片: {alt}]" if alt else "",
+        )]
 
     def _chunk_paragraph(self, text: str, options: BlockAwareOptions) -> list[ChunkRecord]:
         """Chunk a paragraph by character budget."""
@@ -1091,8 +1139,14 @@ class _BlockAwareChunker:
     # ------------------------------------------------------------------
     # 3) ChunkPacker — merge adjacent small chunks
     # ------------------------------------------------------------------
+
+    # Only free-flowing block types may be merged; TABLE/CODE/HEADING are
+    # atomic — they never merge and they break the merge chain (ragent
+    # ChunkPacker MERGEABLE_TYPES semantics).
+    _MERGEABLE_TYPES = frozenset({"PARAGRAPH", "LIST", "IMAGE", ""})
+
     def _pack_chunks(self, chunks: list[ChunkRecord], options: BlockAwareOptions) -> list[ChunkRecord]:
-        """Merge adjacent small chunks to avoid fragmentation."""
+        """Merge adjacent small mergeable chunks to avoid fragmentation."""
         if len(chunks) <= 1:
             return chunks
 
@@ -1103,6 +1157,14 @@ class _BlockAwareChunker:
         buffer: list[ChunkRecord] = []
 
         for c in chunks:
+            # Atomic block: flush buffer, pass through untouched
+            if c.block_type not in self._MERGEABLE_TYPES:
+                if buffer:
+                    packed.append(self._merge_buffer(buffer))
+                    buffer = []
+                packed.append(c)
+                continue
+
             c_len = len(c.content)
             if c_len < min_size and buffer:
                 buffer.append(c)
@@ -1124,11 +1186,40 @@ class _BlockAwareChunker:
         return packed
 
     def _merge_buffer(self, buf: list[ChunkRecord]) -> ChunkRecord:
-        """Merge a buffer of small chunks into one."""
+        """Merge a buffer of small chunks into one, preserving metadata:
+        embedding texts are joined (explicit text wins over content),
+        outline_path keeps the longest common prefix."""
         if len(buf) == 1:
             return buf[0]
         merged = '\n\n'.join(b.content for b in buf)
-        return ChunkRecord(content=merged, chunk_index=0)
+
+        # Join embedding texts only if at least one chunk has an explicit one
+        if any(b.embedding_text for b in buf):
+            merged_embedding = '\n\n'.join(
+                b.embedding_text or b.content for b in buf
+            )
+        else:
+            merged_embedding = ""
+
+        # Longest common outline prefix
+        common_path = list(buf[0].outline_path)
+        for b in buf[1:]:
+            limit = min(len(common_path), len(b.outline_path))
+            k = 0
+            while k < limit and common_path[k] == b.outline_path[k]:
+                k += 1
+            common_path = common_path[:k]
+
+        block_types = {b.block_type for b in buf if b.block_type}
+        block_type = block_types.pop() if len(block_types) == 1 else "PARAGRAPH"
+
+        return ChunkRecord(
+            content=merged,
+            chunk_index=0,
+            block_type=block_type,
+            embedding_text=merged_embedding,
+            outline_path=common_path,
+        )
 
     # ------------------------------------------------------------------
     # Helpers

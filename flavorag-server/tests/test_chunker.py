@@ -249,7 +249,8 @@ class TestBlockAwareChunking:
         assert "authentication" in content
 
     def test_table_dual_text(self):
-        """Table chunks should contain both original table and key:value search text."""
+        """Table chunks keep the original table as content and key:value
+        rows as separate embedding text (dual-text separation)."""
         text = (
             "| 姓名 | 部门 | 职位 |\n"
             "|------|------|------|\n"
@@ -258,10 +259,13 @@ class TestBlockAwareChunking:
         )
         chunks = self.chunker.chunk(text, self.config)
         assert len(chunks) >= 1
-        # Check for key:value format
-        content = chunks[0]["content"]
-        assert "表格数据" in content  # search text indicator
-        assert "姓名" in content
+        c = chunks[0]
+        # content: original markdown table, no kv pollution
+        assert "| 姓名 |" in c["content"]
+        assert "表格数据" not in c["content"]
+        # embedding text: key:value rows for search recall
+        assert "姓名: 张三" in c["embedding_content"]
+        assert c["block_type"] == "TABLE"
 
     def test_code_block_preserved(self):
         """Code blocks should be isolated and not mixed with surrounding text."""
@@ -289,11 +293,14 @@ class TestBlockAwareChunking:
             assert f"Item {i}" in all_content
 
     def test_image_alt_text_extracted(self):
-        """Image blocks should extract alt text for search."""
+        """Image blocks keep original markup (URL preserved) and expose
+        alt text via embedding content."""
         text = "![系统架构图](https://example.com/arch.png)"
         chunks = self.chunker.chunk(text, self.config)
         assert len(chunks) >= 1
         assert "系统架构图" in chunks[0]["content"]
+        assert "https://example.com/arch.png" in chunks[0]["content"]
+        assert "系统架构图" in chunks[0]["embedding_content"]
 
     def test_empty_text(self):
         chunks = self.chunker.chunk("", self.config)
@@ -317,3 +324,18 @@ class TestBlockAwareChunking:
         chunks = self.chunker.chunk(text, config)
         # With large target, small paragraphs pack together
         assert len(chunks) >= 1
+
+    def test_table_never_merged_into_text(self):
+        """Atomic blocks (TABLE) must not be packed with surrounding
+        small paragraphs."""
+        text = (
+            "Short intro.\n\n"
+            "| A | B |\n|---|---|\n| 1 | 2 |\n\n"
+            "Short outro."
+        )
+        config = ChunkConfig(strategy="BLOCK_AWARE", chunk_size=500, overlap=0)
+        chunks = self.chunker.chunk(text, config)
+        table_chunks = [c for c in chunks if c.get("block_type") == "TABLE"]
+        assert len(table_chunks) == 1
+        assert "Short intro" not in table_chunks[0]["content"]
+        assert "Short outro" not in table_chunks[0]["content"]

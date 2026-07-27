@@ -175,6 +175,22 @@ async def lifespan(app: FastAPI):
             _log.info("ingestion_job_worker_stopped")
         except Exception as exc:
             _log.warning("ingestion_job_worker_stop_failed", error=str(exc))
+    # Close shared ES client
+    try:
+        from app.rag.search.keyword import close_es_client
+
+        await close_es_client()
+        _log.info("es_client_closed")
+    except Exception as exc:
+        _log.warning("es_client_close_failed", error=str(exc))
+    # Dispose DB engine: aiosqlite pooled connections each hold a non-daemon
+    # worker thread — without dispose() the process never exits and uvicorn
+    # reload hangs forever waiting to join the old worker.
+    try:
+        await engine.dispose()
+        _log.info("db_engine_disposed")
+    except Exception as exc:
+        _log.warning("db_engine_dispose_failed", error=str(exc))
     _log.info("server_shutting_down")
 
 

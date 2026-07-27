@@ -106,5 +106,5 @@ class ChunkerNode:
         if "chunk_size" in settings:
             config.chunk_size = int(settings["chunk_size"])
         if "overlap_size" in settings:
-            config.overlap_size = int(settings["overlap_size"])
+            config.overlap = int(settings["overlap_size"])
         return config

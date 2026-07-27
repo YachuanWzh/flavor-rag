@@ -5,6 +5,11 @@ import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
+from app.observability.metrics import (
+    CHANNEL_LATENCY,
+    CHANNEL_REQUESTS,
+    CIRCUIT_BREAKER_OPEN,
+)
 from app.rag.search.base import SearchResult
 
 
@@ -56,12 +61,14 @@ class CircuitBreaker:
         failure_threshold: int = 3,
         recovery_timeout_sec: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
+        name: str = "",
     ):
         self.failure_threshold = max(1, failure_threshold)
         self.recovery_timeout_sec = max(0.0, recovery_timeout_sec)
         self._clock = clock
         self._failures = 0
         self._opened_at: float | None = None
+        self.name = name
 
     @property
     def state(self) -> str:
@@ -89,10 +96,18 @@ class CircuitBreaker:
         self._failures += 1
         if self._failures >= self.failure_threshold:
             self._opened_at = self._clock()
+        self._export_state()
 
     def record_success(self) -> None:
         self._failures = 0
         self._opened_at = None
+        self._export_state()
+
+    def _export_state(self) -> None:
+        if self.name:
+            CIRCUIT_BREAKER_OPEN.labels(name=self.name).set(
+                1 if self._opened_at is not None else 0
+            )
 
 
 async def run_search_channels(
@@ -113,18 +128,23 @@ async def run_search_channels(
                 item.metadata.setdefault("retrievalChannel", name)
                 item.metadata.setdefault("channelRank", rank)
                 item.metadata.setdefault("rawScore", float(item.score))
+            elapsed = time.monotonic() - started
+            CHANNEL_REQUESTS.labels(channel=name, status="success").inc()
+            CHANNEL_LATENCY.labels(channel=name).observe(elapsed)
             return name, items, ChannelStatus(
                 "success",
-                int((time.monotonic() - started) * 1000),
+                int(elapsed * 1000),
                 len(items),
             )
         except asyncio.TimeoutError:
+            CHANNEL_REQUESTS.labels(channel=name, status="timeout").inc()
             return name, [], ChannelStatus(
                 "timeout",
                 int((time.monotonic() - started) * 1000),
                 error="channel_timeout",
             )
         except Exception as exc:
+            CHANNEL_REQUESTS.labels(channel=name, status="error").inc()
             return name, [], ChannelStatus(
                 "error",
                 int((time.monotonic() - started) * 1000),

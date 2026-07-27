@@ -193,6 +193,18 @@ async def initialize_sqlite_schema(engine: AsyncEngine) -> list[str]:
                 "ON t_ingestion_task (tenant_id, idempotency_key) "
                 "WHERE idempotency_key IS NOT NULL AND deleted = 0",
             ),
+            (
+                "t_ingestion_job",
+                {"status", "next_retry_time", "create_time"},
+                "CREATE INDEX IF NOT EXISTS idx_ingestion_job_claim "
+                "ON t_ingestion_job (status, next_retry_time, create_time)",
+            ),
+            (
+                "t_ingestion_job",
+                {"tenant_id", "doc_id"},
+                "CREATE INDEX IF NOT EXISTS idx_ingestion_job_doc "
+                "ON t_ingestion_job (tenant_id, doc_id)",
+            ),
         )
         for table_name, required_columns, ddl in index_specs:
             current_columns = await conn.run_sync(

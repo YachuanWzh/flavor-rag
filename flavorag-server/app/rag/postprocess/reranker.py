@@ -4,6 +4,7 @@ from __future__ import annotations
 import httpx
 from app.config.logging_config import get_logger
 from app.config.settings import settings
+from app.observability.metrics import RERANK_FALLBACK, RERANK_LATENCY
 from app.rag.search.base import SearchResult
 from app.rag.governance import CircuitBreaker
 
@@ -12,6 +13,7 @@ _rerank_log = get_logger("flavorag.rag.reranker")
 _rerank_breaker = CircuitBreaker(
     failure_threshold=settings.circuit_breaker_failures,
     recovery_timeout_sec=settings.circuit_breaker_recovery_sec,
+    name="reranker",
 )
 
 
@@ -54,10 +56,12 @@ class Reranker:
 
         if self.strategy == self.STRATEGY_CROSS_ENCODER:
             try:
-                return await _rerank_breaker.call(
-                    lambda: self._cross_encoder_rerank(query, candidates, top_n)
-                )
+                with RERANK_LATENCY.time():
+                    return await _rerank_breaker.call(
+                        lambda: self._cross_encoder_rerank(query, candidates, top_n)
+                    )
             except Exception as exc:
+                RERANK_FALLBACK.inc()
                 _rerank_log.warning(
                     "rerank_fallback",
                     model=self.model,

@@ -57,6 +57,21 @@ export default function KnowledgeBaseDetailPage() {
 
   useEffect(() => { loadDocs(); }, [kbId]);
 
+  // Poll while any document is still queued/running (async ingestion)
+  useEffect(() => {
+    const hasPending = docs.some((d) => d.status === "queued" || d.status === "running");
+    if (!hasPending || !kbId) return;
+    const timer = setInterval(async () => {
+      try {
+        const data = await fetchDocuments(kbId);
+        setDocs(data);
+      } catch {
+        /* keep previous list on transient errors */
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [docs, kbId]);
+
   const handleUrlUpload = async () => {
     if (!kbId || !urlInput.trim()) return;
     try {
@@ -197,6 +212,7 @@ export default function KnowledgeBaseDetailPage() {
 
   const statusLabel = (s: string) => {
     const map: Record<string, string> = {
+      queued: "排队中",
       running: "处理中",
       success: "已完成",
       failed: "失败",
@@ -206,6 +222,7 @@ export default function KnowledgeBaseDetailPage() {
 
   const statusColor = (s: string) => {
     const map: Record<string, string> = {
+      queued: "text-blue-600 bg-blue-50",
       running: "text-yellow-600 bg-yellow-50",
       success: "text-green-600 bg-green-50",
       failed: "text-red-600 bg-red-50",

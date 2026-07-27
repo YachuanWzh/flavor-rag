@@ -1,7 +1,7 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
   Activity, ArrowLeft, ArrowLeftRight, ClipboardList, Clock,
-  FlaskConical, GitBranch, HelpCircle, Layers, LayoutDashboard, ShieldCheck,
+  FlaskConical, Gauge, GitBranch, HelpCircle, Layers, LayoutDashboard, ShieldCheck,
 } from "lucide-react";
 
 function HeartPulseIcon({ size = 16 }: { size?: number }) {
@@ -29,6 +29,7 @@ const navItems = [
   { to: "/admin/sample-questions", Icon: HelpCircle, label: "示例问题" },
   { to: "/admin/query-mapping", Icon: ArrowLeftRight, label: "查询词映射" },
   { to: "/admin/traces", Icon: Activity, label: "链路追踪" },
+  { to: "/admin/monitoring", Icon: Gauge, label: "系统监控" },
   { to: "/admin/health", Icon: HeartPulseIcon, label: "系统状态" },
   { to: "/admin/audit", Icon: ClipboardList, label: "审计日志" },
   { to: "/admin/schedule", Icon: Clock, label: "定时调度" },

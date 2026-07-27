@@ -1,4 +1,4 @@
-﻿"""LLM streaming client — OpenAI-compatible API + mock fallback."""
+"""LLM streaming client — OpenAI-compatible API + mock fallback."""
 from __future__ import annotations
 
 import json
@@ -7,6 +7,11 @@ from typing import AsyncIterator
 
 import httpx
 from app.config.settings import settings
+from app.observability.metrics import (
+    LLM_FIRST_TOKEN,
+    LLM_STREAM_DURATION,
+    LLM_STREAM_FAILURES,
+)
 from app.rag.governance import CircuitBreaker
 
 
@@ -19,6 +24,7 @@ def _model_breaker(base_url: str, model: str) -> CircuitBreaker:
         _model_breakers[key] = CircuitBreaker(
             failure_threshold=settings.circuit_breaker_failures,
             recovery_timeout_sec=settings.circuit_breaker_recovery_sec,
+            name=f"llm:{model}",
         )
     return _model_breakers[key]
 
@@ -59,6 +65,8 @@ class LLMClient:
         }
         breaker = _model_breaker(self.base_url, self.model)
         breaker.before_call()
+        stream_started = time.monotonic()
+        first_token_at: float | None = None
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 async with client.stream(
@@ -77,6 +85,11 @@ class LLMClient:
                                 data = json.loads(data_str)
                                 delta = data["choices"][0]["delta"]
                                 if "content" in delta and delta["content"]:
+                                    if first_token_at is None:
+                                        first_token_at = time.monotonic()
+                                        LLM_FIRST_TOKEN.labels(model=self.model).observe(
+                                            first_token_at - stream_started
+                                        )
                                     yield delta["content"]
                                 if (
                                     "reasoning_content" in delta
@@ -87,9 +100,13 @@ class LLMClient:
                                 continue
         except Exception:
             breaker.record_failure()
+            LLM_STREAM_FAILURES.labels(model=self.model).inc()
             raise
         else:
             breaker.record_success()
+            LLM_STREAM_DURATION.labels(model=self.model).observe(
+                time.monotonic() - stream_started
+            )
 
 
 class MockLLMClient:

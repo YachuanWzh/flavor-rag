@@ -25,11 +25,12 @@ from app.models import (
     gen_id,
 )
 from app.ingestion.chunker import ChunkConfig, ChunkStrategy
-from app.ingestion.pipeline import IngestionPipeline
 from app.ingestion.pipeline_engine import IngestionEngine
 from app.ingestion.url_fetcher import SafeURLFetcher, URLSecurityError
 from app.ingestion.dedup import DuplicateDetector, compute_content_hash
 from app.rag.search.vector import MilvusSearchChannel
+from app.services.ingestion_executor import execute_ingestion
+from app.services.ingestion_jobs import enqueue_ingestion_job
 from app.config.settings import settings
 from app.config.logging_config import get_logger
 from app.security.access import Permission
@@ -360,12 +361,34 @@ async def upload_document(
         db.add(doc)
         await db.flush()
 
-        # Run ingestion — use DAG pipeline if KB has one bound
+        # Ingestion: enqueue to the outbox worker, or run inline when disabled
         chunk_config = ChunkConfig(
             strategy=canonical_strategy,
             chunk_size=chunk_size,
             overlap=overlap,
         )
+        if settings.ingestion_async_enabled:
+            await enqueue_ingestion_job(
+                db,
+                kb=kb,
+                doc=doc,
+                file_path=file_path,
+                source_type="file",
+                chunk_config=chunk_config,
+                user_id=user.id,
+                tenant_id=user.tenant_id or "default",
+            )
+            return {
+                "code": "0",
+                "message": "success",
+                "data": {
+                    "id": doc.id,
+                    "docName": doc.doc_name,
+                    "chunkCount": 0,
+                    "status": "queued",
+                },
+            }
+
         chunk_count = await _run_ingestion(
             kb=kb,
             doc=doc,
@@ -476,8 +499,32 @@ async def upload_url_document(
             db.add(doc)
             await db.flush()
 
-            # Run ingestion — use DAG pipeline if KB has one bound
+            # Ingestion: enqueue to the outbox worker, or run inline when disabled
             chunk_config = ChunkConfig(strategy="FIXED_WINDOW", chunk_size=512, overlap=128)
+            if settings.ingestion_async_enabled:
+                await enqueue_ingestion_job(
+                    db,
+                    kb=kb,
+                    doc=doc,
+                    file_path=file_path,
+                    source_type="url",
+                    chunk_config=chunk_config,
+                    user_id=user.id,
+                    tenant_id=user.tenant_id or "default",
+                )
+                return {
+                    "code": "0",
+                    "message": "success",
+                    "data": {
+                        "id": doc.id,
+                        "docName": doc.doc_name,
+                        "chunkCount": 0,
+                        "status": "queued",
+                        "sourceType": "url",
+                        "scheduleEnabled": req.schedule_enabled,
+                    },
+                }
+
             chunk_count = await _run_ingestion(
                 kb=kb,
                 doc=doc,
@@ -524,43 +571,17 @@ async def _run_ingestion(
     db: AsyncSession,
     chunk_config: ChunkConfig,
 ) -> int:
-    """Run ingestion: DAG pipeline if KB has pipeline_id, otherwise legacy pipeline."""
-    pipeline_id = kb.pipeline_id
-    if pipeline_id:
-        engine = IngestionEngine()
-        result = await engine.execute_pipeline(
-            pipeline_id=pipeline_id,
-            source_type=source_type,
-            source_location=file_path,
-            source_file_name=doc.doc_name,
-            kb_id=kb.id,
-            doc_id=doc.id,
-            user_id=user.id,
-            tenant_id=user.tenant_id or "default",
-            db=db,
-        )
-        if result.status == "error":
-            doc.status = "failed"
-            raise RuntimeError(result.error_message or "Pipeline execution failed")
-        doc.status = "success"
-        doc.chunk_count = result.chunk_count
-        await db.flush()
-        return result.chunk_count
-
-    # Legacy: use old IngestionPipeline
-    pipeline = IngestionPipeline()
-    chunk_count = await pipeline.run(
-        doc_id=doc.id,
-        kb_id=kb.id,
+    """Run ingestion synchronously via the shared executor."""
+    return await execute_ingestion(
+        db,
+        kb=kb,
+        doc=doc,
         file_path=file_path,
-        collection_name=kb.collection_name,
-        db=db,
+        source_type=source_type,
+        user_id=user.id,
+        tenant_id=user.tenant_id or "default",
         chunk_config=chunk_config,
     )
-    doc.status = "success"
-    doc.chunk_count = chunk_count
-    await db.flush()
-    return chunk_count
 
 
 async def run_ingestion_for_doc(
@@ -697,6 +718,24 @@ async def reprocess_document(
 
     doc.status = "running"
     await db.flush()
+
+    if settings.ingestion_async_enabled:
+        await enqueue_ingestion_job(
+            db,
+            kb=kb,
+            doc=doc,
+            file_path=doc.file_url,
+            source_type=doc.source_type or "file",
+            chunk_config=chunk_config,
+            user_id=user.id,
+            tenant_id=user.tenant_id or "default",
+            pipeline_id=pipeline_id or None,
+            operation="REPROCESS",
+        )
+        return {
+            "code": "0", "message": "success",
+            "data": {"chunkCount": 0, "status": "queued"},
+        }
 
     try:
         if pipeline_id:

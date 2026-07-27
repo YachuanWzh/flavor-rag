@@ -565,3 +565,37 @@ class EvaluationRun(Base):
     completed_at = Column(DateTime)
     created_by = Column(String(20), nullable=False)
     create_time = Column(DateTime, default=_utcnow)
+
+
+class IngestionJob(Base, TimestampMixin):
+    """Outbox record for asynchronous document ingestion.
+
+    Uploads enqueue a job inside the same transaction that creates the
+    document; workers claim due jobs (FOR UPDATE SKIP LOCKED on PostgreSQL)
+    and execute ingestion out of the request path.
+    """
+
+    __tablename__ = "t_ingestion_job"
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    tenant_id = Column(String(64), nullable=False, default="default")
+    kb_id = Column(String(20), nullable=False)
+    doc_id = Column(String(20), nullable=False)
+    pipeline_id = Column(String(20))
+    source_type = Column(String(32), nullable=False, default="file")
+    file_path = Column(String(1024), nullable=False)
+    chunk_strategy = Column(String(32), nullable=False, default="FIXED_WINDOW")
+    chunk_config_json = Column(JSON)
+    operation = Column(String(24), nullable=False, default="INGEST")
+    status = Column(String(16), nullable=False, default="QUEUED")
+    attempts = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=3)
+    next_retry_time = Column(DateTime)
+    claimed_by = Column(String(64))
+    claimed_at = Column(DateTime)
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    duration_ms = Column(BigInteger)
+    chunk_count = Column(Integer, default=0)
+    error_message = Column(Text)
+    created_by = Column(String(20), nullable=False)

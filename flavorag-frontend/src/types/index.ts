@@ -77,7 +77,7 @@ export interface KnowledgeDocument {
   fileType: string;
   fileSize: number;
   chunkCount: number;
-  status: "running" | "success" | "failed";
+  status: "queued" | "running" | "success" | "failed";
   createTime: string;
 }
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import RagTraceRun, RagTraceNode, gen_id
+from app.observability import otel
+from app.observability.metrics import RAG_RUNS
 
 
 class TraceLogger:
@@ -12,6 +14,7 @@ class TraceLogger:
     def __init__(self, db: AsyncSession):
         self.db = db
         self._trace_run: RagTraceRun | None = None
+        self._otel_span = None
 
     async def trace_query(
         self,
@@ -41,6 +44,15 @@ class TraceLogger:
         self.db.add(run)
         await self.db.flush()
         self._trace_run = run
+        self._otel_span = otel.start_rag_span(
+            "rag.run",
+            {
+                "rag.trace_id": run.id,
+                "rag.tenant_id": tenant_id,
+                "rag.kb_id": kb_id or "",
+                "rag.conversation_id": conversation_id,
+            },
+        )
         return run.id
 
     async def trace_node(
@@ -77,6 +89,15 @@ class TraceLogger:
         )
         self.db.add(node)
         await self.db.flush()
+        if start_time and end_time:
+            otel.record_child_span(
+                self._otel_span,
+                f"rag.{node_type}.{node_name}",
+                start_time,
+                end_time,
+                attributes={"rag.node_status": status},
+                error=error_message if status != "success" else None,
+            )
         return node.id
 
     async def update_understanding(
@@ -124,6 +145,20 @@ class TraceLogger:
 
         if not trace_run_id:
             return
+
+        RAG_RUNS.labels(status=status).inc()
+        otel.end_rag_span(
+            self._otel_span,
+            attributes={
+                "rag.status": status,
+                "rag.recall_count": recall_count,
+                "rag.final_count": final_count,
+                "rag.model": model_name,
+                "rag.rejection_reason": rejection_reason,
+            },
+            error=error_message if status != "success" else None,
+        )
+        self._otel_span = None
 
         result = await self.db.execute(
             select(RagTraceRun).where(RagTraceRun.id == trace_run_id)

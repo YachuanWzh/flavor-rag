@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 from pydantic_settings import BaseSettings
 
 _ENV_FILE = str(Path(__file__).resolve().parent.parent.parent.parent / ".env")
@@ -113,6 +113,19 @@ class Settings(BaseSettings):
     intent_max_matches: int = 5
     intent_guidance_min_score: float = 0.55
     intent_guidance_score_gap: float = 0.08
+
+    # 可观测性
+    metrics_enabled: bool = True
+    otel_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = "http://localhost:4318"
+    otel_service_name: str = "flavorag-server"
+
+    # 异步摄取（Outbox 任务表 + Worker）
+    ingestion_async_enabled: bool = True
+    ingestion_worker_concurrency: int = 2
+    ingestion_worker_poll_interval_sec: int = 3
+    ingestion_job_max_attempts: int = 3
+    ingestion_job_claim_timeout_sec: int = 900
 
     # 限流
     rate_limit_enabled: bool = False

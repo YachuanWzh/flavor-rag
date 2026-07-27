@@ -1,6 +1,6 @@
 ﻿from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.auth import router as auth_router
 from app.api.knowledge import router as knowledge_router
@@ -18,14 +18,18 @@ from app.api.ingestion_pipeline import router as ingestion_pipeline_router
 from app.api.security import router as security_router
 from app.api.evaluation import router as evaluation_router
 from app.api.graph import router as graph_router
+from app.api.monitoring import router as monitoring_router
 from app.config.settings import settings
 from app.config.logging_config import get_logger, configure_root_logger
+from app.observability.metrics import MetricsMiddleware, render_metrics
+from app.observability.otel import setup_otel
 
 _log = get_logger("flavorag.server")
 _url_scheduler = None
 _doc_schedule_scheduler = None
 _index_sync_scheduler = None
 _ingestion_watchdog = None
+_ingestion_job_worker = None
 
 
 async def _seed_admin_user():
@@ -122,6 +126,22 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         _log.warning("ingestion_watchdog_failed", error=str(exc))
 
+    # Start async ingestion outbox worker
+    global _ingestion_job_worker
+    if settings.ingestion_async_enabled:
+        try:
+            from app.services.ingestion_jobs import IngestionJobWorker
+
+            _ingestion_job_worker = IngestionJobWorker()
+            await _ingestion_job_worker.start()
+            _log.info("ingestion_job_worker_started")
+        except Exception as exc:
+            _log.warning("ingestion_job_worker_failed", error=str(exc))
+
+    # Optional OpenTelemetry tracing (no-op unless otel_enabled)
+    if setup_otel(app):
+        _log.info("otel_enabled", endpoint=settings.otel_exporter_otlp_endpoint)
+
     _log.info("server_started", port=settings.server_port)
     yield
     # Shutdown: stop schedulers
@@ -149,12 +169,20 @@ async def lifespan(app: FastAPI):
             _log.info("ingestion_watchdog_stopped")
         except Exception as exc:
             _log.warning("ingestion_watchdog_stop_failed", error=str(exc))
+    if _ingestion_job_worker:
+        try:
+            await _ingestion_job_worker.stop()
+            _log.info("ingestion_job_worker_stopped")
+        except Exception as exc:
+            _log.warning("ingestion_job_worker_stop_failed", error=str(exc))
     _log.info("server_shutting_down")
 
 
 app = FastAPI(title="flavor-rag API", version="0.2.0", lifespan=lifespan)
 
 app.add_middleware(AuditMiddleware)
+if settings.metrics_enabled:
+    app.add_middleware(MetricsMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -178,8 +206,17 @@ app.include_router(ingestion_pipeline_router)
 app.include_router(security_router)
 app.include_router(evaluation_router)
 app.include_router(graph_router)
+app.include_router(monitoring_router)
 
 
 @app.get("/api/health")
 async def health_check():
     return {"status": "ok"}
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics_endpoint():
+    if not settings.metrics_enabled:
+        return Response(status_code=404)
+    payload, content_type = render_metrics()
+    return Response(content=payload, media_type=content_type)

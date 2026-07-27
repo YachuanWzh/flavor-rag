@@ -514,6 +514,7 @@ class RAGPipeline:
                 "blockType": r.block_type,
                 "pageStart": r.page_start,
                 "pageEnd": r.page_end,
+                "neighborOf": r.metadata.get("neighbor_of") or [],
             }
             for r in reranked
         ]
@@ -534,6 +535,7 @@ class RAGPipeline:
                 "pageEnd": r.page_end,
                 "bboxes": r.bboxes,
                 "assets": r.assets,
+                "neighborOf": r.metadata.get("neighbor_of") or [],
             }
             for r in reranked
         ]
@@ -1042,6 +1044,7 @@ class RAGPipeline:
                 "channelScores": r.metadata.get("channelScores", {}),
                 "matchedChannels": r.metadata.get("matchedChannels", []),
                 "blockType": r.block_type, "pageStart": r.page_start, "pageEnd": r.page_end,
+                "neighborOf": r.metadata.get("neighbor_of") or [],
             }
             for r in reranked
         ]
@@ -1056,6 +1059,7 @@ class RAGPipeline:
                 "matchedChannels": r.metadata.get("matchedChannels", []),
                 "blockType": r.block_type, "pageStart": r.page_start,
                 "pageEnd": r.page_end, "bboxes": r.bboxes, "assets": r.assets,
+                "neighborOf": r.metadata.get("neighbor_of") or [],
             }
             for r in reranked
         ]

@@ -4,7 +4,7 @@ import MarkdownRenderer from "./MarkdownRenderer";
 import SourceMedia from "./SourceMedia";
 import ThinkingIndicator from "./ThinkingIndicator";
 import { submitFeedback } from "@/services/feedbackService";
-import { ArrowUpRight, ChevronDown, ChevronUp, Network, Orbit, Sparkles } from "lucide-react";
+import { ArrowUpRight, ChevronDown, ChevronUp, Layers, Network, Orbit, Sparkles } from "lucide-react";
 
 interface Props {
   message: Message;
@@ -95,7 +95,7 @@ export default function MessageItem({
           />
         )}
 
-        {!isUser && (message.ragModes?.agenticRag || message.ragModes?.graphRag || message.ragModes?.hyde) && (
+        {!isUser && (message.ragModes?.agenticRag || message.ragModes?.graphRag || message.ragModes?.hyde || message.ragModes?.neighborExpansion) && (
           <div className="mt-3 flex flex-wrap gap-1.5 border-t border-slate-200/70 pt-2">
             {message.ragModes.agenticRag && (
               <span
@@ -140,6 +140,15 @@ export default function MessageItem({
               >
                 <Sparkles className="h-3 w-3" />
                 HyDE {Number(message.retrievalChannels?.hyde_vector?.count || 0)} 条证据
+              </span>
+            )}
+            {message.ragModes.neighborExpansion && (
+              <span
+                title="邻近补偿策略已参与本次召回，为命中分块补充了前后上下文"
+                className="inline-flex items-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-800"
+              >
+                <Layers className="h-3 w-3" />
+                邻近补偿 {(message.sources || []).filter((s) => s.neighborOf?.length).length} 条证据
               </span>
             )}
           </div>

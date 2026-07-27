@@ -61,6 +61,7 @@ export interface SourceRef {
     mimeType?: string;
     description?: string;
   }>;
+  neighborOf?: string[];  // 邻近补偿：该证据关联的父分块 ID
 }
 
 // ---- Knowledge Base ----

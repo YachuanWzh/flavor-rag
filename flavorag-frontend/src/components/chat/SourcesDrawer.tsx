@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ExternalLink,
   FileText,
+  GitBranch,
   Hash,
   Image as ImageIcon,
   Layers3,
@@ -63,7 +64,8 @@ export default function SourcesDrawer({ open, sources, onClose }: Props) {
           : source.matchedChannels || []
       )
     );
-    return { documents: documents.size, channels: channels.size };
+    const compensated = sources.filter((source) => source.neighborOf?.length).length;
+    return { documents: documents.size, channels: channels.size, compensated };
   }, [sources]);
 
   return (
@@ -108,10 +110,13 @@ export default function SourcesDrawer({ open, sources, onClose }: Props) {
             </button>
           </div>
 
-          <div className="relative mt-4 grid grid-cols-3 divide-x divide-white/10 rounded-xl border border-white/10 bg-white/[0.045]">
+          <div className={`relative mt-4 grid divide-x divide-white/10 rounded-xl border border-white/10 bg-white/[0.045] ${summary.compensated ? "grid-cols-4" : "grid-cols-3"}`}>
             <SummaryStat label="最终证据" value={sources.length} />
             <SummaryStat label="覆盖文档" value={summary.documents} />
             <SummaryStat label="参与通道" value={summary.channels} />
+            {summary.compensated > 0 && (
+              <SummaryStat label="邻近补偿" value={summary.compensated} />
+            )}
           </div>
         </header>
 
@@ -150,6 +155,13 @@ export default function SourcesDrawer({ open, sources, onClose }: Props) {
                           icon={<Boxes />}
                           text={source.blockType || "TEXT"}
                         />
+                        {!!source.neighborOf?.length && (
+                          <Pill
+                            icon={<GitBranch />}
+                            text="邻近补偿"
+                            tone="emerald"
+                          />
+                        )}
                       </div>
                       <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-600">
                         {source.content || "该来源没有可展示的文本摘要。"}
@@ -202,6 +214,10 @@ export default function SourcesDrawer({ open, sources, onClose }: Props) {
                           );
                         })}
                       </div>
+                    ) : source.neighborOf?.length ? (
+                      <p className="mt-1.5 text-[10px] text-emerald-300">
+                        该证据由邻近补偿策略补充，关联命中分块 ×{source.neighborOf.length}
+                      </p>
                     ) : (
                       <p className="mt-1.5 text-[10px] text-slate-500">
                         旧消息没有保存通道级得分。
@@ -229,6 +245,23 @@ export default function SourcesDrawer({ open, sources, onClose }: Props) {
                         value={`#${source.chunkIndex}`}
                       />
                     </div>
+
+                    {!!source.neighborOf?.length && (
+                      <div className="mt-2 flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[10px] text-emerald-700">
+                        <GitBranch className="h-3 w-3 shrink-0" />
+                        <span>
+                          邻近补偿证据 · 由命中分块
+                          {source.neighborOf
+                            .map((pid) => {
+                              const parent = sources.find((s) => s.chunkId === pid);
+                              return parent ? ` #${parent.chunkIndex}` : "";
+                            })
+                            .filter(Boolean)
+                            .join("、") || ` ×${source.neighborOf.length}`}
+                          {' '}的相邻上下文补充
+                        </span>
+                      </div>
+                    )}
 
                     {!!channels.length && (
                       <section className="mt-4">
@@ -333,9 +366,15 @@ function SummaryStat({ label, value }: { label: string; value: number }) {
   );
 }
 
-function Pill({ icon, text }: { icon: React.ReactElement; text: string }) {
+function Pill({ icon, text, tone }: { icon: React.ReactElement; text: string; tone?: "default" | "emerald" }) {
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-medium text-slate-500">
+    <span
+      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-medium ${
+        tone === "emerald"
+          ? "bg-emerald-100 text-emerald-700"
+          : "bg-slate-100 text-slate-500"
+      }`}
+    >
       <span className="[&>svg]:h-2.5 [&>svg]:w-2.5">{icon}</span>
       {text}
     </span>

@@ -47,6 +47,7 @@ class RAGContext:
     history: list[dict] = field(default_factory=list)
     deep_thinking: bool = False
     graph_rag: bool | None = None
+    enable_neighbor_expansion: bool = False
     trace_run_id: str | None = None
     user_id: str = ""
     tenant_id: str = "default"
@@ -393,6 +394,40 @@ class RAGPipeline:
 
         # Resolve canonical IDs before the fail-closed authorization filter.
         await self._resolve_metadata(deduped, kb_id=ctx.kb_id)
+
+        # 6.5 Expand neighbors — pull ±window chunks from the same document
+        if ctx.enable_neighbor_expansion:
+            t_neighbor_start = datetime.now(timezone.utc).replace(tzinfo=None)
+            neighbor_before = len(deduped)
+            deduped = await self._expand_neighbors(deduped, kb_id=ctx.kb_id, window=2)
+            neighbor_after = len(deduped)
+            t_neighbor_end = datetime.now(timezone.utc).replace(tzinfo=None)
+            neighbor_ms = int((t_neighbor_end - t_neighbor_start).total_seconds() * 1000)
+            _pipeline_log.info(
+                "neighbor_expansion",
+                before=neighbor_before,
+                after=neighbor_after,
+                added=neighbor_after - neighbor_before,
+                took_ms=neighbor_ms,
+            )
+            if self._trace:
+                await self._trace.trace_node(
+                    trace_id or "",
+                    "postprocess",
+                    "neighbor_expansion",
+                    t_neighbor_start,
+                    t_neighbor_end,
+                    input_data={
+                        "before_count": neighbor_before,
+                        "window": 2,
+                        "top_n_anchors": 10,
+                    },
+                    output_data={
+                        "after_count": neighbor_after,
+                        "neighbors_added": neighbor_after - neighbor_before,
+                    },
+                )
+
         if ctx.kb_id:
             principal = Principal(
                 user_id=ctx.user_id,
@@ -413,10 +448,19 @@ class RAGPipeline:
         # Log pre-rerank order
         pre_rerank_ids = [(r.chunk_id or r.content[:20], f"{r.score:.4f}") for r in deduped[:5]]
         _pipeline_log.info("rerank_pre", candidates=recall_count, top_ids=pre_rerank_ids)
+        # When neighbor expansion is active, allow the full candidate pool
+        # (original + neighbors) into the reranker so that cross-encoder scoring
+        # can independently judge each chunk; select_context will still enforce
+        # the final budget.
+        rerank_top_n = (
+            budget.max_candidates
+            if ctx.enable_neighbor_expansion
+            else min(budget.max_candidates, max(budget.final_top_k * 2, budget.final_top_k))
+        )
         reranked = await self.reranker.rerank(
             search_question,
             deduped,
-            top_n=min(budget.max_candidates, max(budget.final_top_k * 2, budget.final_top_k)),
+            top_n=rerank_top_n,
         )
         reranked, retrieval_decision = select_context(
             reranked,
@@ -525,6 +569,157 @@ class RAGPipeline:
             },
             subqueries=subqueries,
         )
+
+    async def _expand_neighbors(
+        self,
+        results: list[SearchResult],
+        *,
+        kb_id: str | None = None,
+        window: int = 2,
+    ) -> list[SearchResult]:
+        """Pull ±*window* adjacent chunks from the same document for each recalled chunk.
+
+        Neighbor chunks are flat-appended to the result list (方案A) so they
+        participate in downstream reranking.  Deduplication by chunk_id ensures
+        overlapping neighbours (from multiple recalled chunks in the same document)
+        are only included once.
+        """
+        if not results or window < 1:
+            return results
+
+        import logging
+        _log = logging.getLogger("flavorag.rag.pipeline")
+
+        # Only expand from top-N scored results to control neighbor budget
+        anchor_candidates = sorted(results, key=lambda r: r.score, reverse=True)
+        anchors: list[tuple[str, int, float]] = []
+        for r in anchor_candidates[:10]:
+            if r.doc_id and r.chunk_index >= 0:
+                anchors.append((r.doc_id, r.chunk_index, r.score))
+        existing_ids: set[str] = {r.chunk_id for r in results if r.chunk_id}
+
+        if not anchors:
+            return results
+
+        # Batch query: for each doc, fetch neighbours in one query
+        doc_ranges: dict[str, list[tuple[int, int, float]]] = {}
+        for doc_id, ci, score in anchors:
+            doc_ranges.setdefault(doc_id, []).append((ci, score))
+
+        try:
+            async with async_session_factory() as session:
+                from sqlalchemy import and_
+
+                all_neighbor_rows: list = []
+                seen_neighbor_ids: set[str] = set(existing_ids)
+
+                for doc_id, ranges in doc_ranges.items():
+                    # Build OR conditions: chunk_index BETWEEN ci-window AND ci+window
+                    conditions = []
+                    for ci, _score in ranges:
+                        lo = max(0, ci - window)
+                        hi = ci + window
+                        conditions.append(KnowledgeChunk.chunk_index.between(lo, hi))
+
+                    if not conditions:
+                        continue
+
+                    rows = await session.execute(
+                        select(
+                            KnowledgeChunk.id,
+                            KnowledgeChunk.chunk_index,
+                            KnowledgeChunk.doc_id,
+                            KnowledgeChunk.content,
+                            KnowledgeChunk.embedding_content,
+                            KnowledgeChunk.block_type,
+                            KnowledgeChunk.page_start,
+                            KnowledgeChunk.page_end,
+                            KnowledgeChunk.bbox_json,
+                            KnowledgeChunk.metadata_json,
+                            KnowledgeDocument.doc_name,
+                        )
+                        .outerjoin(
+                            KnowledgeDocument,
+                            KnowledgeChunk.doc_id == KnowledgeDocument.id,
+                        )
+                        .where(
+                            KnowledgeChunk.doc_id == doc_id,
+                            KnowledgeChunk.deleted == 0,
+                            KnowledgeChunk.enabled == 1,
+                            or_(*conditions),
+                            *([KnowledgeChunk.kb_id == kb_id] if kb_id else []),
+                        )
+                    )
+                    for row in rows:
+                        chunk_id = row.id
+                        if chunk_id in seen_neighbor_ids:
+                            continue
+                        seen_neighbor_ids.add(chunk_id)
+                        all_neighbor_rows.append(row)
+
+                if not all_neighbor_rows:
+                    return results
+
+                # For each neighbor, find the closest parent score and attribution
+                doc_anchors: dict[str, dict[int, float]] = {}
+                chunk_id_by_doc_ci: dict[str, dict[int, str]] = {}
+                for doc_id, ci, score in anchors:
+                    doc_anchors.setdefault(doc_id, {})[ci] = score
+                for r in results:
+                    if r.doc_id and r.chunk_id:
+                        chunk_id_by_doc_ci.setdefault(r.doc_id, {})[r.chunk_index] = r.chunk_id
+
+                neighbors: list[SearchResult] = []
+                for row in all_neighbor_rows:
+                    parent_scores = doc_anchors.get(row.doc_id, {})
+                    # Find closest parent: min distance → best score
+                    best_score = 0.0
+                    if parent_scores:
+                        # Use the parent whose chunk_index is closest
+                        closest = min(
+                            parent_scores.items(),
+                            key=lambda kv: abs(kv[0] - row.chunk_index),
+                        )
+                        best_score = closest[1] * 0.95
+
+                    # Build neighbor attribution list
+                    parent_chunk_ids: list[str] = []
+                    parent_cis = doc_anchors.get(row.doc_id, {})
+                    for p_ci in parent_cis:
+                        if abs(p_ci - row.chunk_index) <= window and p_ci != row.chunk_index:
+                            pid = chunk_id_by_doc_ci.get(row.doc_id, {}).get(p_ci)
+                            if pid:
+                                parent_chunk_ids.append(pid)
+
+                    neighbors.append(
+                        SearchResult(
+                            chunk_id=row.id,
+                            doc_id=row.doc_id,
+                            content=row.embedding_content or row.content,
+                            score=best_score,
+                            chunk_index=row.chunk_index,
+                            doc_name=row.doc_name or "unknown",
+                            block_type=row.block_type or "",
+                            page_start=row.page_start,
+                            page_end=row.page_end,
+                            bboxes=row.bbox_json or [],
+                            metadata={
+                                **(row.metadata_json or {}),
+                                "neighbor_of": parent_chunk_ids,
+                            },
+                        )
+                    )
+
+                _log.info(
+                    "neighbor_expansion_done",
+                    original=len(results),
+                    neighbors=len(neighbors),
+                )
+                return results + neighbors
+
+        except Exception as exc:
+            _log.warning("neighbor_expansion_failed: %s", exc)
+            return results
 
     async def _filter_unavailable_chunks(
         self, results: list[SearchResult]

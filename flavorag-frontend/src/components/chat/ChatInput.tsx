@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   BrainCircuit,
+  Layers,
   Network,
   Orbit,
   Send,
@@ -17,6 +18,8 @@ interface Props {
   onAgenticRagChange: (enabled: boolean) => void;
   graphRag: boolean;
   onGraphRagChange: (enabled: boolean) => void;
+  neighborExpansion: boolean;
+  onNeighborExpansionChange: (enabled: boolean) => void;
 }
 
 interface ModeToggleProps {
@@ -24,7 +27,7 @@ interface ModeToggleProps {
   label: string;
   description: string;
   icon: React.ReactNode;
-  tone: "violet" | "amber" | "cyan";
+  tone: "violet" | "amber" | "cyan" | "emerald";
   onClick: () => void;
 }
 
@@ -40,6 +43,10 @@ const toneClasses = {
   cyan: {
     active: "border-cyan-300 bg-cyan-50 text-cyan-800 shadow-[0_0_0_1px_rgba(6,182,212,0.05)]",
     dot: "bg-cyan-500",
+  },
+  emerald: {
+    active: "border-emerald-300 bg-emerald-50 text-emerald-800 shadow-[0_0_0_1px_rgba(16,185,129,0.05)]",
+    dot: "bg-emerald-500",
   },
 };
 
@@ -86,6 +93,8 @@ export default function ChatInput({
   onAgenticRagChange,
   graphRag,
   onGraphRagChange,
+  neighborExpansion,
+  onNeighborExpansionChange,
 }: Props) {
   const [text, setText] = useState("");
 
@@ -164,6 +173,14 @@ export default function ChatInput({
             icon={<BrainCircuit className="h-3.5 w-3.5" />}
             tone="violet"
             onClick={() => onDeepThinkingChange(!deepThinking)}
+          />
+          <ModeToggle
+            active={neighborExpansion}
+            label="邻近补偿"
+            description="召回每个chunk前后各两段作为上下文补偿"
+            icon={<Layers className="h-3.5 w-3.5" />}
+            tone="emerald"
+            onClick={() => onNeighborExpansionChange(!neighborExpansion)}
           />
           <span className="ml-auto hidden text-[11px] text-slate-400 sm:inline">
             Enter 发送 · Shift + Enter 换行

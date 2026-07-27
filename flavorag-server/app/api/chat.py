@@ -39,6 +39,9 @@ async def chat(
     deep_thinking: bool = Query(False, description="启用深度思考"),
     agentic_rag: bool | None = Query(None, description="本次请求启用 Agentic RAG"),
     graph_rag: bool | None = Query(None, description="本次请求启用 Graph RAG"),
+    neighbor_expansion: bool = Query(
+        False, description="启用邻近chunk召回补偿"
+    ),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -130,6 +133,7 @@ async def chat(
                 kb_id=resolved_kb_id, collection_name=collection_name,
                 history=history, deep_thinking=deep_thinking,
                 graph_rag=effective_graph_rag,
+                enable_neighbor_expansion=neighbor_expansion,
                 trace_run_id=trace_id,
                 user_id=user.id,
                 tenant_id=user.tenant_id or "default",
@@ -163,6 +167,7 @@ async def chat(
                     "modes": {
                         "agenticRag": effective_agentic_rag,
                         "graphRag": effective_graph_rag,
+                        "neighborExpansion": neighbor_expansion,
                     },
                     "channels": rag_result.channel_statuses,
                     "queryUnderstanding": rag_result.intent,
@@ -202,7 +207,10 @@ async def chat(
                     final_count=0,
                     model_name=rag_result.model_name or "",
                     status="guidance",
-                    metadata={"queryUnderstanding": rag_result.intent},
+                    metadata={
+                        "queryUnderstanding": rag_result.intent,
+                        "neighborExpansion": neighbor_expansion,
+                    },
                 )
                 await db.flush()
                 yield (
@@ -215,6 +223,7 @@ async def chat(
                             "modes": {
                                 "agenticRag": effective_agentic_rag,
                                 "graphRag": effective_graph_rag,
+                                "neighborExpansion": neighbor_expansion,
                             },
                             "channels": rag_result.channel_statuses,
                         },
@@ -257,6 +266,7 @@ async def chat(
                         "channels": rag_result.channel_statuses,
                         "agenticRag": effective_agentic_rag,
                         "graphRag": effective_graph_rag,
+                        "neighborExpansion": neighbor_expansion,
                     },
                 )
                 await db.flush()
@@ -267,6 +277,7 @@ async def chat(
                         "modes": {
                             "agenticRag": effective_agentic_rag,
                             "graphRag": effective_graph_rag,
+                            "neighborExpansion": neighbor_expansion,
                         },
                         "channels": rag_result.channel_statuses,
                     }
@@ -370,6 +381,7 @@ async def chat(
                     "channels": rag_result.channel_statuses,
                     "agenticRag": effective_agentic_rag,
                     "graphRag": effective_graph_rag,
+                    "neighborExpansion": neighbor_expansion,
                 },
             )
 
@@ -382,6 +394,7 @@ async def chat(
                     "modes": {
                         "agenticRag": effective_agentic_rag,
                         "graphRag": effective_graph_rag,
+                        "neighborExpansion": neighbor_expansion,
                     },
                     "channels": rag_result.channel_statuses,
                 }

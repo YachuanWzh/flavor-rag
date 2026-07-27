@@ -24,7 +24,7 @@ export default function ChatPage() {
     addSession, removeSession,
     deepThinkingEnabled, setDeepThinking,
     agenticRagEnabled, setAgenticRag,
-    graphRagEnabled, setGraphRag, graphRevision,
+    graphRagEnabled, setGraphRag, neighborExpansionEnabled, setNeighborExpansion, graphRevision,
   } = useChatStore();
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [initLoading, setInitLoading] = useState(true);
@@ -210,6 +210,8 @@ export default function ChatPage() {
             onAgenticRagChange={setAgenticRag}
             graphRag={graphRagEnabled}
             onGraphRagChange={setGraphRag}
+            neighborExpansion={neighborExpansionEnabled}
+            onNeighborExpansionChange={setNeighborExpansion}
           />
         </main>
 

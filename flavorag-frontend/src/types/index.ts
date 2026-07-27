@@ -91,6 +91,7 @@ export interface KnowledgeChunk {
 export interface RagModes {
   agenticRag: boolean;
   graphRag: boolean;
+  neighborExpansion: boolean;
 }
 
 export interface AgentStep {

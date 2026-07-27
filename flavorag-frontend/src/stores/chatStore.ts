@@ -12,6 +12,7 @@ interface ChatState {
   deepThinkingEnabled: boolean;
   agenticRagEnabled: boolean;
   graphRagEnabled: boolean;
+  neighborExpansionEnabled: boolean;
   graphRevision: number;
   streamingMessageId: string | null;
   openedSourceMessageId: string | null;
@@ -23,6 +24,7 @@ interface ChatState {
   setDeepThinking: (enabled: boolean) => void;
   setAgenticRag: (enabled: boolean) => void;
   setGraphRag: (enabled: boolean) => void;
+  setNeighborExpansion: (enabled: boolean) => void;
   toggleSourcesPanel: (messageId: string) => void;
 
   sendMessage: (content: string) => Promise<void>;
@@ -43,6 +45,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   deepThinkingEnabled: false,
   agenticRagEnabled: false,
   graphRagEnabled: false,
+  neighborExpansionEnabled: false,
   graphRevision: 0,
   streamingMessageId: null,
   openedSourceMessageId: null,
@@ -68,6 +71,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setDeepThinking: (enabled) => set({ deepThinkingEnabled: enabled }),
   setAgenticRag: (enabled) => set({ agenticRagEnabled: enabled }),
   setGraphRag: (enabled) => set({ graphRagEnabled: enabled }),
+  setNeighborExpansion: (enabled) => set({ neighborExpansionEnabled: enabled }),
   toggleSourcesPanel: (messageId) =>
     set({
       openedSourceMessageId:
@@ -102,6 +106,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       deep_thinking: String(state.deepThinkingEnabled),
       agentic_rag: String(state.agenticRagEnabled),
       graph_rag: String(state.graphRagEnabled),
+      neighbor_expansion: String(state.neighborExpansionEnabled),
     });
     if (state.currentSessionId) {
       params.set("conversation_id", state.currentSessionId);

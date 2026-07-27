@@ -1,6 +1,8 @@
 # flavor-rag — 企业级 RAG 智能问答系统
 
-基于 Python FastAPI + React 技术栈的企业级 RAG (Retrieval-Augmented Generation) 系统。支持多路混合检索、知识图谱、Agentic RAG、评测体系与全链路追踪。
+> 版本：v0.0.1 | 状态：生产就绪（68/68 测试全绿）
+
+基于 Python FastAPI + React 技术栈的企业级 RAG (Retrieval-Augmented Generation) 系统。支持多路混合检索、近邻补偿、知识图谱、Agentic RAG、评测体系与全链路追踪。
 
 > 📘 **技术方案详解**：参见 [技术方案文档.md](./技术方案文档.md)，涵盖分块逻辑、召回逻辑、评测体系、链路监控、Graph RAG、Agentic RAG 等核心设计。
 
@@ -98,7 +100,7 @@ flavor-rag/
 | 模块 | 能力 | 状态 |
 |------|------|------|
 | **分块** | 三种策略：固定窗口 / 语义切分 / 块感知切分 + 复杂 PDF 多模态分块 | ✅ |
-| **检索** | 多路并行：Milvus 向量 + ES BM25 关键词 + Neo4j/LightRAG 图谱 → RRF 融合 → Cross-Encoder Rerank | ✅ |
+| **检索** | 多路并行：Milvus 向量 + ES BM25 关键词 + Neo4j/LightRAG 图谱 → RRF 融合 → 去重 → 近邻补偿（上下文窗口扩展）→ Cross-Encoder Rerank | ✅ |
 | **查询理解** | 术语映射（DB驱动） + LLM 改写（消解指代） + 意图分类（层级意图树→知识库路由→模型路由） | ✅ |
 | **Graph RAG** | 双层图谱：Neo4j 确定性实体（零 LLM 依赖）+ LightRAG 语义增强 | ✅ |
 | **Agentic RAG** | 受控 Agent 循环：检索 → 评估 → 再检索/SQL/MCP 工具 → 最多 4 步 | ✅ |
@@ -179,6 +181,7 @@ pytest tests/ -v
   → 三路并行检索 (Milvus向量 + ES BM25 + Neo4j/LightRAG图谱)
   → RRF 融合 (多路结果加权合并)
   → 内容去重 (Jaccard 3-gram)
+  → 近邻补偿 (召回命中块前后各2块，补全上下文)
   → Rerank 重排序 (Cross-Encoder 精排)
   → 上下文组装 (多样性优先 + 上下文窗口控制)
   → ACL 权限过滤 → LLM 生成 → 回答 + 来源引用

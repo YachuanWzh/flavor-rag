@@ -27,12 +27,23 @@ class ControlledRAGAgent:
             query = str(arguments.get("query") or context.question).strip()
             result = await self.pipeline.run(replace(context, question=query))
             retrieved.append(result)
+            # Compute score diagnostics for planner decision-making
+            scores = [
+                float(c.get("score", 0))
+                for c in result.context_chunks
+                if c.get("score") is not None
+            ]
+            max_score = max(scores) if scores else 0.0
+            avg_score = round(sum(scores) / len(scores), 4) if scores else 0.0
             return {
                 "query": query,
                 "answerable": result.answerable,
                 "source_count": len(result.sources),
                 "rejection_reason": result.rejection_reason,
                 "channels": result.channel_statuses,
+                "max_score": round(max_score, 4),
+                "avg_score": avg_score,
+                "subqueries_used": result.subqueries,
             }
 
         registry.register(
@@ -88,8 +99,20 @@ class ControlledRAGAgent:
         async def planner(state: dict) -> AgentAction:
             if not state["steps"]:
                 return AgentAction("retrieve", {"query": context.question})
-            if state["steps"][-1].observation.get("answerable"):
+            last_obs = state["steps"][-1].observation
+            # Early stop: evidence is answerable
+            if last_obs.get("answerable"):
                 return AgentAction("finish", {"answer": "evidence_ready"})
+            # Early stop: high confidence score even if not flagged answerable
+            if last_obs.get("max_score", 0) >= 0.85 and last_obs.get("source_count", 0) >= 2:
+                return AgentAction("finish", {"answer": "high_confidence_evidence"})
+            # Early stop: multiple failed attempts with very low scores → knowledge gap
+            if len(state["steps"]) >= 2:
+                recent_scores = [
+                    s.observation.get("max_score", 0) for s in state["steps"][-2:]
+                ]
+                if all(score < 0.15 for score in recent_scores):
+                    return AgentAction("finish", {"answer": "knowledge_gap"})
             return await plan_next_action(
                 question=context.question,
                 steps=state["steps"],

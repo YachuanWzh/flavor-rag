@@ -1,4 +1,4 @@
-# flavor-rag — 企业级 RAG 智能问答系统
+﻿# flavor-rag — 企业级 RAG 智能问答系统
 
 > 版本：v0.0.1 | 状态：生产就绪（68/68 测试全绿）
 
@@ -16,6 +16,9 @@ flavor-rag/
 ├── .gitignore
 │
 ├── docker/                             # Docker Compose 编排
+│   └── observability/                  # Prometheus + Grafana + Jaeger 配置
+│       ├── prometheus.yml              # Prometheus 抓取规则
+│       └── grafana/                    # Grafana 预置大盘 + 数据源
 │   ├── infra-stack.compose.yaml        # PG + Redis + RustFS
 │   ├── milvus-stack.compose.yaml       # Milvus 向量数据库
 │   ├── es-stack.compose.yaml           # Elasticsearch (可选)
@@ -75,6 +78,9 @@ flavor-rag/
 │       ├── tools/                      # Agent 可用工具 (SQL / MCP)
 │       ├── evaluation/                 # 评测框架 (指标计算 + 质量门禁 + 投资决策)
 │       ├── audit/                      # 操作审计 (中间件 + 日志)
+│       ├── observability/              # Prometheus 指标 + OpenTelemetry 追踪
+│       │   ├── metrics.py              # 15 个业务指标定义 + MetricsMiddleware
+│       │   └── otel.py                 # OTLP 导出 + 回溯 Span 创建
 │       ├── security/                   # 细粒度 ACL (租户/部门/角色)
 │       └── services/                   # 对话管理 / 索引同步 / 定时刷新
 │
@@ -105,7 +111,7 @@ flavor-rag/
 | **Graph RAG** | 双层图谱：Neo4j 确定性实体（零 LLM 依赖）+ LightRAG 语义增强 | ✅ |
 | **Agentic RAG** | 受控 Agent 循环：检索 → 评估 → 再检索/SQL/MCP 工具 → 最多 4 步 | ✅ |
 | **评测** | 8 项检索指标 + 拒绝能力 + ACL 防泄露 + 8 道硬门禁 + 投资决策框架 | ✅ |
-| **链路追踪** | 全链路 Trace (改写/意图/检索/融合/Rerank) + 入库耗时追踪 + 管理后台可视化 | ✅ |
+| **可观测性** | Prometheus 指标大盘 (QPS/延迟/队列) + OpenTelemetry + Jaeger 分布式链路追踪 (火焰图) + PG 业务追踪 | ✅ |
 | **安全** | JWT 认证 + 租户/部门/角色 ACL + 跨租户防泄露 + 操作审计 + 只读 SQL 白名单 | ✅ |
 | **治理** | 检索预算控制 + Circuit Breaker 熔断 + 通道超时 + Redis 滑动窗口限流 | ✅ |
 | **定时任务** | 文档定时刷新 (Cron) + 幂等锁 + 内容变化检测 + 索引同步重试 | ✅ |
@@ -125,6 +131,7 @@ docker compose -f docker/milvus-stack.compose.yaml up -d
 # 可选组件:
 # docker compose -f docker/es-stack.compose.yaml up -d            # Elasticsearch
 # docker compose -f docker/lightrag-neo4j-stack.compose.yaml up -d # 知识图谱
+# docker compose -f docker/observability-stack.compose.yaml up -d  # Prometheus + Grafana + Jaeger
 ```
 
 ### 2. 初始化数据库
@@ -200,6 +207,7 @@ pytest tests/ -v
 - **对象存储**: RustFS (S3 兼容)
 - **消息队列**: RocketMQ (可选)
 - **缓存**: Redis
+- **可观测性**: Prometheus + Grafana (指标) / OpenTelemetry + Jaeger (链路追踪)
 
 ## 与 flavor-code 融合
 

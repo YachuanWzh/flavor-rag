@@ -1,10 +1,10 @@
-﻿# flavor-rag — 企业级 RAG 智能问答系统
+# flavor-rag — 企业级 RAG 智能问答系统
 
-> 版本：v0.0.1 | 状态：生产就绪（68/68 测试全绿）
+> 版本：v0.0.2 | 状态：生产就绪（144/144 测试全绿）
 
-基于 Python FastAPI + React 技术栈的企业级 RAG (Retrieval-Augmented Generation) 系统。支持多路混合检索、近邻补偿、知识图谱、Agentic RAG、评测体系与全链路追踪。
+基于 Python FastAPI + React 技术栈的企业级 RAG (Retrieval-Augmented Generation) 系统。支持多路混合检索、近邻补偿、知识图谱、Agentic RAG、评测体系、全链路追踪、批量导入/去重、异步摄取队列与系统监控。
 
-> 📘 **技术方案详解**：参见 [技术方案文档.md](./技术方案文档.md)，涵盖分块逻辑、召回逻辑、评测体系、链路监控、Graph RAG、Agentic RAG 等核心设计。
+> 📘 **技术方案详解**：参见 [技术方案文档.md](./技术方案文档.md)，涵盖分块逻辑、召回逻辑、评测体系、链路监控、Graph RAG、Agentic RAG、批量导入/去重、异步摄取、系统监控等核心设计。
 
 ## 项目结构
 
@@ -38,20 +38,20 @@ flavor-rag/
 │   ├── alembic.ini                     # 数据库迁移
 │   ├── run.py / run_dev.py
 │   ├── alembic/versions/               # 8 个迁移版本
-│   ├── tests/                          # 68 个测试用例
+│   ├── tests/                          # 144 个测试用例
 │   └── app/
 │       ├── main.py                     # FastAPI 入口
 │       ├── config/                     # 配置 + 日志
 │       ├── database/                   # 数据库连接 + SQLite Schema
-│       ├── models/__init__.py          # 25 个 SQLAlchemy 模型
+│       ├── models/__init__.py          # SQLAlchemy 模型 (含 IngestionJob/BatchImport)
 │       ├── auth/                       # JWT 认证 + 依赖注入
-│       ├── api/                        # 15 个 API 模块
+│       ├── api/                        # 17 个 API 模块 (含 monitoring/health)
 │       ├── rag/                        # RAG 核心引擎
 │       │   ├── pipeline.py             # 检索主流水线 (重写→意图→多路检索→融合→Rerank)
 │       │   ├── search/                 # vector (Milvus) + keyword (ES BM25)
 │       │   ├── postprocess/            # fusion (RRF) + reranker (Cross-Encoder/LLM)
 │       │   ├── graph/                  # neo4j_store + lightrag_client
-│       │   ├── rewrite.py              # 查询改写 (术语映射 + LLM)
+│       │   ├── rewrite.py              # 查询改写 (术语映射 + LLM) + 命中统计
 │       │   ├── intent.py               # 意图识别 (词法 + LLM)
 │       │   ├── governance.py           # 检索治理 (预算/熔断/超时)
 │       │   ├── trace.py                # 链路追踪
@@ -63,10 +63,12 @@ flavor-rag/
 │       │   ├── pipeline.py             # 单文档快速入库
 │       │   ├── pipeline_engine.py      # DAG 流水线引擎 (6 种节点)
 │       │   ├── nodes/                  # fetcher/parser/chunker/enricher/enhancer/indexer
-│       │   ├── chunker.py              # 三种分块策略 (Fixed/Semantic/BlockAware)
+│       │   ├── chunker.py              # 三种分块策略 (Fixed/Semantic/BlockAware) + 块类型元数据
 │       │   ├── parser.py               # 文档解析 (Markdown/PDF/DOCX/XLSX/PPTX/HTML)
 │       │   ├── structured.py           # 结构化文档分块
 │       │   ├── url_fetcher.py          # URL 安全抓取
+│       │   ├── dedup.py                # 文档去重 (SHA-256 + 语义相似度)
+│       │   ├── incremental.py          # 增量索引 (变更检测 + 选择性重建)
 │       │   └── pdf/                    # 复杂 PDF 多模态处理 (OCR/VLM/表格)
 │       ├── llm/                        # LLM 客户端
 │       │   ├── client.py               # 流式 LLM (支持 Bailian/SiliconFlow/AIhubmix + 推理分离)
@@ -79,22 +81,29 @@ flavor-rag/
 │       ├── evaluation/                 # 评测框架 (指标计算 + 质量门禁 + 投资决策)
 │       ├── audit/                      # 操作审计 (中间件 + 日志)
 │       ├── observability/              # Prometheus 指标 + OpenTelemetry 追踪
-│       │   ├── metrics.py              # 15 个业务指标定义 + MetricsMiddleware
+│       │   ├── metrics.py              # 15 个业务指标 (含 TTFT/LLM流式/摄取队列)
 │       │   └── otel.py                 # OTLP 导出 + 回溯 Span 创建
 │       ├── security/                   # 细粒度 ACL (租户/部门/角色)
-│       └── services/                   # 对话管理 / 索引同步 / 定时刷新
+│       └── services/                   # 对话管理 / 批量导入 / 异步摄取 / 索引同步 / 定时刷新 / 看门狗
+│           ├── batch_import.py         # 批量导入 (进度追踪 + 逐文件隔离)
+│           ├── ingestion_jobs.py       # 异步摄取 Worker (Outbox + 指数退避重试)
+│           ├── ingestion_executor.py   # 摄取执行器 (DAG/传统双模式)
+│           └── ingestion_watchdog.py   # 任务看门狗 (僵尸任务超时检测)
 │
 └── flavorag-frontend/                  # 前端 (React + Vite + TypeScript)
     ├── Dockerfile / nginx.conf
     ├── package.json / vite.config.ts
     ├── tailwind.config.cjs
     └── src/
-        ├── pages/                      # 14 个页面 (问答/知识库/管理后台)
-        │   ├── ChatPage.tsx            # 流式问答 + 引用溯源
+        ├── pages/                      # 16 个页面 (问答/知识库/管理后台)
+        │   ├── ChatPage.tsx            # 流式问答 + 引用溯源 + 图片/表格来源展示
         │   ├── LoginPage.tsx           # 登录注册
-        │   └── admin/                  # 管理后台 (Dashboard/评测/追踪/流水线/图谱/权限...)
+        │   └── admin/                  # 管理后台 (Dashboard/评测/追踪/流水线/图谱/权限/监控/健康...)
         ├── components/                 # 可复用组件
-        │   └── chat/                   # 消息列表/输入框/来源面板/知识图谱/思考指示器
+        │   ├── chat/                   # 消息列表/输入框/来源面板/知识图谱/思考指示器/来源媒体
+        │   │   └── SourceMedia.tsx     # 图片/表格来源内联展示 + Lightbox
+        │   └── common/                 # 公共组件
+        │       └── ForbiddenToast.tsx  # 全局 403 权限不足提示
         ├── services/                   # API 客户端 (auth/chat/knowledge/graph/evaluation...)
         ├── stores/                     # Zustand 状态管理
         ├── hooks/                      # SSE 流式响应 Hook
@@ -105,17 +114,21 @@ flavor-rag/
 
 | 模块 | 能力 | 状态 |
 |------|------|------|
-| **分块** | 三种策略：固定窗口 / 语义切分 / 块感知切分 + 复杂 PDF 多模态分块 | ✅ |
+| **分块** | 三种策略：固定窗口 / 语义切分 / 块感知切分 + 块类型元数据 (TABLE/CODE/LIST/IMAGE/PARA) + 表格双文本 (Markdown + key:value 嵌入) | ✅ |
 | **检索** | 多路并行：Milvus 向量 + ES BM25 关键词 + Neo4j/LightRAG 图谱 → RRF 融合 → 去重 → 近邻补偿（上下文窗口扩展）→ Cross-Encoder Rerank | ✅ |
-| **查询理解** | 术语映射（DB驱动） + LLM 改写（消解指代） + 意图分类（层级意图树→知识库路由→模型路由） | ✅ |
+| **查询理解** | 术语映射（DB驱动 + 命中统计） + LLM 改写（消解指代） + 意图分类（层级意图树→知识库路由→模型路由） | ✅ |
 | **Graph RAG** | 双层图谱：Neo4j 确定性实体（零 LLM 依赖）+ LightRAG 语义增强 | ✅ |
 | **Agentic RAG** | 受控 Agent 循环：检索 → 评估 → 再检索/SQL/MCP 工具 → 最多 4 步 | ✅ |
+| **批量导入与去重** | 批量文件上传 + 进度追踪 + SHA-256 内容去重 + 语义相似度去重 (PG vector) | ✅ |
+| **异步摄取** | Outbox 模式 + Worker 池 + 指数退避重试 + 死信队列 + 看门狗超时检测 | ✅ |
+| **增量索引** | 文件内容 hash 变更检测 → 仅重建变化文档（跳过未变文件） + 旧块软删除 | ✅ |
 | **评测** | 8 项检索指标 + 拒绝能力 + ACL 防泄露 + 8 道硬门禁 + 投资决策框架 | ✅ |
-| **可观测性** | Prometheus 指标大盘 (QPS/延迟/队列) + OpenTelemetry + Jaeger 分布式链路追踪 (火焰图) + PG 业务追踪 | ✅ |
-| **安全** | JWT 认证 + 租户/部门/角色 ACL + 跨租户防泄露 + 操作审计 + 只读 SQL 白名单 | ✅ |
+| **可观测性** | 15 个 Prometheus 指标 (QPS/延迟/TTFT/LLM流式/摄取队列/熔断器) + OpenTelemetry + Jaeger 分布式链路追踪 + PG 业务追踪 | ✅ |
+| **系统监控** | 内置监控面板：RAG 请求量/成功率/P95耗时/时序图 + 摄取队列深度 + 任务列表 + 手动重试 | ✅ |
+| **安全** | JWT 认证 + 租户/部门/角色 ACL + 跨租户防泄露 + 操作审计 + 只读 SQL 白名单 + 403 全局提示 | ✅ |
 | **治理** | 检索预算控制 + Circuit Breaker 熔断 + 通道超时 + Redis 滑动窗口限流 | ✅ |
 | **定时任务** | 文档定时刷新 (Cron) + 幂等锁 + 内容变化检测 + 索引同步重试 | ✅ |
-| **前端** | 流式 SSE 问答 + 来源标亮 + 知识图谱可视化 + 管理后台 14 个页面 | ✅ |
+| **前端** | 流式 SSE 问答 + 来源标亮 + 图片/表格内联展示 + 知识图谱可视化 + 管理后台 16 个页面 | ✅ |
 
 ## 快速开始
 
@@ -176,7 +189,7 @@ npm run dev
 ```bash
 cd flavorag-server
 pytest tests/ -v
-# 68/68 全绿
+# 144/144 全绿
 ```
 
 ## 检索链路速览
@@ -191,8 +204,20 @@ pytest tests/ -v
   → 近邻补偿 (召回命中块前后各2块，补全上下文)
   → Rerank 重排序 (Cross-Encoder 精排)
   → 上下文组装 (多样性优先 + 上下文窗口控制)
-  → ACL 权限过滤 → LLM 生成 → 回答 + 来源引用
+  → ACL 权限过滤 → LLM 生成 → 回答 + 来源引用 (含图片/表格)
 ```
+
+## v0.0.2 新特性
+
+- **批量导入与去重**：支持一次上传多个文档，自动 SHA-256 哈希去重，可选语义相似度深度去重
+- **异步摄取队列**：基于 Outbox 模式的异步任务队列，支持指数退避重试、死信队列、手动重新入队
+- **增量索引**：文档内容变更检测（hash 对比），仅重建变化文档，跳过未变文件
+- **系统监控面板**：内置 RAG 请求量/成功率/P95 耗时/摄取队列深度图表，支持时间窗口切换
+- **分块增强**：Block Aware 分块新增块类型元数据（TABLE/CODE/LIST/IMAGE/PARA），表格生成双文本（Markdown + key:value 嵌入）
+- **来源媒体展示**：回答中图片、表格来源内联渲染，图片支持 Lightbox 放大查看
+- **可观测性升级**：新增 15 个 Prometheus 业务指标，含 TTFT（首字节时间）、LLM 流式延迟、摄取任务队列深度
+- **403 全局提示**：权限不足时前端自动弹出 Toast 提示
+- **术语映射命中统计**：查询词映射命中次数写入数据库，支持分析高频映射
 
 ## 技术栈
 

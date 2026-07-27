@@ -5,6 +5,7 @@ from __future__ import annotations
 from app.config.logging_config import get_logger
 from app.ingestion.nodes.base import IngestionContext, NodeResult
 from app.ingestion.chunker import DocumentChunker, ChunkConfig, ChunkStrategy
+from app.ingestion.cross_reference import inject_cross_references
 
 _log = get_logger("flavorag.ingestion.chunker")
 
@@ -49,6 +50,7 @@ class ChunkerNode:
                     ),
                 )
                 chunks = chunker.chunk(ctx.parsed_document)
+                chunks = inject_cross_references(chunks)
                 ctx.chunks = chunks
                 duration_ms = int((time.time() - t0) * 1000)
                 _log.info(
@@ -70,6 +72,7 @@ class ChunkerNode:
 
             config = self._build_config(ctx.settings)
             chunks = self._chunker.chunk(ctx.parsed_text, config)
+            chunks = inject_cross_references(chunks)
             ctx.chunks = chunks
 
             duration_ms = int((time.time() - t0) * 1000)

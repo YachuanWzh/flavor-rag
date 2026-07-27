@@ -91,6 +91,10 @@ class IngestionPipeline:
             took_ms=chunk_ms,
         )
 
+        # 2.5 Cross-element reference injection
+        from app.ingestion.cross_reference import inject_cross_references
+        chunks = inject_cross_references(chunks)
+
         if not chunks:
             _ingest_log.warning("ingestion_no_chunks", doc_id=doc_id)
             return 0

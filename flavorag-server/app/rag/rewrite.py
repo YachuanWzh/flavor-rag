@@ -100,26 +100,28 @@ def normalize_query(question: str, mappings: list[dict]) -> tuple[str, list[dict
 
 
 async def _bump_mapping_hit_counts(applied: list[dict]) -> None:
-    """Increment hit_count for applied mappings (fire-and-forget)."""
+    """Increment hit_count for applied mappings (fire-and-forget task)."""
     if not applied:
         return
     try:
         from sqlalchemy import update
+        from sqlalchemy.sql import func
+
+        mapping_ids = [m["id"] for m in applied if m.get("id")]
+        if not mapping_ids:
+            return
 
         async with async_session_factory() as session:
-            for mapping in applied:
-                mapping_id = mapping.get("id")
-                if not mapping_id:
-                    continue
-                await session.execute(
-                    update(QueryTermMapping)
-                    .where(QueryTermMapping.id == mapping_id)
-                    .values(hit_count=QueryTermMapping.hit_count + 1)
+            await session.execute(
+                update(QueryTermMapping)
+                .where(QueryTermMapping.id.in_(mapping_ids))
+                .values(
+                    hit_count=func.coalesce(QueryTermMapping.hit_count, 0) + 1,
                 )
+            )
             await session.commit()
-    except Exception:
-        # Must never break the query pipeline.
-        pass
+    except Exception as exc:
+        _rewrite_log.warning("term_mapping_hit_count_failed", error=type(exc).__name__)
 
 
 async def rewrite_query_result(

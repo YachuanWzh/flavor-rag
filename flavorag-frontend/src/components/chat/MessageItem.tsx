@@ -10,7 +10,7 @@ interface Props {
   message: Message;
   isStreaming?: boolean;
   progressMessage?: string | null;
-  onViewSources?: (sources: NonNullable<Message["sources"]>) => void;
+  onViewSources?: (sources: NonNullable<Message["sources"]>, highlightIndex?: number) => void;
   onRecommendedQuestion?: (question: string) => void;
 }
 
@@ -91,7 +91,7 @@ export default function MessageItem({
             content={message.content}
             isStreaming={isStreaming}
             sourceCount={message.sources?.length || 0}
-            onSourceClick={() => message.sources && onViewSources?.(message.sources)}
+            onSourceClick={(index) => message.sources && onViewSources?.(message.sources, index)}
           />
         )}
 
@@ -144,11 +144,11 @@ export default function MessageItem({
             )}
             {message.ragModes.neighborExpansion && (
               <span
-                title="邻近补偿策略已参与本次召回，为命中分块补充了前后上下文"
+                title="近邻补偿策略已参与本次召回，为命中分块补充了前后上下文"
                 className="inline-flex items-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-800"
               >
                 <Layers className="h-3 w-3" />
-                邻近补偿 {(message.sources || []).filter((s) => s.neighborOf?.length).length} 条证据
+                近邻补偿 {(message.sources || []).filter((s) => s.neighborOf?.length).length} 条证据
               </span>
             )}
           </div>
@@ -239,9 +239,9 @@ export default function MessageItem({
           <SourceMedia sources={message.sources} />
         )}
 
-        {/* Sources button */}
+        {/* Sources button + citation badge */}
         {message.sources && message.sources.length > 0 && (
-          <div className="mt-3 pt-2 border-t border-gray-200/50">
+          <div className="mt-3 pt-2 border-t border-gray-200/50 flex items-center gap-2">
             <button
               onClick={() => onViewSources?.(message.sources!)}
               className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 rounded-lg px-3 py-1.5 transition-colors"
@@ -251,6 +251,22 @@ export default function MessageItem({
               </svg>
               查看来源 ({message.sources.length})
             </button>
+            {message.citationStats && message.citationStats.total > 0 && (
+              <span
+                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                  message.citationStats.autoAppended
+                    ? "bg-amber-50 text-amber-700 border border-amber-200"
+                    : "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                }`}
+                title={
+                  message.citationStats.autoAppended
+                    ? "答案未包含引用标记，已自动补充参考来源"
+                    : `引用了 ${message.citationStats.cited.length}/${message.citationStats.total} 个来源`
+                }
+              >
+                {message.citationStats.autoAppended ? "已自动补注" : `引用 ${message.citationStats.cited.length}/${message.citationStats.total}`}
+              </span>
+            )}
           </div>
         )}
 

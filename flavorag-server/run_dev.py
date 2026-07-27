@@ -1,4 +1,4 @@
-﻿"""Dev launcher — uses SQLite instead of PostgreSQL, zero Docker required.
+﻿"""Dev launcher — reads DATABASE_URL from .env (PostgreSQL by default).
 
 Usage:
     cd flavorag-server
@@ -6,11 +6,20 @@ Usage:
     python run_dev.py
 
 Then open http://localhost:9090/docs
-"""
-import os
 
-# Override to SQLite before importing anything
-os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///flavorag_dev.db"
+Note: the dev stack uses PostgreSQL (see .env) to avoid SQLite's
+single-writer "database is locked" errors under concurrent RAG/SSE load.
+Start the infra first:
+    docker compose -f docker/infra-stack.compose.yaml up -d
+If you need a zero-Docker fallback, set DATABASE_URL to a sqlite+aiosqlite
+URL in .env (note: SQLite serializes all writes).
+"""
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# .env takes priority over system env vars for local dev
+load_dotenv(str(Path(__file__).resolve().parent / ".env"), override=True)
 
 import uvicorn
 

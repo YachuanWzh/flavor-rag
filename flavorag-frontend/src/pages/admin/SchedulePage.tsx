@@ -89,10 +89,10 @@ export default function SchedulePage() {
               <tr>
                 <th className="text-left py-2.5 px-3 text-xs font-medium text-gray-500">文档ID</th>
                 <th className="text-left py-2.5 px-3 text-xs font-medium text-gray-500 w-20">间隔(秒)</th>
-                <th className="text-left py-2.5 px-3 text-xs font-medium text-gray-500 w-16">状态</th>
+                <th className="text-left py-2.5 px-3 text-xs font-medium text-gray-500 w-20">状态</th>
                 <th className="text-left py-2.5 px-3 text-xs font-medium text-gray-500 w-36">下次执行</th>
                 <th className="text-left py-2.5 px-3 text-xs font-medium text-gray-500 w-36">上次执行</th>
-                <th className="text-left py-2.5 px-3 text-xs font-medium text-gray-500 w-16">结果</th>
+                <th className="text-left py-2.5 px-3 text-xs font-medium text-gray-500 w-20">结果</th>
                 <th className="text-left py-2.5 px-3 text-xs font-medium text-gray-500 w-24">操作</th>
               </tr>
             </thead>
@@ -101,15 +101,15 @@ export default function SchedulePage() {
                 <tr key={s.id} className="border-b last:border-0 hover:bg-gray-50">
                   <td className="py-2.5 px-3 text-xs font-mono">{s.docId}</td>
                   <td className="py-2.5 px-3 text-xs">{s.cronExpr || "—"}</td>
-                  <td className="py-2.5 px-3">
-                    <span className={`text-xs px-1.5 py-0.5 rounded ${
+                  <td className="py-2.5 px-3 whitespace-nowrap">
+                    <span className={`inline-block text-xs px-1.5 py-0.5 rounded whitespace-nowrap ${
                       s.enabled ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-500"
                     }`}>{s.enabled ? "启用" : "停用"}</span>
                   </td>
                   <td className="py-2.5 px-3 text-xs text-gray-400">{s.nextRunTime?.slice(0, 19) || "—"}</td>
                   <td className="py-2.5 px-3 text-xs text-gray-400">{s.lastRunTime?.slice(0, 19) || "—"}</td>
-                  <td className="py-2.5 px-3">
-                    <span className={`text-xs px-1.5 py-0.5 rounded ${
+                  <td className="py-2.5 px-3 whitespace-nowrap">
+                    <span className={`inline-block text-xs px-1.5 py-0.5 rounded whitespace-nowrap ${
                       s.lastStatus === "success" ? "bg-green-50 text-green-700" :
                       s.lastStatus === "error" ? "bg-red-50 text-red-600" :
                       "bg-gray-100 text-gray-500"
@@ -149,7 +149,7 @@ export default function SchedulePage() {
                 <th className="text-left py-2.5 px-3 text-xs font-medium text-gray-500 w-36">开始时间</th>
                 <th className="text-left py-2.5 px-3 text-xs font-medium text-gray-500 w-36">结束时间</th>
                 <th className="text-left py-2.5 px-3 text-xs font-medium text-gray-500">文档ID</th>
-                <th className="text-left py-2.5 px-3 text-xs font-medium text-gray-500 w-16">状态</th>
+                <th className="text-left py-2.5 px-3 text-xs font-medium text-gray-500 w-20">状态</th>
                 <th className="text-left py-2.5 px-3 text-xs font-medium text-gray-500">详情</th>
               </tr>
             </thead>
@@ -159,8 +159,8 @@ export default function SchedulePage() {
                   <td className="py-2.5 px-3 text-xs text-gray-400">{e.startTime?.slice(0, 19) || "—"}</td>
                   <td className="py-2.5 px-3 text-xs text-gray-400">{e.endTime?.slice(0, 19) || "—"}</td>
                   <td className="py-2.5 px-3 text-xs font-mono">{e.docId}</td>
-                  <td className="py-2.5 px-3">
-                    <span className={`text-xs px-1.5 py-0.5 rounded ${
+                  <td className="py-2.5 px-3 whitespace-nowrap">
+                    <span className={`inline-block text-xs px-1.5 py-0.5 rounded whitespace-nowrap ${
                       e.status === "success" ? "bg-green-50 text-green-700" :
                       e.status === "error" ? "bg-red-50 text-red-600" :
                       "bg-gray-100 text-gray-500"

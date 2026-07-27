@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BarChart3,
   BookOpenText,
@@ -16,11 +16,13 @@ import {
   X,
 } from "lucide-react";
 import type { SourceRef } from "@/types";
+import DocumentPreviewModal from "./DocumentPreviewModal";
 
 interface Props {
   open: boolean;
   sources: SourceRef[];
   onClose: () => void;
+  highlightIndex?: number | null;
 }
 
 const CHANNEL_META: Record<string, { label: string; color: string; rail: string }> = {
@@ -51,9 +53,31 @@ function pageLabel(source: SourceRef) {
     : `第 ${source.pageStart} 页`;
 }
 
-export default function SourcesDrawer({ open, sources, onClose }: Props) {
+export default function SourcesDrawer({ open, sources, onClose, highlightIndex }: Props) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [previewSource, setPreviewSource] = useState<SourceRef | null>(null);
+  const [flashId, setFlashId] = useState<string | null>(null);
+  const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
+
   useEffect(() => setExpandedId(null), [sources]);
+
+  // Auto-scroll and highlight when highlightIndex is provided
+  useEffect(() => {
+    if (!open || highlightIndex == null || highlightIndex < 0) return;
+    const source = sources[highlightIndex];
+    if (!source) return;
+    const id = source.chunkId || String(highlightIndex);
+    setExpandedId(id);
+    setFlashId(id);
+    // Scroll into view after a brief delay for DOM update
+    const timer = setTimeout(() => {
+      const el = cardRefs.current.get(id);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 100);
+    // Remove flash after 2s
+    const flashTimer = setTimeout(() => setFlashId(null), 2000);
+    return () => { clearTimeout(timer); clearTimeout(flashTimer); };
+  }, [open, highlightIndex, sources]);
 
   const summary = useMemo(() => {
     const documents = new Set(sources.map((source) => source.documentId).filter(Boolean));
@@ -115,7 +139,7 @@ export default function SourcesDrawer({ open, sources, onClose }: Props) {
             <SummaryStat label="覆盖文档" value={summary.documents} />
             <SummaryStat label="参与通道" value={summary.channels} />
             {summary.compensated > 0 && (
-              <SummaryStat label="邻近补偿" value={summary.compensated} />
+              <SummaryStat label="近邻补偿" value={summary.compensated} />
             )}
           </div>
         </header>
@@ -126,11 +150,15 @@ export default function SourcesDrawer({ open, sources, onClose }: Props) {
             const expanded = expandedId === id;
             const channels = Object.entries(source.channelScores || {});
             const primaryScore = source.rerankScore ?? source.score;
+            const isFlashing = flashId === id;
             return (
               <article
                 key={id}
+                ref={(el) => { if (el) cardRefs.current.set(id, el); }}
                 className={`overflow-hidden rounded-2xl border bg-white transition ${
-                  expanded
+                  isFlashing
+                    ? "border-cyan-400 shadow-[0_0_0_3px_rgba(34,211,238,0.3)] ring-2 ring-cyan-400 animate-pulse"
+                    : expanded
                     ? "border-cyan-300 shadow-[0_12px_36px_rgba(8,145,178,0.12)]"
                     : "border-slate-200 shadow-sm hover:border-slate-300"
                 }`}
@@ -158,7 +186,7 @@ export default function SourcesDrawer({ open, sources, onClose }: Props) {
                         {!!source.neighborOf?.length && (
                           <Pill
                             icon={<GitBranch />}
-                            text="邻近补偿"
+                            text="近邻补偿"
                             tone="emerald"
                           />
                         )}
@@ -216,7 +244,7 @@ export default function SourcesDrawer({ open, sources, onClose }: Props) {
                       </div>
                     ) : source.neighborOf?.length ? (
                       <p className="mt-1.5 text-[10px] text-emerald-300">
-                        该证据由邻近补偿策略补充，关联命中分块 ×{source.neighborOf.length}
+                        该证据由近邻补偿策略补充，关联命中分块 ×{source.neighborOf.length}
                       </p>
                     ) : (
                       <p className="mt-1.5 text-[10px] text-slate-500">
@@ -250,7 +278,7 @@ export default function SourcesDrawer({ open, sources, onClose }: Props) {
                       <div className="mt-2 flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[10px] text-emerald-700">
                         <GitBranch className="h-3 w-3 shrink-0" />
                         <span>
-                          邻近补偿证据 · 由命中分块
+                          近邻补偿证据 · 由命中分块
                           {source.neighborOf
                             .map((pid) => {
                               const parent = sources.find((s) => s.chunkId === pid);
@@ -338,6 +366,21 @@ export default function SourcesDrawer({ open, sources, onClose }: Props) {
                       <IdLine icon={<FileText />} label="文档 ID" value={source.documentId} />
                       <IdLine icon={<Hash />} label="分块 ID" value={source.chunkId} />
                     </div>
+
+                    {/* 查看原文按钮 */}
+                    {source.documentId && (
+                      <div className="mt-3">
+                        <button
+                          type="button"
+                          onClick={() => setPreviewSource(source)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-xs font-medium text-cyan-700 transition hover:bg-cyan-100"
+                        >
+                          <ExternalLink className="h-3.5 w-3.5" />
+                          {(source.fileType || "").toLowerCase() === "pdf" ? "查看原文" : "查看文档"}
+                          {source.pageStart ? ` · 第${source.pageStart}页` : ""}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
               </article>
@@ -353,6 +396,20 @@ export default function SourcesDrawer({ open, sources, onClose }: Props) {
           )}
         </div>
       </aside>
+
+      {/* Document preview modal */}
+      {previewSource && (
+        <DocumentPreviewModal
+          open={!!previewSource}
+          documentId={previewSource.documentId}
+          docName={previewSource.docName}
+          fileType={previewSource.fileType}
+          pageStart={previewSource.pageStart}
+          bboxes={previewSource.bboxes}
+          sourceContent={previewSource.content}
+          onClose={() => setPreviewSource(null)}
+        />
+      )}
     </>
   );
 }

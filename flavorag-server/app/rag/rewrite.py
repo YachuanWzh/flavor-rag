@@ -100,28 +100,51 @@ def normalize_query(question: str, mappings: list[dict]) -> tuple[str, list[dict
 
 
 async def _bump_mapping_hit_counts(applied: list[dict]) -> None:
-    """Increment hit_count for applied mappings (fire-and-forget task)."""
+    """Increment hit_count for applied mappings (fire-and-forget task).
+
+    SQLite only allows one write transaction at a time. The main request
+    may still hold an open transaction when this background task fires,
+    causing transient OperationalError ("database is locked").  We retry
+    a few times with backoff before giving up.
+    """
     if not applied:
         return
-    try:
-        from sqlalchemy import update
-        from sqlalchemy.sql import func
+    from sqlalchemy import update
+    from sqlalchemy.sql import func
+    from sqlalchemy.exc import OperationalError as SAOperationalError
 
-        mapping_ids = [m["id"] for m in applied if m.get("id")]
-        if not mapping_ids:
-            return
+    mapping_ids = [m["id"] for m in applied if m.get("id")]
+    if not mapping_ids:
+        return
 
-        async with async_session_factory() as session:
-            await session.execute(
-                update(QueryTermMapping)
-                .where(QueryTermMapping.id.in_(mapping_ids))
-                .values(
-                    hit_count=func.coalesce(QueryTermMapping.hit_count, 0) + 1,
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            async with async_session_factory() as session:
+                await session.execute(
+                    update(QueryTermMapping)
+                    .where(QueryTermMapping.id.in_(mapping_ids))
+                    .values(
+                        hit_count=func.coalesce(QueryTermMapping.hit_count, 0) + 1,
+                    )
                 )
+                await session.commit()
+            return  # success
+        except SAOperationalError:
+            if attempt < max_retries - 1:
+                await asyncio.sleep(0.5 * (attempt + 1))
+                continue
+            _rewrite_log.warning(
+                "term_mapping_hit_count_failed",
+                error="OperationalError",
+                retries=max_retries,
             )
-            await session.commit()
-    except Exception as exc:
-        _rewrite_log.warning("term_mapping_hit_count_failed", error=type(exc).__name__)
+        except Exception as exc:
+            _rewrite_log.warning(
+                "term_mapping_hit_count_failed",
+                error=type(exc).__name__,
+            )
+            return
 
 
 async def rewrite_query_result(

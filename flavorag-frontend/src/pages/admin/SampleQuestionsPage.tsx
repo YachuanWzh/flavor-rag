@@ -108,7 +108,7 @@ export default function SampleQuestionsPage() {
               <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500">问题</th>
               <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500 w-24">知识库</th>
               <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500 w-16">排序</th>
-              <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500 w-16">状态</th>
+              <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500 w-20">状态</th>
               <th className="text-right py-2.5 px-4 text-xs font-medium text-gray-500 w-20">操作</th>
             </tr>
           </thead>
@@ -118,8 +118,8 @@ export default function SampleQuestionsPage() {
                 <td className="py-2.5 px-4">{q.question}</td>
                 <td className="py-2.5 px-4 text-xs text-gray-500">{q.kbId || "全局"}</td>
                 <td className="py-2.5 px-4 text-xs">{q.sortOrder}</td>
-                <td className="py-2.5 px-4">
-                  <span className={`text-xs px-1.5 py-0.5 rounded ${q.enabled ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-400"}`}>
+                <td className="py-2.5 px-4 whitespace-nowrap">
+                  <span className={`inline-block text-xs px-1.5 py-0.5 rounded whitespace-nowrap ${q.enabled ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-400"}`}>
                     {q.enabled ? "启用" : "禁用"}
                   </span>
                 </td>

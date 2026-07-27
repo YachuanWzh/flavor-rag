@@ -47,7 +47,10 @@ async def _seed_admin_user():
             ).scalar_one_or_none()
             if tenant is None:
                 session.add(Tenant(id="default", name="Default Tenant", enabled=1))
-                await session.flush()
+                # Commit the tenant eagerly: it must exist even when the
+                # admin seed below is skipped (users already present), because
+                # User.tenant_id defaults to "default" (FK to t_tenant).
+                await session.commit()
             result = await session.execute(select(func.count(User.id)))
             user_count = result.scalar()
             if user_count == 0:

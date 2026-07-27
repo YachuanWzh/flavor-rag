@@ -536,6 +536,7 @@ class RAGPipeline:
                 "bboxes": r.bboxes,
                 "assets": r.assets,
                 "neighborOf": r.metadata.get("neighbor_of") or [],
+                "fileType": r.file_type or "",
             }
             for r in reranked
         ]
@@ -1060,6 +1061,7 @@ class RAGPipeline:
                 "blockType": r.block_type, "pageStart": r.page_start,
                 "pageEnd": r.page_end, "bboxes": r.bboxes, "assets": r.assets,
                 "neighborOf": r.metadata.get("neighbor_of") or [],
+                "fileType": r.file_type or "",
             }
             for r in reranked
         ]
@@ -1379,6 +1381,7 @@ class RAGPipeline:
                         KnowledgeChunk.bbox_json,
                         KnowledgeChunk.metadata_json,
                         KnowledgeDocument.doc_name,
+                        KnowledgeDocument.file_type,
                     )
                     .outerjoin(KnowledgeDocument, KnowledgeChunk.doc_id == KnowledgeDocument.id)
                     .where(
@@ -1399,6 +1402,7 @@ class RAGPipeline:
                         bbox_json,
                         metadata_json,
                         doc_name,
+                        file_type,
                     ) = row
                     indices = (
                         [id_to_index[chunk_id]]
@@ -1423,6 +1427,7 @@ class RAGPipeline:
                             **r.metadata,
                         }
                         r.doc_name = doc_name or "unknown"
+                        r.file_type = file_type or ""
 
                 asset_ids = {
                     asset_id

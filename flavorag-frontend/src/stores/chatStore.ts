@@ -187,6 +187,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   recommendedQuestions: payload.recommendedQuestions,
                   ragModes: payload.modes || m.ragModes,
                   retrievalChannels: payload.channels || m.retrievalChannels,
+                  citationStats: payload.citationStats || undefined,
                 }
               : m
           ),

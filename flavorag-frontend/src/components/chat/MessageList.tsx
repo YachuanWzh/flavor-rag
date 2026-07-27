@@ -7,7 +7,7 @@ interface Props {
   isStreaming?: boolean;
   streamingMessageId?: string | null;
   progressMessage?: string | null;
-  onViewSources?: (sources: NonNullable<Message["sources"]>) => void;
+  onViewSources?: (sources: NonNullable<Message["sources"]>, highlightIndex?: number) => void;
   onRecommendedQuestion?: (question: string) => void;
 }
 

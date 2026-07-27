@@ -177,7 +177,7 @@ export default function ChatInput({
           {/* 深度思考按钮已隐藏，默认开启 */}
           <ModeToggle
             active={neighborExpansion}
-            label="邻近补偿"
+            label="近邻补偿"
             description="召回每个chunk前后各两段作为上下文补偿"
             icon={<Layers className="h-3.5 w-3.5" />}
             tone="emerald"

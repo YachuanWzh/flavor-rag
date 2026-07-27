@@ -46,7 +46,7 @@ export default function MarkdownRenderer({
   const streamedContent = isStreaming ? safeForStreaming(content || "") : content;
   const safeContent = sourceCount
     ? streamedContent.replace(
-        /\[(\d+)\](?!\()/g,
+        /\[(\d+)\](?:\([^)]*\))?/g,
         (whole, value) => Number(value) <= sourceCount ? `[${value}](source:${value})` : whole,
       )
     : streamedContent;
@@ -136,7 +136,7 @@ export default function MarkdownRenderer({
                 return (
                   <button
                     type="button"
-                    onClick={() => onSourceClick?.(index)}
+                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); onSourceClick?.(index); }}
                     className="mx-0.5 inline-flex min-w-5 items-center justify-center rounded bg-cyan-50 px-1 font-mono text-[10px] font-semibold text-cyan-700 ring-1 ring-inset ring-cyan-200 hover:bg-cyan-100"
                     title={`查看来源 ${index + 1}`}
                   >

@@ -11,6 +11,7 @@ import SessionList from "@/components/session/SessionList";
 import ChatInput from "@/components/chat/ChatInput";
 import MessageList from "@/components/chat/MessageList";
 import SourcesDrawer from "@/components/chat/SourcesDrawer";
+import DocumentPreviewModal from "@/components/chat/DocumentPreviewModal";
 import KnowledgeGraphPanel from "@/components/chat/KnowledgeGraphPanel";
 
 export default function ChatPage() {
@@ -34,6 +35,9 @@ export default function ChatPage() {
   // Sources drawer state
   const [drawerSources, setDrawerSources] = useState<SourceRef[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerHighlight, setDrawerHighlight] = useState<number | null>(null);
+  // Direct PDF preview state (citation click)
+  const [previewSource, setPreviewSource] = useState<SourceRef | null>(null);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -86,8 +90,15 @@ export default function ChatPage() {
     sendMessage(text);
   };
 
-  const handleViewSources = (sources: SourceRef[]) => {
+  const handleViewSources = (sources: SourceRef[], highlightIndex?: number) => {
+    // 点击具体引用编号时，直接弹出 PDF 预览
+    if (highlightIndex != null && sources[highlightIndex]?.documentId) {
+      setPreviewSource(sources[highlightIndex]);
+      return;
+    }
+    // 否则打开来源抽屉
     setDrawerSources(sources);
+    setDrawerHighlight(highlightIndex ?? null);
     setDrawerOpen(true);
   };
 
@@ -241,7 +252,22 @@ export default function ChatPage() {
         open={drawerOpen}
         sources={drawerSources}
         onClose={() => setDrawerOpen(false)}
+        highlightIndex={drawerHighlight}
       />
+
+      {/* Direct citation PDF preview */}
+      {previewSource && (
+        <DocumentPreviewModal
+          open={!!previewSource}
+          documentId={previewSource.documentId}
+          docName={previewSource.docName}
+          fileType={previewSource.fileType}
+          pageStart={previewSource.pageStart}
+          bboxes={previewSource.bboxes}
+          sourceContent={previewSource.content}
+          onClose={() => setPreviewSource(null)}
+        />
+      )}
     </div>
   );
 }

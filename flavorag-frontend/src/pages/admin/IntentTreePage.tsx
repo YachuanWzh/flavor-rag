@@ -232,10 +232,10 @@ export default function IntentTreePage() {
             <tr>
               <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500">意图编码</th>
               <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500">名称</th>
-              <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500">路由</th>
+              <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500 w-28">路由</th>
               <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500">父节点</th>
               <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500">Collection</th>
-              <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500">状态</th>
+              <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500 w-16">状态</th>
               <th className="text-right py-2.5 px-4 text-xs font-medium text-gray-500 w-20">操作</th>
             </tr>
           </thead>
@@ -248,15 +248,15 @@ export default function IntentTreePage() {
                   </span>
                 </td>
                 <td className="py-2.5 px-4">{n.name}</td>
-                <td className="py-2.5 px-4">
-                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                <td className="py-2.5 px-4 whitespace-nowrap">
+                  <span className="inline-block rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600 whitespace-nowrap">
                     {n.kind || "KB"} · {Math.round((n.scoreThreshold ?? 0.3) * 100)}%
                   </span>
                 </td>
                 <td className="py-2.5 px-4 text-gray-500">{n.parentIntentCode || "—"}</td>
                 <td className="py-2.5 px-4 text-gray-500 text-xs">{n.collectionName || "—"}</td>
-                <td className="py-2.5 px-4">
-                  <span className={`text-xs px-1.5 py-0.5 rounded ${n.enabled ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-400"}`}>
+                <td className="py-2.5 px-4 whitespace-nowrap">
+                  <span className={`inline-block text-xs px-1.5 py-0.5 rounded whitespace-nowrap ${n.enabled ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-400"}`}>
                     {n.enabled ? "启用" : "禁用"}
                   </span>
                 </td>

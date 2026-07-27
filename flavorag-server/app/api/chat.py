@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timezone
 
@@ -28,6 +29,44 @@ from app.security.service import (
 )
 
 router = APIRouter(prefix="/api/rag/v3", tags=["chat"])
+
+
+def _ensure_citations(answer: str, sources: list[dict]) -> tuple[str, dict]:
+    """Post-generation citation validation.
+
+    If the answer lacks any [N] citation markers referencing valid sources,
+    append a '参考来源' footnote block so the frontend always has clickable
+    citations.  Returns (updated_answer, citation_stats).
+    """
+    if not sources:
+        return answer, {"cited": [], "total": 0, "autoAppended": False}
+
+    cited = sorted(
+        int(m)
+        for m in re.findall(r"\[(\d+)\](?!\()", answer)
+        if 1 <= int(m) <= len(sources)
+    )
+    cited_set = set(cited)
+
+    if cited_set:
+        return answer, {
+            "cited": cited,
+            "total": len(sources),
+            "autoAppended": False,
+        }
+
+    # No valid citations found — append footnote block
+    lines = ["\n\n---\n**参考来源**\n"]
+    for i, src in enumerate(sources, 1):
+        doc_name = src.get("docName") or "未知文档"
+        page = f"（第{src['pageStart']}页）" if src.get("pageStart") else ""
+        lines.append(f"[{i}] {doc_name}{page}")
+    updated = answer + "\n".join(lines)
+    return updated, {
+        "cited": list(range(1, len(sources) + 1)),
+        "total": len(sources),
+        "autoAppended": True,
+    }
 
 
 @router.get("/chat")
@@ -64,31 +103,47 @@ async def chat(
         if not await rl.check_ip(client_ip):
             raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
 
-    # Trace
-    trace = TraceLogger(db)
-    trace_id = await trace.trace_query(
-        query=question,
-        user_id=user.id,
-        conversation_id=conversation_id or "",
-        tenant_id=user.tenant_id or "default",
-        kb_id=kb_id,
-    )
-
-    rag_pipeline = RAGPipeline(trace_logger=trace)
-
-    # Auto-create conversation if not provided
-    if not conversation_id:
-        conv = Conversation(
-            id=gen_id(),
-            conversation_id=gen_id(),
+    # Trace + conversation setup.
+    # NOTE: SQLite only allows a single writer at a time.  The SSE stream
+    # below can run for tens of seconds, so we commit eagerly after each
+    # write phase to release the write lock instead of holding it for the
+    # whole request (which caused "database is locked" under concurrency).
+    try:
+        trace = TraceLogger(db)
+        trace_id = await trace.trace_query(
+            query=question,
             user_id=user.id,
+            conversation_id=conversation_id or "",
             tenant_id=user.tenant_id or "default",
-            title=question[:30] + ("..." if len(question) > 30 else ""),
-            last_time=datetime.now(timezone.utc).replace(tzinfo=None),
+            kb_id=kb_id,
         )
-        db.add(conv)
-        await db.flush()
-        conversation_id = conv.id
+
+        rag_pipeline = RAGPipeline(trace_logger=trace)
+
+        # Auto-create conversation if not provided
+        if not conversation_id:
+            conv = Conversation(
+                id=gen_id(),
+                conversation_id=gen_id(),
+                user_id=user.id,
+                tenant_id=user.tenant_id or "default",
+                title=question[:30] + ("..." if len(question) > 30 else ""),
+                last_time=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+            db.add(conv)
+            await db.flush()
+            conversation_id = conv.id
+
+        # Release the write lock before the long-running retrieval/stream.
+        await db.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail=f"服务繁忙，请稍后重试（{type(exc).__name__}）",
+        ) from exc
 
     chat_service = ChatService(db, user_id=user.id)
 
@@ -108,6 +163,8 @@ async def chat(
             # 2. Save user message
             await chat_service.save_message(conversation_id=conversation_id, role="user", content=question)
             await db.flush()
+            # Release SQLite write lock before the (slow) retrieval phase.
+            await db.commit()
 
             # 3. Resolve kb_id → collection_name (auto-select first KB if none given)
             resolved_kb_id = kb_id
@@ -175,6 +232,9 @@ async def chat(
             else:
                 rag_result = await rag_pipeline.run(ctx)
 
+            # Release SQLite write lock before streaming the (slow) LLM answer.
+            await db.commit()
+
             # 5. Send meta
             meta = json.dumps(
                 {
@@ -241,6 +301,7 @@ async def chat(
                     },
                 )
                 await db.flush()
+                await db.commit()
                 yield (
                     "event: finish\ndata: "
                     + json.dumps(
@@ -304,6 +365,7 @@ async def chat(
                     },
                 )
                 await db.flush()
+                await db.commit()
                 finish = json.dumps(
                     {
                         "messageId": assistant_msg_id,
@@ -386,6 +448,11 @@ async def chat(
 
             llm_duration = int((time.time() - t_llm_start) * 1000)
 
+            # 8.5 Citation validation — append footnotes if LLM omitted [N] refs
+            full_content, citation_stats = _ensure_citations(
+                full_content, rag_result.sources
+            )
+
             # 9. Save assistant message
             recommended_questions = await recommend_questions(
                 db,
@@ -432,6 +499,7 @@ async def chat(
                     "hyde": hyde,
                 },
             )
+            await db.commit()
 
             # 11. Send finish
             finish = json.dumps(
@@ -439,6 +507,7 @@ async def chat(
                     "messageId": assistant_msg_id,
                     "sources": rag_result.sources,
                     "recommendedQuestions": recommended_questions,
+                    "citationStats": citation_stats,
                     "modes": {
                         "agenticRag": effective_agentic_rag,
                         "graphRag": effective_graph_rag,
@@ -452,7 +521,17 @@ async def chat(
             yield "event: done\ndata: {}\n\n"
 
         except Exception as e:
-            error_msg = str(e)
+            # Some exceptions (e.g. asyncio.TimeoutError) stringify to an
+            # empty string; fall back to the class name so the client never
+            # sees a blank "Unknown error".
+            error_msg = str(e) or type(e).__name__
+            # A failed flush leaves the session in a "pending rollback" state;
+            # clear it so the finalize below (and get_db's commit) can proceed
+            # without raising PendingRollbackError.
+            try:
+                await db.rollback()
+            except Exception:
+                pass
             if trace_id:
                 try:
                     await trace.finalize(trace_id, status="error", error_message=error_msg)

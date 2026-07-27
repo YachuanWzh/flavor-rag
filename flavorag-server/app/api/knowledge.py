@@ -1,18 +1,21 @@
 """Knowledge base CRUD API + document upload + URL source."""
 from __future__ import annotations
 
+import mimetypes
 import os
 import shutil
 import traceback
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, Form
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.database.session import get_db
 from app.auth.dependencies import get_current_user
+from app.auth.jwt import decode_access_token
 from app.audit.middleware import get_audit_context
 from app.audit.service import record_audit
 from app.models import (
@@ -1272,3 +1275,71 @@ async def reindex_if_changed(
             "chunkCount": chunk_count,
         },
     }
+
+
+# ---- Document Preview ----
+
+_CONTENT_TYPE_MAP = {
+    "pdf": "application/pdf",
+    "md": "text/markdown; charset=utf-8",
+    "txt": "text/plain; charset=utf-8",
+    "html": "text/html; charset=utf-8",
+    "htm": "text/html; charset=utf-8",
+    "csv": "text/csv; charset=utf-8",
+}
+
+
+@router.get("/docs/{doc_id}/preview")
+async def preview_document(
+    doc_id: str,
+    request: Request,
+    token: str | None = Query(None, description="JWT token (for PDF.js / <img> tags)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve the original document file for in-browser preview.
+
+    Supports Range requests (required by PDF.js for large files).
+    Auth: user must have READ permission on the document's knowledge base.
+    Token can be provided via Authorization header OR ?token= query param.
+    """
+    # Resolve user from query param first, then Authorization header
+    jwt = token
+    if not jwt:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            jwt = auth_header[7:]
+    if not jwt:
+        raise HTTPException(status_code=401, detail="未提供认证Token")
+
+    payload = decode_access_token(jwt)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Token无效或已过期")
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Token格式错误")
+
+    result = await db.execute(select(User).where(User.id == user_id, User.deleted == 0))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="用户不存在")
+
+    doc = await require_document(
+        db, principal_from_user(user), doc_id, Permission.READ
+    )
+
+    file_path = doc.file_url
+    if not file_path or not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="源文件不存在或已被移除")
+
+    ext = (doc.file_type or os.path.splitext(file_path)[1].lstrip(".")).lower()
+    content_type = _CONTENT_TYPE_MAP.get(ext)
+    if not content_type:
+        content_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+
+    return FileResponse(
+        path=file_path,
+        media_type=content_type,
+        filename=doc.doc_name or os.path.basename(file_path),
+        headers={"Accept-Ranges": "bytes"},
+    )

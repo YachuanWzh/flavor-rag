@@ -9,12 +9,28 @@ from app.observability.metrics import RAG_RUNS
 
 
 class TraceLogger:
-    """Logs full RAG pipeline traces to PostgreSQL for observability."""
+    """Logs full RAG pipeline traces to PostgreSQL for observability.
+
+    NOTE on SQLite concurrency: every write below commits immediately.
+    SQLite allows only a single writer at a time; the RAG pipeline can run
+    for tens of seconds, so if trace writes kept the request transaction
+    open they would hold the write lock for the whole run and concurrent
+    requests would fail with "database is locked".  Trace data is
+    observability-only, so committing it eagerly (independently of the
+    business transaction) is safe and keeps the write-lock window tiny.
+    """
 
     def __init__(self, db: AsyncSession):
         self.db = db
         self._trace_run: RagTraceRun | None = None
         self._otel_span = None
+
+    async def _commit(self) -> None:
+        """Commit trace writes immediately to release the SQLite write lock."""
+        try:
+            await self.db.commit()
+        except Exception:  # pragma: no cover - best effort observability
+            await self.db.rollback()
 
     async def trace_query(
         self,
@@ -43,6 +59,7 @@ class TraceLogger:
         )
         self.db.add(run)
         await self.db.flush()
+        await self._commit()
         self._trace_run = run
         self._otel_span = otel.start_rag_span(
             "rag.run",
@@ -89,6 +106,7 @@ class TraceLogger:
         )
         self.db.add(node)
         await self.db.flush()
+        await self._commit()
         if start_time and end_time:
             otel.record_child_span(
                 self._otel_span,
@@ -124,6 +142,7 @@ class TraceLogger:
         if metadata:
             run.metadata_json = {**(run.metadata_json or {}), **metadata}
         await self.db.flush()
+        await self._commit()
 
     async def finalize(
         self,
@@ -175,6 +194,8 @@ class TraceLogger:
             run.error_message = error_message
             run.rejection_reason = rejection_reason
             run.metadata_json = metadata
+            await self.db.flush()
+            await self._commit()
 
     async def get_trace(
         self,

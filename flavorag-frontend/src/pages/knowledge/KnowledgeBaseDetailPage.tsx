@@ -357,8 +357,8 @@ export default function KnowledgeBaseDetailPage() {
                       key={i}
                       className="flex items-center justify-between text-sm text-gray-600 bg-gray-50 rounded px-3 py-1.5"
                     >
-                      <span className="truncate">{f.name}</span>
-                      <span className="text-xs text-gray-400 ml-2 shrink-0">
+                      <span className="flex-1 min-w-0 truncate">{f.name}</span>
+                      <span className="text-xs text-gray-400 ml-3 w-[60px] text-right shrink-0 tabular-nums font-mono">
                         {(f.size / 1024).toFixed(1)} KB
                       </span>
                       <button

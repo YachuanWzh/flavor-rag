@@ -1,5 +1,6 @@
 import type {
   AgentStep,
+  CitationStats,
   RagModes,
   RetrievalChannelStatus,
   SourceRef,
@@ -25,6 +26,7 @@ export interface StreamHandlers {
     recommendedQuestions?: string[];
     modes?: RagModes;
     channels?: Record<string, RetrievalChannelStatus>;
+    citationStats?: CitationStats;
   }) => void;
   onDone?: () => void;
   onCancel?: (payload: unknown) => void;
@@ -104,7 +106,9 @@ export function createStreamResponse(
             handlers.onCancel?.(payload);
             break;
           case "error":
-            handlers.onError?.(new Error(payload?.error || "Unknown error"));
+            handlers.onError?.(
+              new Error(payload?.error || "服务暂时不可用，请稍后重试")
+            );
             break;
         }
         eventName = "message";

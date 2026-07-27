@@ -19,6 +19,7 @@ class SearchResult:
     bboxes: list[dict] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
     assets: list[dict] = field(default_factory=list)
+    file_type: str = ""
 
 
 class SearchChannel(ABC):

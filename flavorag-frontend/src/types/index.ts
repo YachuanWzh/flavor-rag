@@ -32,6 +32,7 @@ export interface Message {
   appliedMappings?: AppliedMapping[];
   hydeDoc?: string;
   hydeMeta?: { model?: string; durationMs?: number; timedOut?: boolean };
+  citationStats?: CitationStats;
 }
 
 export interface SourceRef {
@@ -61,7 +62,14 @@ export interface SourceRef {
     mimeType?: string;
     description?: string;
   }>;
-  neighborOf?: string[];  // 邻近补偿：该证据关联的父分块 ID
+  neighborOf?: string[];  // 近邻补偿：该证据关联的父分块 ID
+  fileType?: string;      // 源文件类型 (pdf, md, txt...)
+}
+
+export interface CitationStats {
+  cited: number[];
+  total: number;
+  autoAppended: boolean;
 }
 
 // ---- Knowledge Base ----

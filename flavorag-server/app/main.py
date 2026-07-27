@@ -19,6 +19,7 @@ from app.api.security import router as security_router
 from app.api.evaluation import router as evaluation_router
 from app.api.graph import router as graph_router
 from app.api.monitoring import router as monitoring_router
+from app.api.assets import router as assets_router
 from app.config.settings import settings
 from app.config.logging_config import get_logger, configure_root_logger
 from app.observability.metrics import MetricsMiddleware, render_metrics
@@ -223,6 +224,7 @@ app.include_router(security_router)
 app.include_router(evaluation_router)
 app.include_router(graph_router)
 app.include_router(monitoring_router)
+app.include_router(assets_router)
 
 
 @app.get("/api/health")

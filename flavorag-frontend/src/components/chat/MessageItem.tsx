@@ -1,6 +1,7 @@
 import { useState, useCallback } from "react";
 import type { Message } from "@/types";
 import MarkdownRenderer from "./MarkdownRenderer";
+import SourceMedia from "./SourceMedia";
 import ThinkingIndicator from "./ThinkingIndicator";
 import { submitFeedback } from "@/services/feedbackService";
 import { ArrowUpRight, ChevronDown, ChevronUp, Network, Orbit } from "lucide-react";
@@ -160,6 +161,11 @@ export default function MessageItem({
               </div>
             )}
           </div>
+        )}
+
+        {/* Inline source media (images & tables) */}
+        {!isUser && message.sources && message.sources.length > 0 && (
+          <SourceMedia sources={message.sources} />
         )}
 
         {/* Sources button */}

@@ -1376,8 +1376,9 @@ class RAGPipeline:
                     )
                     assets_by_id = {
                         row.id: {
-                            "id": row.id,
-                            "url": row.storage_url,
+                            "assetId": row.id,
+                            "storageUrl": row.storage_url,
+                            "url": f"/api/assets/{row.id}",
                             "mimeType": row.mime_type,
                             "description": row.description,
                             "pageNo": row.page_no,
@@ -1391,5 +1392,15 @@ class RAGPipeline:
                             for asset_id in result.metadata.get("asset_ids", [])
                             if asset_id in assets_by_id
                         ]
+                        # Replace raw S3 URLs in chunk content with proxy
+                        # URLs so that LLM context (and any markdown image
+                        # the LLM reproduces) points to the authenticated
+                        # proxy endpoint instead of the private bucket.
+                        for asset_id in result.metadata.get("asset_ids", []):
+                            asset = assets_by_id.get(asset_id)
+                            if asset and asset.get("storageUrl"):
+                                result.content = result.content.replace(
+                                    asset["storageUrl"], asset["url"]
+                                )
         except Exception as exc:
             _log.warning("Failed to resolve chunk metadata from PG: %s", exc)

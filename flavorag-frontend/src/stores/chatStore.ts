@@ -262,5 +262,6 @@ function formatMessage(m: any): Message {
     agentSteps: m.agentSteps,
     ragModes: m.ragModes,
     retrievalChannels: m.retrievalChannels,
+    appliedMappings: m.appliedMappings,
   };
 }

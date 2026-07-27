@@ -272,7 +272,11 @@ export default function SourcesDrawer({ open, sources, onClose }: Props) {
                         <SectionTitle icon={<ImageIcon />} title="关联图片" />
                         <div className="mt-2 grid grid-cols-2 gap-2">
                           {source.assets.map((asset, assetIndex) => {
-                            const url = asset.storageUrl || asset.url;
+                            const token = localStorage.getItem("token") || "";
+                            const qs = token ? `?token=${encodeURIComponent(token)}` : "";
+                            const url = asset.assetId
+                              ? `/api/assets/${asset.assetId}${qs}`
+                              : ((asset.storageUrl || asset.url) || "") + qs;
                             return url ? (
                               <a
                                 key={asset.assetId || assetIndex}

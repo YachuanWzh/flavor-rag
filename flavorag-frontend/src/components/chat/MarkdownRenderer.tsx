@@ -105,6 +105,24 @@ export default function MarkdownRenderer({
                 <td className="border border-gray-300 px-2 py-1">{children}</td>
               );
             },
+            img({ src, alt }) {
+              // Auto-append token for proxy asset URLs so <img> can authenticate
+              let finalSrc = src;
+              if (typeof src === "string" && src.startsWith("/api/assets/") && !src.includes("token=")) {
+                const token = localStorage.getItem("token") || "";
+                if (token) {
+                  finalSrc = src + (src.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
+                }
+              }
+              return (
+                <img
+                  src={finalSrc}
+                  alt={alt}
+                  className="max-w-full rounded-lg my-2 border border-slate-200"
+                  loading="lazy"
+                />
+              );
+            },
             blockquote({ children }) {
               return (
                 <blockquote className="border-l-3 border-blue-400 pl-3 my-2 italic text-gray-600 text-xs">

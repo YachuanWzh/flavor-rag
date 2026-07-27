@@ -171,6 +171,10 @@ async def chat(
                     },
                     "channels": rag_result.channel_statuses,
                     "queryUnderstanding": rag_result.intent,
+                    "appliedMappings": [
+                        {"source": m["source"], "target": m["target"], "type": m["type"]}
+                        for m in rag_result.applied_mappings
+                    ],
                 }
             )
             yield f"event: meta\ndata: {meta}\n\n"

@@ -127,6 +127,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   ...m,
                   ragModes: payload.modes,
                   retrievalChannels: payload.channels,
+                  appliedMappings: payload.appliedMappings,
                 }
               : m
           ),

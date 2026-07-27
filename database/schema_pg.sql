@@ -273,6 +273,7 @@ CREATE TABLE t_query_term_mapping (
     target_term  VARCHAR(128) NOT NULL,
     mapping_type VARCHAR(32) DEFAULT 'EXACT',  -- EXACT / SYNONYM / ABBREVIATION
     enabled      SMALLINT DEFAULT 1,
+    hit_count    INTEGER DEFAULT 0,
     create_time  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     update_time  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     deleted      SMALLINT DEFAULT 0

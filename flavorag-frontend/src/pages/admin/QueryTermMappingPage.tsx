@@ -9,6 +9,7 @@ interface TermMapping {
   kbId: string | null;
   mappingType: string;
   enabled: number;
+  hitCount: number;
 }
 
 const MAPPING_TYPES = ["EXACT", "SYNONYM", "ABBREVIATION"];
@@ -138,6 +139,7 @@ export default function QueryTermMappingPage() {
               <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500">→ 目标词</th>
               <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500 w-20">类型</th>
               <th className="text-left py-2.5 px-4 text-xs font-medium text-gray-500 w-20">状态</th>
+              <th className="text-right py-2.5 px-4 text-xs font-medium text-gray-500 w-16">命中次数</th>
               <th className="text-right py-2.5 px-4 text-xs font-medium text-gray-500 w-20">操作</th>
             </tr>
           </thead>
@@ -159,6 +161,13 @@ export default function QueryTermMappingPage() {
                     {m.enabled ? "启用" : "禁用"}
                   </span>
                 </td>
+                <td className="py-2.5 px-4 text-right text-xs text-gray-500">
+                  {m.hitCount > 0 ? (
+                    <span className="font-mono text-violet-600">{m.hitCount}</span>
+                  ) : (
+                    <span className="text-gray-300">0</span>
+                  )}
+                </td>
                 <td className="py-2.5 px-4 text-right">
                   <button onClick={() => startEdit(m)} className="p-1 text-gray-400 hover:text-blue-500 rounded"><Edit3 size={14} /></button>
                   <button onClick={() => handleDelete(m.id)} className="p-1 text-gray-400 hover:text-red-500 rounded"><Trash2 size={14} /></button>
@@ -166,7 +175,7 @@ export default function QueryTermMappingPage() {
               </tr>
             ))}
             {items.length === 0 && (
-              <tr><td colSpan={5} className="py-8 text-center text-gray-400">暂无映射</td></tr>
+              <tr><td colSpan={6} className="py-8 text-center text-gray-400">暂无映射</td></tr>
             )}
           </tbody>
         </table>

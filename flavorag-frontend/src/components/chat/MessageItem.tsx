@@ -3,7 +3,7 @@ import type { Message } from "@/types";
 import MarkdownRenderer from "./MarkdownRenderer";
 import ThinkingIndicator from "./ThinkingIndicator";
 import { submitFeedback } from "@/services/feedbackService";
-import { ArrowUpRight, Network, Orbit } from "lucide-react";
+import { ArrowUpRight, ChevronDown, ChevronUp, Network, Orbit } from "lucide-react";
 
 interface Props {
   message: Message;
@@ -22,6 +22,7 @@ export default function MessageItem({
   const [feedbackVote, setFeedbackVote] = useState<number>(0); // 0=none, 1=up, -1=down
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [showFeedbackReasons, setShowFeedbackReasons] = useState(false);
+  const [showMappings, setShowMappings] = useState(false);
 
   const handleFeedback = useCallback(async (vote: number, reason?: string) => {
     if (feedbackSubmitting || !message.id || message.id.startsWith("asst_")) return;
@@ -98,6 +99,43 @@ export default function MessageItem({
                 <Network className="h-3 w-3" />
                 Graph {Number(message.retrievalChannels?.graph?.count || 0)} 条证据
               </span>
+            )}
+          </div>
+        )}
+
+        {/* Applied term mappings */}
+        {!isUser && message.appliedMappings && message.appliedMappings.length > 0 && (
+          <div className={`mt-2 ${(message.ragModes?.agenticRag || message.ragModes?.graphRag) ? "" : "border-t border-slate-200/70 pt-2"}`}>
+            {message.appliedMappings.length === 1 ? (
+              <span className="inline-flex items-center gap-1.5 rounded-md border border-violet-200 bg-violet-50 px-2 py-1 text-[10px] font-medium text-violet-800">
+                <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M7 7h10M7 11h4m-4 4h8m-8 4h6" />
+                </svg>
+                已映射: {message.appliedMappings[0].source} → {message.appliedMappings[0].target}
+              </span>
+            ) : (
+              <div>
+                <button
+                  onClick={() => setShowMappings(!showMappings)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-violet-200 bg-violet-50 px-2 py-1 text-[10px] font-medium text-violet-800 hover:bg-violet-100 transition-colors"
+                >
+                  <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M7 7h10M7 11h4m-4 4h8m-8 4h6" />
+                  </svg>
+                  已映射 {message.appliedMappings.length} 项
+                  {showMappings ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                </button>
+                {showMappings && (
+                  <div className="mt-1.5 space-y-0.5">
+                    {message.appliedMappings.map((m, i) => (
+                      <div key={i} className="text-[10px] text-violet-700 pl-5">
+                        {m.source} → {m.target}
+                        <span className="ml-1.5 text-violet-400">({m.type})</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
           </div>
         )}

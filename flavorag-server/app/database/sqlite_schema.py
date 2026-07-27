@@ -38,6 +38,7 @@ _COMPATIBILITY_COLUMNS: dict[str, dict[str, str]] = {
     },
     "t_query_term_mapping": {
         "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+        "hit_count": "INTEGER DEFAULT 0",
     },
     "t_sample_question": {
         "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",

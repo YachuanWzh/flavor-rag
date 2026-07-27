@@ -74,6 +74,7 @@ class RAGResult:
     response_mode: str = "rag"
     direct_response: str | None = None
     prompt_template: str | None = None
+    applied_mappings: list[dict] = field(default_factory=list)
 
 
 class RAGPipeline:
@@ -183,6 +184,7 @@ class RAGPipeline:
                 model_base_url=model_base_url,
                 model_api_key=model_api_key,
                 subqueries=rewrite_result.subqueries,
+                applied_mappings=rewrite_result.applied_mappings,
                 response_mode="guidance",
                 direct_response=intent_resolution.guidance_prompt,
             )
@@ -202,6 +204,7 @@ class RAGPipeline:
                 model_base_url=model_base_url,
                 model_api_key=model_api_key,
                 subqueries=rewrite_result.subqueries,
+                applied_mappings=rewrite_result.applied_mappings,
                 response_mode="system",
             )
 
@@ -568,6 +571,7 @@ class RAGPipeline:
                 name: status.__dict__ for name, status in channel_statuses.items()
             },
             subqueries=subqueries,
+            applied_mappings=rewrite_result.applied_mappings,
         )
 
     async def _expand_neighbors(

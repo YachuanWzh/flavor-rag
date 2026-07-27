@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -66,6 +67,7 @@ async def load_term_mappings(
             )
             mappings = [
                 {
+                    "id": row.id,
                     "source": row.source_term.strip(),
                     "target": row.target_term.strip(),
                     "type": (row.mapping_type or "EXACT").upper(),
@@ -97,6 +99,29 @@ def normalize_query(question: str, mappings: list[dict]) -> tuple[str, list[dict
     return normalized, applied
 
 
+async def _bump_mapping_hit_counts(applied: list[dict]) -> None:
+    """Increment hit_count for applied mappings (fire-and-forget)."""
+    if not applied:
+        return
+    try:
+        from sqlalchemy import update
+
+        async with async_session_factory() as session:
+            for mapping in applied:
+                mapping_id = mapping.get("id")
+                if not mapping_id:
+                    continue
+                await session.execute(
+                    update(QueryTermMapping)
+                    .where(QueryTermMapping.id == mapping_id)
+                    .values(hit_count=QueryTermMapping.hit_count + 1)
+                )
+            await session.commit()
+    except Exception:
+        # Must never break the query pipeline.
+        pass
+
+
 async def rewrite_query_result(
     question: str,
     history: list[dict] | None = None,
@@ -108,6 +133,8 @@ async def rewrite_query_result(
     limit = max(1, max_queries or settings.query_decomposition_max_queries)
     mappings = await load_term_mappings(kb_id=kb_id, tenant_id=tenant_id)
     normalized, applied = normalize_query(question, mappings)
+    if applied:
+        asyncio.create_task(_bump_mapping_hit_counts(applied))
     if not normalized:
         return RewriteResult(question, "", "", [], applied)
 

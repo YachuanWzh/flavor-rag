@@ -11,6 +11,7 @@ export interface StreamHandlers {
     taskId: string;
     modes?: RagModes;
     channels?: Record<string, RetrievalChannelStatus>;
+    appliedMappings?: Array<{ source: string; target: string; type: string }>;
   }) => void;
   onAgent?: (payload: { steps: AgentStep[] }) => void;
   onMessage?: (payload: { type: string; delta: string }) => void;

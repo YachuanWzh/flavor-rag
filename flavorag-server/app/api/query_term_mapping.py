@@ -54,6 +54,7 @@ async def list_mappings(
             "kbId": m.kb_id,
             "mappingType": m.mapping_type,
             "enabled": m.enabled,
+            "hitCount": m.hit_count or 0,
             "createTime": str(m.create_time),
         }
         for m in items

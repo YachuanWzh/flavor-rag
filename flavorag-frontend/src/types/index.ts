@@ -12,6 +12,12 @@ export interface Session {
   lastTime: string;
 }
 
+export interface AppliedMapping {
+  source: string;
+  target: string;
+  type: string;
+}
+
 export interface Message {
   id: string;
   role: "user" | "assistant";
@@ -23,6 +29,7 @@ export interface Message {
   agentSteps?: AgentStep[];
   ragModes?: RagModes;
   retrievalChannels?: Record<string, RetrievalChannelStatus>;
+  appliedMappings?: AppliedMapping[];
 }
 
 export interface SourceRef {

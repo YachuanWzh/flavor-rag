@@ -218,6 +218,7 @@ class QueryTermMapping(Base, TimestampMixin):
     target_term = Column(String(128), nullable=False)
     mapping_type = Column(String(32), default="EXACT")
     enabled = Column(SmallInteger, default=1)
+    hit_count = Column(Integer, default=0)
 
 
 class SampleQuestion(Base, TimestampMixin):

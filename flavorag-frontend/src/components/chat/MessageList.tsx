@@ -6,6 +6,7 @@ interface Props {
   messages: Message[];
   isStreaming?: boolean;
   streamingMessageId?: string | null;
+  progressMessage?: string | null;
   onViewSources?: (sources: NonNullable<Message["sources"]>) => void;
   onRecommendedQuestion?: (question: string) => void;
 }
@@ -14,6 +15,7 @@ export default function MessageList({
   messages,
   isStreaming,
   streamingMessageId,
+  progressMessage,
   onViewSources,
   onRecommendedQuestion,
 }: Props) {
@@ -30,6 +32,7 @@ export default function MessageList({
           key={msg.id}
           message={msg}
           isStreaming={isStreaming && msg.id === streamingMessageId}
+          progressMessage={msg.id === streamingMessageId ? progressMessage : null}
           onViewSources={onViewSources}
           onRecommendedQuestion={onRecommendedQuestion}
         />

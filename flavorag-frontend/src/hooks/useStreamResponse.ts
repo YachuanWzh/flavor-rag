@@ -16,6 +16,7 @@ export interface StreamHandlers {
   onAgent?: (payload: { steps: AgentStep[] }) => void;
   onMessage?: (payload: { type: string; delta: string }) => void;
   onThinking?: (payload: { type: string; delta: string }) => void;
+  onProgress?: (payload: { stage: string; message: string }) => void;
   onFinish?: (payload: {
     messageId: string;
     sources?: SourceRef[];
@@ -77,6 +78,9 @@ export function createStreamResponse(
         switch (eventName) {
           case "meta":
             handlers.onMeta?.(payload);
+            break;
+          case "progress":
+            handlers.onProgress?.(payload);
             break;
           case "message":
             if (payload?.type === "think") {

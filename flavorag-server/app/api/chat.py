@@ -1,4 +1,4 @@
-﻿"""SSE streaming chat API — GET /api/rag/v3/chat with trace + rate limit."""
+"""SSE streaming chat API — GET /api/rag/v3/chat with trace + rate limit."""
 from __future__ import annotations
 
 import json
@@ -93,6 +93,14 @@ async def chat(
 
     async def event_stream():
         try:
+            # ─── TTFT optimization: immediate feedback ───
+            if settings.ttft_early_feedback:
+                yield (
+                    "event: progress\ndata: "
+                    + json.dumps({"stage": "thinking", "message": "正在理解您的问题..."}, ensure_ascii=False)
+                    + "\n\n"
+                )
+
             # 1. History
             history = await chat_service.get_context(conversation_id, turns=8)
 
@@ -128,6 +136,12 @@ async def chat(
                 collection_name = kb.collection_name
 
             # 4. RAG retrieval
+            if settings.ttft_early_feedback:
+                yield (
+                    "event: progress\ndata: "
+                    + json.dumps({"stage": "retrieving", "message": "正在检索相关资料..."}, ensure_ascii=False)
+                    + "\n\n"
+                )
             ctx = RAGContext(
                 question=question, conversation_id=conversation_id,
                 kb_id=resolved_kb_id, collection_name=collection_name,
@@ -291,6 +305,12 @@ async def chat(
                 return
 
             # 6. Build prompt with context
+            if settings.ttft_early_feedback:
+                yield (
+                    "event: progress\ndata: "
+                    + json.dumps({"stage": "generating", "message": "正在生成回答..."}, ensure_ascii=False)
+                    + "\n\n"
+                )
             context_text = "\n\n---\n\n".join(
                 f"[来源 {i + 1}] {c['content']}" for i, c in enumerate(rag_result.context_chunks)
             )

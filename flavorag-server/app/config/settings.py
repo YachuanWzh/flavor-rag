@@ -117,6 +117,11 @@ class Settings(BaseSettings):
     intent_guidance_min_score: float = 0.55
     intent_guidance_score_gap: float = 0.08
 
+    # TTFT 优化
+    ttft_parallel_rewrite_intent: bool = True  # 并行执行 rewrite + intent
+    ttft_early_feedback: bool = True  # 立即发送 progress 事件给前端
+    ttft_speculative_search: bool = True  # rewrite 期间用原始 query 预搜索
+
     # 可观测性
     metrics_enabled: bool = True
     otel_enabled: bool = False

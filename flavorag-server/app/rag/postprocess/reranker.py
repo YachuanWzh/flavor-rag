@@ -1,4 +1,4 @@
-﻿"""Reranker — cross-encoder / LLM-based post-recall re-ranking."""
+"""Reranker — cross-encoder / LLM-based post-recall re-ranking."""
 from __future__ import annotations
 
 import httpx
@@ -15,6 +15,19 @@ _rerank_breaker = CircuitBreaker(
     recovery_timeout_sec=settings.circuit_breaker_recovery_sec,
     name="reranker",
 )
+
+# Persistent HTTP client for reranker API calls (avoids TCP handshake per request)
+_rerank_client: httpx.AsyncClient | None = None
+
+
+def _get_rerank_client() -> httpx.AsyncClient:
+    global _rerank_client
+    if _rerank_client is None or _rerank_client.is_closed:
+        _rerank_client = httpx.AsyncClient(
+            timeout=settings.reranker_timeout_sec,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+    return _rerank_client
 
 
 class Reranker:
@@ -88,28 +101,28 @@ class Reranker:
             "documents": documents,
             "top_n": top_n,
         }
-        async with httpx.AsyncClient(timeout=settings.reranker_timeout_sec) as client:
-            resp = await client.post(
-                f"{self.base_url}/rerank",
-                headers=headers,
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            results = data.get("results", [])
-            reranked: list[SearchResult] = []
-            for r in results:
-                idx = r["index"]
-                if idx < len(candidates):
-                    candidate = candidates[idx]
-                    candidate.score = float(
-                        r.get("relevance_score", r.get("score", candidate.score))
-                    )
-                    candidate.metadata["rerank_score"] = candidate.score
-                    reranked.append(candidate)
-            if not reranked:
-                raise RuntimeError("reranker returned no valid results")
-            return reranked[:top_n]
+        client = _get_rerank_client()
+        resp = await client.post(
+            f"{self.base_url}/rerank",
+            headers=headers,
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results", [])
+        reranked: list[SearchResult] = []
+        for r in results:
+            idx = r["index"]
+            if idx < len(candidates):
+                candidate = candidates[idx]
+                candidate.score = float(
+                    r.get("relevance_score", r.get("score", candidate.score))
+                )
+                candidate.metadata["rerank_score"] = candidate.score
+                reranked.append(candidate)
+        if not reranked:
+            raise RuntimeError("reranker returned no valid results")
+        return reranked[:top_n]
 
     async def _llm_based_rerank(
         self, query: str, candidates: list[SearchResult], top_n: int

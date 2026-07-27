@@ -17,6 +17,26 @@ from app.rag.governance import CircuitBreaker
 
 _model_breakers: dict[tuple[str, str], CircuitBreaker] = {}
 
+# ─── TTFT optimization: persistent HTTP client pool ───
+# Avoids repeated TCP/TLS handshakes for every LLM call (rewrite, intent, generation).
+_shared_client: httpx.AsyncClient | None = None
+
+
+def _get_shared_client() -> httpx.AsyncClient:
+    """Return a module-level persistent AsyncClient with connection pooling."""
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(120.0, connect=10.0),
+            limits=httpx.Limits(
+                max_connections=50,
+                max_keepalive_connections=20,
+                keepalive_expiry=60,
+            ),
+            http2=True,
+        )
+    return _shared_client
+
 
 def _model_breaker(base_url: str, model: str) -> CircuitBreaker:
     key = (base_url, model)
@@ -67,37 +87,37 @@ class LLMClient:
         breaker.before_call()
         stream_started = time.monotonic()
         first_token_at: float | None = None
+        client = _get_shared_client()
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                async with client.stream(
-                    "POST",
-                    f"{self.base_url}/chat/completions",
-                    headers=headers,
-                    json=payload,
-                ) as response:
-                    response.raise_for_status()
-                    async for line in response.aiter_lines():
-                        if line.startswith("data: "):
-                            data_str = line[6:]
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                data = json.loads(data_str)
-                                delta = data["choices"][0]["delta"]
-                                if "content" in delta and delta["content"]:
-                                    if first_token_at is None:
-                                        first_token_at = time.monotonic()
-                                        LLM_FIRST_TOKEN.labels(model=self.model).observe(
-                                            first_token_at - stream_started
-                                        )
-                                    yield delta["content"]
-                                if (
-                                    "reasoning_content" in delta
-                                    and delta["reasoning_content"]
-                                ):
-                                    yield f"__THINK__{delta['reasoning_content']}"
-                            except (json.JSONDecodeError, KeyError, IndexError):
-                                continue
+            async with client.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(data_str)
+                            delta = data["choices"][0]["delta"]
+                            if "content" in delta and delta["content"]:
+                                if first_token_at is None:
+                                    first_token_at = time.monotonic()
+                                    LLM_FIRST_TOKEN.labels(model=self.model).observe(
+                                        first_token_at - stream_started
+                                    )
+                                yield delta["content"]
+                            if (
+                                "reasoning_content" in delta
+                                and delta["reasoning_content"]
+                            ):
+                                yield f"__THINK__{delta['reasoning_content']}"
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            continue
         except Exception:
             breaker.record_failure()
             LLM_STREAM_FAILURES.labels(model=self.model).inc()

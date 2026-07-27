@@ -25,6 +25,7 @@ export default function ChatPage() {
     deepThinkingEnabled, setDeepThinking,
     agenticRagEnabled, setAgenticRag,
     graphRagEnabled, setGraphRag, neighborExpansionEnabled, setNeighborExpansion, graphRevision,
+    progressMessage,
   } = useChatStore();
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [initLoading, setInitLoading] = useState(true);
@@ -195,6 +196,7 @@ export default function ChatPage() {
                 messages={messages}
                 isStreaming={isStreaming}
                 streamingMessageId={streamingMessageId}
+                progressMessage={progressMessage}
                 onViewSources={handleViewSources}
                 onRecommendedQuestion={handleSend}
               />

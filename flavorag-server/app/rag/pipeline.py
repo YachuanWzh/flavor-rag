@@ -110,7 +110,11 @@ class RAGPipeline:
         )
         _pipeline_log.info("rag_pipeline_start", question=ctx.question[:80], kb_id=ctx.kb_id)
 
-        # 1. Query rewrite
+        # ─── TTFT optimization: parallel rewrite + intent + speculative search ───
+        if settings.ttft_parallel_rewrite_intent:
+            return await self._run_parallel(ctx, budget, t0, trace_id)
+
+        # 1. Query rewrite (sequential fallback)
         t_rewrite = datetime.now(timezone.utc).replace(tzinfo=None)
         rewrite_result = await rewrite_query_result(
             ctx.question,
@@ -572,6 +576,456 @@ class RAGPipeline:
             },
             subqueries=subqueries,
             applied_mappings=rewrite_result.applied_mappings,
+        )
+
+    async def _run_parallel(
+        self, ctx: RAGContext, budget: RetrievalBudget, t0: float, trace_id: str | None
+    ) -> RAGResult:
+        """TTFT-optimized pipeline: rewrite + intent + speculative search run concurrently."""
+        t_parallel_start = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        # Launch rewrite and intent concurrently
+        rewrite_task = asyncio.create_task(
+            rewrite_query_result(
+                ctx.question,
+                ctx.history,
+                kb_id=ctx.kb_id,
+                tenant_id=ctx.tenant_id,
+                max_queries=budget.max_subqueries,
+            )
+        )
+        # Intent runs on original query in parallel (doesn't need rewrite result)
+        intent_task = asyncio.create_task(
+            resolve_intents(
+                [ctx.question],
+                kb_id=ctx.kb_id,
+                tenant_id=ctx.tenant_id,
+            )
+        )
+
+        # Speculative vector search with original query (while LLM calls in flight)
+        speculative_task: asyncio.Task | None = None
+        collection_name = ctx.collection_name or "default_store"
+        if settings.ttft_speculative_search:
+            async def _speculative_vector():
+                try:
+                    return await self.milvus.search(
+                        ctx.question, collection_name, top_k=budget.per_channel_top_k
+                    )
+                except Exception:
+                    return []
+            speculative_task = asyncio.create_task(_speculative_vector())
+
+        # Await rewrite + intent
+        rewrite_result, intent_resolution = await asyncio.gather(
+            rewrite_task, intent_task
+        )
+
+        t_parallel_end = datetime.now(timezone.utc).replace(tzinfo=None)
+        parallel_ms = int((t_parallel_end - t_parallel_start).total_seconds() * 1000)
+
+        rewritten = (
+            rewrite_result.rewritten_query
+            if rewrite_result.rewritten_query != ctx.question
+            else None
+        )
+        intent = intent_resolution.to_dict()
+        intent_name = intent.get("intent", "unknown") if intent else "unknown"
+        _pipeline_log.info(
+            "parallel_rewrite_intent",
+            rewrite=(rewritten or "(unchanged)")[:60],
+            intent=intent_name,
+            took_ms=parallel_ms,
+        )
+
+        # Trace
+        if self._trace:
+            await self._trace.trace_node(
+                trace_id or "", "rewrite", "query_rewrite_parallel",
+                t_parallel_start, t_parallel_end,
+                input_data={"query": ctx.question},
+                output_data={
+                    "normalized": rewrite_result.normalized_query,
+                    "rewritten": rewrite_result.rewritten_query,
+                    "subqueries": rewrite_result.subqueries,
+                    "applied_mappings": rewrite_result.applied_mappings,
+                },
+            )
+            await self._trace.trace_node(
+                trace_id or "", "intent", "intent_recognition_parallel",
+                t_parallel_start, t_parallel_end,
+                input_data={"query": ctx.question},
+                output_data=intent,
+            )
+            if hasattr(self._trace, "update_understanding"):
+                await self._trace.update_understanding(
+                    trace_id or "",
+                    rewrite_query=rewrite_result.rewritten_query,
+                    intent=intent_name,
+                    metadata={
+                        "normalizedQuery": rewrite_result.normalized_query,
+                        "subqueries": rewrite_result.subqueries,
+                        "appliedMappings": rewrite_result.applied_mappings,
+                        "intentResolution": intent,
+                        "parallel": True,
+                    },
+                )
+
+        # Early-exit paths (same as sequential)
+        if intent_resolution.needs_guidance:
+            if speculative_task:
+                speculative_task.cancel()
+            model_name, model_base_url, model_api_key = self.model_router.route(
+                "general", deep_thinking=False
+            )
+            return RAGResult(
+                question=ctx.question, rewrite=rewritten, intent=intent,
+                context_chunks=[], sources=[],
+                duration_ms=int((time.time() - t0) * 1000),
+                trace_run_id=trace_id,
+                model_name=model_name, model_base_url=model_base_url,
+                model_api_key=model_api_key,
+                subqueries=rewrite_result.subqueries,
+                applied_mappings=rewrite_result.applied_mappings,
+                response_mode="guidance",
+                direct_response=intent_resolution.guidance_prompt,
+            )
+        if intent_resolution.system_only:
+            if speculative_task:
+                speculative_task.cancel()
+            model_name, model_base_url, model_api_key = self.model_router.route(
+                "general", deep_thinking=ctx.deep_thinking
+            )
+            return RAGResult(
+                question=ctx.question, rewrite=rewritten, intent=intent,
+                context_chunks=[], sources=[],
+                duration_ms=int((time.time() - t0) * 1000),
+                trace_run_id=trace_id,
+                model_name=model_name, model_base_url=model_base_url,
+                model_api_key=model_api_key,
+                subqueries=rewrite_result.subqueries,
+                applied_mappings=rewrite_result.applied_mappings,
+                response_mode="system",
+            )
+
+        # Resolve collection
+        primary_intent = intent_resolution.primary
+        collection_name = (
+            ctx.collection_name
+            or (primary_intent.collection_name if primary_intent else None)
+            or (intent.get("collection_name") if intent else None)
+            or "default_store"
+        )
+
+        # Build subqueries from rewrite result
+        search_question = rewritten or ctx.question
+        subqueries = rewrite_result.subqueries or [search_question]
+
+        # ─── Multi-channel search (reuse speculative results for vector) ───
+        t_search = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        # Collect speculative results if available
+        speculative_results: list[SearchResult] = []
+        if speculative_task:
+            try:
+                speculative_results = await asyncio.wait_for(speculative_task, timeout=0.1)
+            except (asyncio.TimeoutError, Exception):
+                speculative_results = []
+
+        async def vector_search() -> list[SearchResult]:
+            # If speculative results exist and query unchanged, reuse them
+            if speculative_results and not rewritten:
+                return speculative_results
+            # Otherwise search with all subqueries
+            batches = await asyncio.gather(
+                *(
+                    self.milvus.search(query, collection_name, top_k=budget.per_channel_top_k)
+                    for query in subqueries
+                )
+            )
+            results = [item for batch in batches for item in batch]
+            # Merge speculative results if query was rewritten
+            if speculative_results and rewritten:
+                results = speculative_results + results
+            return results
+
+        async def keyword_search() -> list[SearchResult]:
+            batches = await asyncio.gather(
+                *(
+                    self.es.search(query, ctx.kb_id or collection_name, top_k=budget.per_channel_top_k)
+                    for query in subqueries
+                )
+            )
+            return [item for batch in batches for item in batch]
+
+        async def graph_search() -> list[SearchResult]:
+            output: list[SearchResult] = []
+            for query in subqueries:
+                native_results = await self.native_graph.search(
+                    query, kb_id=ctx.kb_id or "", top_k=budget.per_channel_top_k
+                )
+                output.extend(native_results)
+                try:
+                    response = await asyncio.wait_for(
+                        self.graph_client.query_graph(
+                            query, top_k=budget.per_channel_top_k,
+                            kb_id=ctx.kb_id or "",
+                            collection_name=ctx.collection_name or "",
+                            enabled=True,
+                        ),
+                        timeout=max(0.5, min(1.5, budget.channel_timeout_ms / 2000)),
+                    )
+                    output.extend(
+                        SearchResult(
+                            chunk_id=hit.get("chunk_id") or hit.get("id", ""),
+                            doc_id=hit.get("doc_id", ""),
+                            content=hit.get("content", ""),
+                            score=float(hit.get("score", 0.0)),
+                            metadata={"graphEntity": hit.get("entity", "")},
+                        )
+                        for hit in response.get("results", [])
+                    )
+                except (TimeoutError, asyncio.TimeoutError):
+                    _pipeline_log.warning("lightrag_query_timeout", query=query[:80])
+                except Exception as exc:
+                    _pipeline_log.warning("lightrag_query_failed", query=query[:80], error=type(exc).__name__)
+            return output
+
+        requested_channels = set(intent_resolution.search_channels)
+        if "bm25" in requested_channels:
+            requested_channels.add("keyword")
+        channels = {}
+        if not requested_channels or "vector" in requested_channels:
+            channels["vector"] = vector_search
+        if settings.es_enabled and (not requested_channels or "keyword" in requested_channels):
+            channels["keyword"] = keyword_search
+        graph_enabled = settings.graph_enabled if ctx.graph_rag is None else ctx.graph_rag
+        if graph_enabled and (not requested_channels or "graph" in requested_channels):
+            channels["graph"] = graph_search
+
+        guarded_channels = {}
+        for name, operation in channels.items():
+            breaker = self._channel_breakers[name]
+
+            async def guarded_call(op=operation, channel_breaker=breaker):
+                return await channel_breaker.call(op)
+
+            guarded_channels[name] = guarded_call
+        channels = guarded_channels
+        channel_results, channel_statuses = await run_search_channels(channels, budget)
+        active_channel_names = [name for name, items in channel_results.items() if items]
+        all_results = [channel_results[name] for name in active_channel_names]
+
+        t_search_end = datetime.now(timezone.utc).replace(tzinfo=None)
+        search_ms = int((t_search_end - t_search).total_seconds() * 1000)
+        total_hits = sum(len(r) for r in all_results)
+        _pipeline_log.info("multi_search_complete", channels=len(all_results), total_hits=total_hits, took_ms=search_ms)
+        if self._trace and trace_id:
+            await self._trace.trace_node(
+                trace_id, "retrieval", "parallel_channels",
+                t_search, t_search_end,
+                input_data={"subquery_count": len(subqueries), "channels": list(channels)},
+                output_data={
+                    "total_hits": total_hits,
+                    "statuses": {name: status.__dict__ for name, status in channel_statuses.items()},
+                },
+            )
+
+        # ─── Post-processing: fusion → dedup → rerank (same as sequential) ───
+        return await self._post_process(
+            ctx, budget, t0, trace_id,
+            rewrite_result=rewrite_result,
+            rewritten=rewritten,
+            intent=intent,
+            intent_name=intent_name,
+            search_question=search_question,
+            subqueries=subqueries,
+            all_results=all_results,
+            active_channel_names=active_channel_names,
+            channel_statuses=channel_statuses,
+            search_ms=search_ms,
+            total_hits=total_hits,
+            parallel_ms=parallel_ms,
+            prompt_template=primary_intent.prompt_template if primary_intent else None,
+        )
+
+    async def _post_process(
+        self,
+        ctx: RAGContext,
+        budget: RetrievalBudget,
+        t0: float,
+        trace_id: str | None,
+        *,
+        rewrite_result,
+        rewritten: str | None,
+        intent: dict | None,
+        intent_name: str,
+        search_question: str,
+        subqueries: list[str],
+        all_results: list[list[SearchResult]],
+        active_channel_names: list[str],
+        channel_statuses: dict,
+        search_ms: int,
+        total_hits: int,
+        parallel_ms: int = 0,
+        prompt_template: str | None = None,
+    ) -> RAGResult:
+        """Shared post-processing: fusion → dedup → filter → rerank → build result."""
+        # 5. RRF fusion
+        t_fuse = datetime.now(timezone.utc).replace(tzinfo=None)
+        if all_results:
+            for i, ch_results in enumerate(all_results):
+                if ch_results:
+                    top_scores = [f"{r.score:.4f}" for r in ch_results[:3]]
+                    _pipeline_log.info("rrf_pre_fusion_channel", channel=i, count=len(ch_results), top_scores=top_scores)
+            weights = {}
+            for item in settings.retrieval_channel_weights.split(","):
+                name, _, value = item.partition(":")
+                if name.strip() and value.strip():
+                    try:
+                        weights[name.strip()] = float(value)
+                    except ValueError:
+                        continue
+            merged = rrf_fusion(
+                *all_results, weights=weights, channel_names=active_channel_names
+            )
+        else:
+            merged = []
+        t_fuse_end = datetime.now(timezone.utc).replace(tzinfo=None)
+        fusion_ms = int((t_fuse_end - t_fuse).total_seconds() * 1000)
+        _pipeline_log.info("rrf_fusion", input_channels=len(all_results), input_total=total_hits, output_count=len(merged), took_ms=fusion_ms)
+        if self._trace:
+            await self._trace.trace_node(trace_id or "", "fusion", "rrf_fusion",
+                                         t_fuse, t_fuse_end,
+                                         input_data={"channel_count": len(all_results), "total_hits": total_hits},
+                                         output_data={"merged_count": len(merged)})
+
+        # 6. Dedup
+        t_dedup = time.time()
+        deduped = deduplicate(merged)
+        deduped = await self._filter_unavailable_chunks(deduped)
+        dedup_ms = int((time.time() - t_dedup) * 1000)
+        recall_count = len(deduped)
+        removed = len(merged) - len(deduped)
+        _pipeline_log.info("deduplicate", before=len(merged), after=recall_count, removed=removed, took_ms=dedup_ms)
+
+        await self._resolve_metadata(deduped, kb_id=ctx.kb_id)
+
+        # 6.5 Neighbor expansion
+        if ctx.enable_neighbor_expansion:
+            t_neighbor_start = datetime.now(timezone.utc).replace(tzinfo=None)
+            neighbor_before = len(deduped)
+            deduped = await self._expand_neighbors(deduped, kb_id=ctx.kb_id, window=2)
+            neighbor_after = len(deduped)
+            t_neighbor_end = datetime.now(timezone.utc).replace(tzinfo=None)
+            neighbor_ms = int((t_neighbor_end - t_neighbor_start).total_seconds() * 1000)
+            _pipeline_log.info("neighbor_expansion", before=neighbor_before, after=neighbor_after, added=neighbor_after - neighbor_before, took_ms=neighbor_ms)
+            if self._trace:
+                await self._trace.trace_node(
+                    trace_id or "", "postprocess", "neighbor_expansion",
+                    t_neighbor_start, t_neighbor_end,
+                    input_data={"before_count": neighbor_before, "window": 2, "top_n_anchors": 10},
+                    output_data={"after_count": neighbor_after, "neighbors_added": neighbor_after - neighbor_before},
+                )
+
+        if ctx.kb_id:
+            principal = Principal(
+                user_id=ctx.user_id, tenant_id=ctx.tenant_id,
+                department_id=ctx.department_id, role=ctx.role,
+            )
+            async with async_session_factory() as session:
+                deduped = await filter_authorized_results(
+                    session, principal, deduped, kb_id=ctx.kb_id
+                )
+        else:
+            deduped = []
+        recall_count = len(deduped)
+
+        # 7. Rerank
+        t_rerank = datetime.now(timezone.utc).replace(tzinfo=None)
+        pre_rerank_ids = [(r.chunk_id or r.content[:20], f"{r.score:.4f}") for r in deduped[:5]]
+        _pipeline_log.info("rerank_pre", candidates=recall_count, top_ids=pre_rerank_ids)
+        rerank_top_n = (
+            budget.max_candidates
+            if ctx.enable_neighbor_expansion
+            else min(budget.max_candidates, max(budget.final_top_k * 2, budget.final_top_k))
+        )
+        reranked = await self.reranker.rerank(search_question, deduped, top_n=rerank_top_n)
+        reranked, retrieval_decision = select_context(
+            reranked, budget, min_score=settings.retrieval_min_relevance_score
+        )
+        t_rerank_end = datetime.now(timezone.utc).replace(tzinfo=None)
+        rerank_ms = int((t_rerank_end - t_rerank).total_seconds() * 1000)
+        final_count = len(reranked)
+        post_rerank_ids = [(r.chunk_id or r.content[:20], f"{r.score:.4f}") for r in reranked]
+        _pipeline_log.info("rerank_post", final_count=final_count, top_ids=post_rerank_ids, took_ms=rerank_ms)
+        if self._trace:
+            await self._trace.trace_node(trace_id or "", "rerank", "rerank",
+                                         t_rerank, t_rerank_end,
+                                         input_data={"candidate_count": recall_count},
+                                         output_data={"reranked_count": final_count})
+
+        # 8. Model routing
+        if ctx.deep_thinking and not settings.reasoning_model:
+            _pipeline_log.warning("deep_thinking_requested_but_no_reasoning_model")
+        model_name, model_base_url, model_api_key = self.model_router.route(
+            intent_name, deep_thinking=ctx.deep_thinking
+        )
+
+        # 9. Build chunks
+        chunks = [
+            {
+                "content": r.content, "chunk_id": r.chunk_id, "score": r.score,
+                "fusionScore": r.metadata.get("fusionScore"),
+                "rerankScore": r.metadata.get("rerank_score"),
+                "channelScores": r.metadata.get("channelScores", {}),
+                "matchedChannels": r.metadata.get("matchedChannels", []),
+                "blockType": r.block_type, "pageStart": r.page_start, "pageEnd": r.page_end,
+            }
+            for r in reranked
+        ]
+        sources = [
+            {
+                "documentId": r.doc_id, "chunkId": r.chunk_id,
+                "docName": r.doc_name or "unknown", "chunkIndex": r.chunk_index,
+                "content": r.content[:300], "score": r.score,
+                "fusionScore": r.metadata.get("fusionScore"),
+                "rerankScore": r.metadata.get("rerank_score"),
+                "channelScores": r.metadata.get("channelScores", {}),
+                "matchedChannels": r.metadata.get("matchedChannels", []),
+                "blockType": r.block_type, "pageStart": r.page_start,
+                "pageEnd": r.page_end, "bboxes": r.bboxes, "assets": r.assets,
+            }
+            for r in reranked
+        ]
+
+        duration = int((time.time() - t0) * 1000)
+        _pipeline_log.info(
+            "rag_pipeline_complete",
+            question=ctx.question[:60],
+            parallel_phase=parallel_ms,
+            search=search_ms, fusion=fusion_ms, dedup=dedup_ms, rerank=rerank_ms,
+            total_ms=duration, recall_count=recall_count, final_count=final_count,
+            answerable=retrieval_decision.answerable,
+            rejection_reason=retrieval_decision.reason or None,
+            channel_statuses={name: status.__dict__ for name, status in channel_statuses.items()},
+            subqueries=subqueries,
+        )
+
+        primary_intent = None
+        intent_resolution_primary = intent.get("intent") if intent else None
+        return RAGResult(
+            question=ctx.question, rewrite=rewritten, intent=intent,
+            context_chunks=chunks, sources=sources,
+            duration_ms=duration, trace_run_id=trace_id,
+            model_name=model_name, model_base_url=model_base_url,
+            model_api_key=model_api_key,
+            answerable=retrieval_decision.answerable,
+            rejection_reason=retrieval_decision.reason or None,
+            channel_statuses={name: status.__dict__ for name, status in channel_statuses.items()},
+            subqueries=subqueries,
+            applied_mappings=rewrite_result.applied_mappings,
+            prompt_template=prompt_template,
         )
 
     async def _expand_neighbors(

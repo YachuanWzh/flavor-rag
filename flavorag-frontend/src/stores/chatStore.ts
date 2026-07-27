@@ -16,6 +16,8 @@ interface ChatState {
   graphRevision: number;
   streamingMessageId: string | null;
   openedSourceMessageId: string | null;
+  progressStage: string | null;
+  progressMessage: string | null;
 
   setSessions: (sessions: Session[]) => void;
   setCurrentSession: (id: string) => void;
@@ -49,6 +51,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   graphRevision: 0,
   streamingMessageId: null,
   openedSourceMessageId: null,
+  progressStage: null,
+  progressMessage: null,
 
   setSessions: (sessions) => set({ sessions }),
   setSelectedKbId: (id) => set({ selectedKbId: id }),
@@ -116,6 +120,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     const handlers: StreamHandlers = {
+      onProgress: (payload) => {
+        set({ progressStage: payload.stage, progressMessage: payload.message });
+      },
       onMeta: (payload) => {
         if (payload.conversationId && !state.currentSessionId) {
           set({ currentSessionId: payload.conversationId });
@@ -144,6 +151,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       },
       onMessage: (payload) => {
         set((s) => ({
+          progressStage: null,
+          progressMessage: null,
           messages: s.messages.map((m) =>
             m.id === s.streamingMessageId
               ? { ...m, content: m.content + (payload.delta || "") }
@@ -177,11 +186,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
           isLoading: false,
           isStreaming: false,
           streamingMessageId: null,
+          progressStage: null,
+          progressMessage: null,
           graphRevision: s.graphRevision + (state.graphRagEnabled ? 1 : 0),
         }));
       },
       onDone: () => {
-        set({ isLoading: false, isStreaming: false, streamingMessageId: null });
+        set({ isLoading: false, isStreaming: false, streamingMessageId: null, progressStage: null, progressMessage: null });
       },
       onError: (error) => {
         set((s) => ({
@@ -193,6 +204,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           isLoading: false,
           isStreaming: false,
           streamingMessageId: null,
+          progressStage: null,
+          progressMessage: null,
         }));
       },
     };

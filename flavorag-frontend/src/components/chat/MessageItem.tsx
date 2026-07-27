@@ -8,6 +8,7 @@ import { ArrowUpRight, ChevronDown, ChevronUp, Network, Orbit } from "lucide-rea
 interface Props {
   message: Message;
   isStreaming?: boolean;
+  progressMessage?: string | null;
   onViewSources?: (sources: NonNullable<Message["sources"]>) => void;
   onRecommendedQuestion?: (question: string) => void;
 }
@@ -15,6 +16,7 @@ interface Props {
 export default function MessageItem({
   message,
   isStreaming,
+  progressMessage,
   onViewSources,
   onRecommendedQuestion,
 }: Props) {
@@ -55,6 +57,26 @@ export default function MessageItem({
             content={message.thinkingContent}
             isThinking={!!isStreaming && !message.content}
           />
+        )}
+
+        {/* Retrieval progress indicator (TTFT feedback) */}
+        {!isUser && isStreaming && !message.content && !message.thinkingContent && progressMessage && (
+          <div className="flex items-center gap-2 py-1">
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-500" />
+            </span>
+            <span className="text-sm text-gray-500 animate-pulse">{progressMessage}</span>
+          </div>
+        )}
+
+        {/* Default loading dots when no progress message */}
+        {!isUser && isStreaming && !message.content && !message.thinkingContent && !progressMessage && (
+          <div className="flex items-center gap-1 py-1">
+            <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+            <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+            <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+          </div>
         )}
 
         {/* Content */}

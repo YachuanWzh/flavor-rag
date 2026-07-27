@@ -12,6 +12,8 @@ export interface StreamHandlers {
     modes?: RagModes;
     channels?: Record<string, RetrievalChannelStatus>;
     appliedMappings?: Array<{ source: string; target: string; type: string }>;
+    hydeDoc?: string;
+    hydeMeta?: { model?: string; durationMs?: number; timedOut?: boolean };
   }) => void;
   onAgent?: (payload: { steps: AgentStep[] }) => void;
   onMessage?: (payload: { type: string; delta: string }) => void;

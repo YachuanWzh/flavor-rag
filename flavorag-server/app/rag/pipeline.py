@@ -48,6 +48,7 @@ class RAGContext:
     deep_thinking: bool = False
     graph_rag: bool | None = None
     enable_neighbor_expansion: bool = False
+    enable_hyde: bool = False
     trace_run_id: str | None = None
     user_id: str = ""
     tenant_id: str = "default"
@@ -75,6 +76,8 @@ class RAGResult:
     direct_response: str | None = None
     prompt_template: str | None = None
     applied_mappings: list[dict] = field(default_factory=list)
+    hyde_doc: str | None = None           # HyDE 生成的假设文档内容
+    hyde_meta: dict = field(default_factory=dict)  # HyDE 元信息(model/duration_ms/timed_out)
 
 
 class RAGPipeline:
@@ -93,7 +96,7 @@ class RAGPipeline:
                 failure_threshold=settings.circuit_breaker_failures,
                 recovery_timeout_sec=settings.circuit_breaker_recovery_sec,
             )
-            for name in ("vector", "keyword", "graph")
+            for name in ("vector", "keyword", "graph", "hyde_vector")
         }
 
     async def run(self, ctx: RAGContext) -> RAGResult:
@@ -616,6 +619,18 @@ class RAGPipeline:
                     return []
             speculative_task = asyncio.create_task(_speculative_vector())
 
+        # HyDE: generate hypothetical document in parallel with rewrite + intent
+        hyde_task: asyncio.Task | None = None
+        t_hyde_start: datetime | None = None
+        if ctx.enable_hyde and settings.hyde_enabled:
+            from app.rag.hyde import generate_hypothetical_document
+            t_hyde_start = datetime.now(timezone.utc).replace(tzinfo=None)
+            hyde_task = asyncio.create_task(
+                generate_hypothetical_document(
+                    ctx.question, history=ctx.history
+                )
+            )
+
         # Await rewrite + intent
         rewrite_result, intent_resolution = await asyncio.gather(
             rewrite_task, intent_task
@@ -675,6 +690,8 @@ class RAGPipeline:
         if intent_resolution.needs_guidance:
             if speculative_task:
                 speculative_task.cancel()
+            if hyde_task:
+                hyde_task.cancel()
             model_name, model_base_url, model_api_key = self.model_router.route(
                 "general", deep_thinking=False
             )
@@ -693,6 +710,8 @@ class RAGPipeline:
         if intent_resolution.system_only:
             if speculative_task:
                 speculative_task.cancel()
+            if hyde_task:
+                hyde_task.cancel()
             model_name, model_base_url, model_api_key = self.model_router.route(
                 "general", deep_thinking=ctx.deep_thinking
             )
@@ -731,6 +750,28 @@ class RAGPipeline:
                 speculative_results = await asyncio.wait_for(speculative_task, timeout=0.1)
             except (asyncio.TimeoutError, Exception):
                 speculative_results = []
+
+        # Await HyDE result (already running in parallel; this is just a join)
+        # hyde.py already has its own timeout handling, so we just await directly.
+        hyde_result = None
+        if hyde_task:
+            t_hyde_end = datetime.now(timezone.utc).replace(tzinfo=None)
+            try:
+                hyde_result = await hyde_task
+            except Exception:
+                hyde_result = None
+            if self._trace and hyde_result:
+                await self._trace.trace_node(
+                    trace_id or "", "hyde", "hypothetical_doc_generation",
+                    t_hyde_start or t_hyde_end, t_hyde_end,
+                    input_data={"query": ctx.question},
+                    output_data={
+                        "doc_length": len(hyde_result.hypothetical_doc),
+                        "model": hyde_result.model_used,
+                        "timed_out": hyde_result.timed_out,
+                        "duration_ms": hyde_result.duration_ms,
+                    },
+                )
 
         async def vector_search() -> list[SearchResult]:
             # If speculative results exist and query unchanged, reuse them
@@ -803,6 +844,21 @@ class RAGPipeline:
         if graph_enabled and (not requested_channels or "graph" in requested_channels):
             channels["graph"] = graph_search
 
+        # HyDE vector channel — additional retrieval channel that searches with
+        # the hypothetical document instead of the raw query.
+        if hyde_result and hyde_result.hypothetical_doc:
+            _hyde_doc = hyde_result.hypothetical_doc
+
+            async def hyde_vector_search() -> list[SearchResult]:
+                try:
+                    return await self.milvus.search(
+                        _hyde_doc, collection_name, top_k=budget.per_channel_top_k
+                    )
+                except Exception:
+                    return []
+
+            channels["hyde_vector"] = hyde_vector_search
+
         guarded_channels = {}
         for name, operation in channels.items():
             breaker = self._channel_breakers[name]
@@ -847,6 +903,7 @@ class RAGPipeline:
             total_hits=total_hits,
             parallel_ms=parallel_ms,
             prompt_template=primary_intent.prompt_template if primary_intent else None,
+            hyde_result=hyde_result,
         )
 
     async def _post_process(
@@ -869,6 +926,7 @@ class RAGPipeline:
         total_hits: int,
         parallel_ms: int = 0,
         prompt_template: str | None = None,
+        hyde_result=None,
     ) -> RAGResult:
         """Shared post-processing: fusion → dedup → filter → rerank → build result."""
         # 5. RRF fusion
@@ -886,6 +944,9 @@ class RAGPipeline:
                         weights[name.strip()] = float(value)
                     except ValueError:
                         continue
+            # Inject HyDE channel weight if it participated in retrieval
+            if "hyde_vector" in active_channel_names and "hyde_vector" not in weights:
+                weights["hyde_vector"] = settings.hyde_channel_weight
             merged = rrf_fusion(
                 *all_results, weights=weights, channel_names=active_channel_names
             )
@@ -1026,6 +1087,12 @@ class RAGPipeline:
             subqueries=subqueries,
             applied_mappings=rewrite_result.applied_mappings,
             prompt_template=prompt_template,
+            hyde_doc=(hyde_result.hypothetical_doc if hyde_result and hyde_result.hypothetical_doc else None),
+            hyde_meta={
+                "model": hyde_result.model_used,
+                "durationMs": hyde_result.duration_ms,
+                "timedOut": hyde_result.timed_out,
+            } if hyde_result else {},
         )
 
     async def _expand_neighbors(

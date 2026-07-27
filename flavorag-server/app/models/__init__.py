@@ -83,6 +83,8 @@ class Message(Base, TimestampMixin):
     agent_steps = Column(JSON)
     rag_modes = Column(JSON)
     retrieval_channels = Column(JSON)
+    hyde_doc = Column(Text)
+    hyde_meta = Column(JSON)
 
 
 class MessageFeedback(Base, TimestampMixin):

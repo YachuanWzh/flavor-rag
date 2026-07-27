@@ -30,6 +30,8 @@ export interface Message {
   ragModes?: RagModes;
   retrievalChannels?: Record<string, RetrievalChannelStatus>;
   appliedMappings?: AppliedMapping[];
+  hydeDoc?: string;
+  hydeMeta?: { model?: string; durationMs?: number; timedOut?: boolean };
 }
 
 export interface SourceRef {
@@ -99,6 +101,7 @@ export interface RagModes {
   agenticRag: boolean;
   graphRag: boolean;
   neighborExpansion: boolean;
+  hyde: boolean;
 }
 
 export interface AgentStep {
@@ -147,6 +150,11 @@ export interface RagCapabilities {
     available: boolean;
     defaultEnabled: boolean;
     status: string;
+  };
+  hyde: {
+    available: boolean;
+    defaultEnabled: boolean;
+    model: string;
   };
 }
 

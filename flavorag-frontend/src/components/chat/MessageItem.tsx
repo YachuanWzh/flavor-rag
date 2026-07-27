@@ -4,7 +4,7 @@ import MarkdownRenderer from "./MarkdownRenderer";
 import SourceMedia from "./SourceMedia";
 import ThinkingIndicator from "./ThinkingIndicator";
 import { submitFeedback } from "@/services/feedbackService";
-import { ArrowUpRight, ChevronDown, ChevronUp, Network, Orbit } from "lucide-react";
+import { ArrowUpRight, ChevronDown, ChevronUp, Network, Orbit, Sparkles } from "lucide-react";
 
 interface Props {
   message: Message;
@@ -26,6 +26,7 @@ export default function MessageItem({
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [showFeedbackReasons, setShowFeedbackReasons] = useState(false);
   const [showMappings, setShowMappings] = useState(false);
+  const [showHydeDoc, setShowHydeDoc] = useState(false);
 
   const handleFeedback = useCallback(async (vote: number, reason?: string) => {
     if (feedbackSubmitting || !message.id || message.id.startsWith("asst_")) return;
@@ -94,7 +95,7 @@ export default function MessageItem({
           />
         )}
 
-        {!isUser && (message.ragModes?.agenticRag || message.ragModes?.graphRag) && (
+        {!isUser && (message.ragModes?.agenticRag || message.ragModes?.graphRag || message.ragModes?.hyde) && (
           <div className="mt-3 flex flex-wrap gap-1.5 border-t border-slate-200/70 pt-2">
             {message.ragModes.agenticRag && (
               <span
@@ -123,12 +124,73 @@ export default function MessageItem({
                 Graph {Number(message.retrievalChannels?.graph?.count || 0)} 条证据
               </span>
             )}
+            {message.ragModes.hyde && (
+              <span
+                title={
+                  message.retrievalChannels?.hyde_vector?.error
+                    ? String(message.retrievalChannels.hyde_vector.error)
+                    : "HyDE 假设文档检索已参与本次召回"
+                }
+                className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium ${
+                  message.retrievalChannels?.hyde_vector?.status === "error" ||
+                  message.retrievalChannels?.hyde_vector?.status === "timeout"
+                    ? "border-rose-200 bg-rose-50 text-rose-700"
+                    : "border-rose-200 bg-rose-50 text-rose-700"
+                }`}
+              >
+                <Sparkles className="h-3 w-3" />
+                HyDE {Number(message.retrievalChannels?.hyde_vector?.count || 0)} 条证据
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* HyDE hypothetical document — collapsible */}
+        {!isUser && message.ragModes?.hyde && message.hydeDoc && (
+          <div className="mt-2">
+            <button
+              onClick={() => setShowHydeDoc(!showHydeDoc)}
+              className="inline-flex items-center gap-1.5 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] font-medium text-rose-700 hover:bg-rose-100 transition-colors"
+            >
+              <Sparkles className="h-3 w-3" />
+              {showHydeDoc ? "收起假设文档" : "查看假设文档"}
+              {showHydeDoc ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+              {message.hydeMeta?.timedOut && (
+                <span className="text-rose-500">（已超时降级）</span>
+              )}
+            </button>
+            {showHydeDoc && (
+              <div className="mt-1.5 rounded-lg border border-rose-200 bg-rose-50/50 p-3">
+                <div className="mb-1.5 flex items-center gap-2 text-[10px] text-rose-600">
+                  <span className="font-medium">HyDE 假设文档</span>
+                  {message.hydeMeta?.model && (
+                    <span className="text-rose-400">· {message.hydeMeta.model}</span>
+                  )}
+                  {message.hydeMeta?.durationMs != null && (
+                    <span className="text-rose-400">· {message.hydeMeta.durationMs}ms</span>
+                  )}
+                </div>
+                <div className="whitespace-pre-wrap text-xs leading-5 text-slate-700 max-h-48 overflow-y-auto">
+                  {message.hydeDoc}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* HyDE enabled but no doc (timeout/failure) */}
+        {!isUser && message.ragModes?.hyde && !message.hydeDoc && (
+          <div className="mt-2">
+            <span className="inline-flex items-center gap-1.5 rounded-md border border-rose-200 bg-rose-50/50 px-2 py-1 text-[10px] font-medium text-rose-400">
+              <Sparkles className="h-3 w-3" />
+              HyDE 未生效（超时或降级）
+            </span>
           </div>
         )}
 
         {/* Applied term mappings */}
         {!isUser && message.appliedMappings && message.appliedMappings.length > 0 && (
-          <div className={`mt-2 ${(message.ragModes?.agenticRag || message.ragModes?.graphRag) ? "" : "border-t border-slate-200/70 pt-2"}`}>
+          <div className={`mt-2 ${(message.ragModes?.agenticRag || message.ragModes?.graphRag || message.ragModes?.hyde) ? "" : "border-t border-slate-200/70 pt-2"}`}>
             {message.appliedMappings.length === 1 ? (
               <span className="inline-flex items-center gap-1.5 rounded-md border border-violet-200 bg-violet-50 px-2 py-1 text-[10px] font-medium text-violet-800">
                 <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>

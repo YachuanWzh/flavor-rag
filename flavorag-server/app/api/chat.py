@@ -42,6 +42,7 @@ async def chat(
     neighbor_expansion: bool = Query(
         False, description="启用邻近chunk召回补偿"
     ),
+    hyde: bool = Query(False, description="启用 HyDE 假设文档检索"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -148,6 +149,7 @@ async def chat(
                 history=history, deep_thinking=deep_thinking,
                 graph_rag=effective_graph_rag,
                 enable_neighbor_expansion=neighbor_expansion,
+                enable_hyde=hyde,
                 trace_run_id=trace_id,
                 user_id=user.id,
                 tenant_id=user.tenant_id or "default",
@@ -182,6 +184,7 @@ async def chat(
                         "agenticRag": effective_agentic_rag,
                         "graphRag": effective_graph_rag,
                         "neighborExpansion": neighbor_expansion,
+                        "hyde": hyde,
                     },
                     "channels": rag_result.channel_statuses,
                     "queryUnderstanding": rag_result.intent,
@@ -189,6 +192,8 @@ async def chat(
                         {"source": m["source"], "target": m["target"], "type": m["type"]}
                         for m in rag_result.applied_mappings
                     ],
+                    "hydeDoc": rag_result.hyde_doc or "",
+                    "hydeMeta": rag_result.hyde_meta or {},
                 }
             )
             yield f"event: meta\ndata: {meta}\n\n"
@@ -214,8 +219,12 @@ async def chat(
                     rag_modes={
                         "agenticRag": effective_agentic_rag,
                         "graphRag": effective_graph_rag,
+                        "neighborExpansion": neighbor_expansion,
+                        "hyde": hyde,
                     },
                     retrieval_channels=rag_result.channel_statuses,
+                    hyde_doc=rag_result.hyde_doc or None,
+                    hyde_meta=rag_result.hyde_meta or None,
                 )
                 await trace.finalize(
                     trace_run_id=trace_id,
@@ -228,6 +237,7 @@ async def chat(
                     metadata={
                         "queryUnderstanding": rag_result.intent,
                         "neighborExpansion": neighbor_expansion,
+                        "hyde": hyde,
                     },
                 )
                 await db.flush()
@@ -242,6 +252,7 @@ async def chat(
                                 "agenticRag": effective_agentic_rag,
                                 "graphRag": effective_graph_rag,
                                 "neighborExpansion": neighbor_expansion,
+                                "hyde": hyde,
                             },
                             "channels": rag_result.channel_statuses,
                         },
@@ -268,8 +279,12 @@ async def chat(
                     rag_modes={
                         "agenticRag": effective_agentic_rag,
                         "graphRag": effective_graph_rag,
+                        "neighborExpansion": neighbor_expansion,
+                        "hyde": hyde,
                     },
                     retrieval_channels=rag_result.channel_statuses,
+                    hyde_doc=rag_result.hyde_doc or None,
+                    hyde_meta=rag_result.hyde_meta or None,
                 )
                 await trace.finalize(
                     trace_run_id=trace_id,
@@ -285,6 +300,7 @@ async def chat(
                         "agenticRag": effective_agentic_rag,
                         "graphRag": effective_graph_rag,
                         "neighborExpansion": neighbor_expansion,
+                        "hyde": hyde,
                     },
                 )
                 await db.flush()
@@ -296,6 +312,7 @@ async def chat(
                             "agenticRag": effective_agentic_rag,
                             "graphRag": effective_graph_rag,
                             "neighborExpansion": neighbor_expansion,
+                            "hyde": hyde,
                         },
                         "channels": rag_result.channel_statuses,
                     }
@@ -387,8 +404,12 @@ async def chat(
                 rag_modes={
                     "agenticRag": effective_agentic_rag,
                     "graphRag": effective_graph_rag,
+                    "neighborExpansion": neighbor_expansion,
+                    "hyde": hyde,
                 },
                 retrieval_channels=rag_result.channel_statuses,
+                hyde_doc=rag_result.hyde_doc or None,
+                hyde_meta=rag_result.hyde_meta or None,
             )
             await db.flush()
             await chat_service.maybe_summarize(conversation_id)
@@ -408,6 +429,7 @@ async def chat(
                     "agenticRag": effective_agentic_rag,
                     "graphRag": effective_graph_rag,
                     "neighborExpansion": neighbor_expansion,
+                    "hyde": hyde,
                 },
             )
 
@@ -421,6 +443,7 @@ async def chat(
                         "agenticRag": effective_agentic_rag,
                         "graphRag": effective_graph_rag,
                         "neighborExpansion": neighbor_expansion,
+                        "hyde": hyde,
                     },
                     "channels": rag_result.channel_statuses,
                 }

@@ -1,10 +1,10 @@
 import { useState } from "react";
 import {
-  BrainCircuit,
   Layers,
   Network,
   Orbit,
   Send,
+  Sparkles,
   Square,
 } from "lucide-react";
 
@@ -20,6 +20,8 @@ interface Props {
   onGraphRagChange: (enabled: boolean) => void;
   neighborExpansion: boolean;
   onNeighborExpansionChange: (enabled: boolean) => void;
+  hyde: boolean;
+  onHydeChange: (enabled: boolean) => void;
 }
 
 interface ModeToggleProps {
@@ -27,7 +29,7 @@ interface ModeToggleProps {
   label: string;
   description: string;
   icon: React.ReactNode;
-  tone: "violet" | "amber" | "cyan" | "emerald";
+  tone: "violet" | "amber" | "cyan" | "emerald" | "rose";
   onClick: () => void;
 }
 
@@ -47,6 +49,10 @@ const toneClasses = {
   emerald: {
     active: "border-emerald-300 bg-emerald-50 text-emerald-800 shadow-[0_0_0_1px_rgba(16,185,129,0.05)]",
     dot: "bg-emerald-500",
+  },
+  rose: {
+    active: "border-rose-300 bg-rose-50 text-rose-800 shadow-[0_0_0_1px_rgba(244,63,94,0.05)]",
+    dot: "bg-rose-500",
   },
 };
 
@@ -95,6 +101,8 @@ export default function ChatInput({
   onGraphRagChange,
   neighborExpansion,
   onNeighborExpansionChange,
+  hyde,
+  onHydeChange,
 }: Props) {
   const [text, setText] = useState("");
 
@@ -166,14 +174,7 @@ export default function ChatInput({
             tone="cyan"
             onClick={() => onGraphRagChange(!graphRag)}
           />
-          <ModeToggle
-            active={deepThinking}
-            label="深度思考"
-            description="使用已配置的推理模型并展示思考过程"
-            icon={<BrainCircuit className="h-3.5 w-3.5" />}
-            tone="violet"
-            onClick={() => onDeepThinkingChange(!deepThinking)}
-          />
+          {/* 深度思考按钮已隐藏，默认开启 */}
           <ModeToggle
             active={neighborExpansion}
             label="邻近补偿"
@@ -181,6 +182,14 @@ export default function ChatInput({
             icon={<Layers className="h-3.5 w-3.5" />}
             tone="emerald"
             onClick={() => onNeighborExpansionChange(!neighborExpansion)}
+          />
+          <ModeToggle
+            active={hyde}
+            label="HyDE"
+            description="生成假设性答案文档辅助向量检索，提升召回率"
+            icon={<Sparkles className="h-3.5 w-3.5" />}
+            tone="rose"
+            onClick={() => onHydeChange(!hyde)}
           />
           <span className="ml-auto hidden text-[11px] text-slate-400 sm:inline">
             Enter 发送 · Shift + Enter 换行

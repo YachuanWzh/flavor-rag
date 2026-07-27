@@ -1,8 +1,8 @@
 # flavor-rag — 企业级 RAG 智能问答系统
 
-> 版本：v0.0.2 | 状态：生产就绪（144/144 测试全绿）
+> 版本：v0.0.3 | 状态：生产就绪（144/144 测试全绿）
 
-基于 Python FastAPI + React 技术栈的企业级 RAG (Retrieval-Augmented Generation) 系统。支持多路混合检索、近邻补偿、知识图谱、Agentic RAG、评测体系、全链路追踪、批量导入/去重、异步摄取队列与系统监控。
+基于 Python FastAPI + React 技术栈的企业级 RAG (Retrieval-Augmented Generation) 系统。支持多路混合检索、HyDE 假设文档嵌入、近邻补偿、知识图谱、Agentic RAG、评测体系、全链路追踪、批量导入/去重、异步摄取队列与系统监控。
 
 > 📘 **技术方案详解**：参见 [技术方案文档.md](./技术方案文档.md)，涵盖分块逻辑、召回逻辑、评测体系、链路监控、Graph RAG、Agentic RAG、批量导入/去重、异步摄取、系统监控等核心设计。
 
@@ -47,7 +47,8 @@ flavor-rag/
 │       ├── auth/                       # JWT 认证 + 依赖注入
 │       ├── api/                        # 17 个 API 模块 (含 monitoring/health)
 │       ├── rag/                        # RAG 核心引擎
-│       │   ├── pipeline.py             # 检索主流水线 (重写→意图→多路检索→融合→Rerank)
+│       │   ├── pipeline.py             # 检索主流水线 (重写→意图→HyDE→多路检索→融合→Rerank)
+│       │   ├── hyde.py                 # HyDE 假设文档生成 (轻量 LLM → 假设文档 → 向量检索)
 │       │   ├── search/                 # vector (Milvus) + keyword (ES BM25)
 │       │   ├── postprocess/            # fusion (RRF) + reranker (Cross-Encoder/LLM)
 │       │   ├── graph/                  # neo4j_store + lightrag_client
@@ -115,7 +116,8 @@ flavor-rag/
 | 模块 | 能力 | 状态 |
 |------|------|------|
 | **分块** | 三种策略：固定窗口 / 语义切分 / 块感知切分 + 块类型元数据 (TABLE/CODE/LIST/IMAGE/PARA) + 表格双文本 (Markdown + key:value 嵌入) | ✅ |
-| **检索** | 多路并行：Milvus 向量 + ES BM25 关键词 + Neo4j/LightRAG 图谱 → RRF 融合 → 去重 → 近邻补偿（上下文窗口扩展）→ Cross-Encoder Rerank | ✅ |
+| **检索** | 多路并行：Milvus 向量 + ES BM25 关键词 + Neo4j/LightRAG 图谱 + HyDE 假设文档向量 → RRF 融合 → 去重 → 近邻补偿（上下文窗口扩展）→ Cross-Encoder Rerank | ✅ |
+| **HyDE** | 轻量 LLM 生成假设文档 → 向量化 → 额外检索通道，桥接 query-document 语义鸿沟；前端可折叠展示 + 超时降级 | ✅ |
 | **查询理解** | 术语映射（DB驱动 + 命中统计） + LLM 改写（消解指代） + 意图分类（层级意图树→知识库路由→模型路由） | ✅ |
 | **Graph RAG** | 双层图谱：Neo4j 确定性实体（零 LLM 依赖）+ LightRAG 语义增强 | ✅ |
 | **Agentic RAG** | 受控 Agent 循环：检索 → 评估 → 再检索/SQL/MCP 工具 → 最多 4 步 | ✅ |
@@ -198,7 +200,8 @@ pytest tests/ -v
 用户问题
   → 查询改写 (术语映射 + LLM消解指代)
   → 意图识别 (层级意图树 → 路由知识库)
-  → 三路并行检索 (Milvus向量 + ES BM25 + Neo4j/LightRAG图谱)
+  → HyDE 假设文档生成 (轻量 LLM → 额外向量检索通道，可选)
+  → 四路并行检索 (Milvus向量 + ES BM25 + Neo4j/LightRAG图谱 + HyDE 假设文档向量)
   → RRF 融合 (多路结果加权合并)
   → 内容去重 (Jaccard 3-gram)
   → 近邻补偿 (召回命中块前后各2块，补全上下文)
@@ -218,6 +221,15 @@ pytest tests/ -v
 - **可观测性升级**：新增 15 个 Prometheus 业务指标，含 TTFT（首字节时间）、LLM 流式延迟、摄取任务队列深度
 - **403 全局提示**：权限不足时前端自动弹出 Toast 提示
 - **术语映射命中统计**：查询词映射命中次数写入数据库，支持分析高频映射
+
+## v0.0.3 新特性
+
+- **HyDE 假设文档嵌入**：用轻量 LLM（默认 qwen-turbo-latest）为用户问题生成"假设性答案文档"，将假设文档嵌入后作为额外的向量检索通道（`hyde_vector`），在 RRF 融合中以权重 0.8 参与排序，桥接 short-query 与 long-document 之间的语义鸿沟
+- **HyDE 并行执行**：在 TTFT 优化路径中与改写、意图识别并行执行，15s 独立超时，不阻塞主检索链路
+- **HyDE 前端交互**：问答输入框 HyDE 开关按钮（rose 色调）、假设文档可折叠面板（展示生成模型、耗时、全文）、超时/降级状态提示、检索通道归因标签
+- **HyDE 治理**：独立 Circuit Breaker 熔断（3 次失败打开、30s 后半开）、MockLLMClient 自动跳过、`__THINK__` 推理前缀过滤、硬截断防超长输出
+- **数据持久化**：`t_conversation_message` 表新增 `hyde_doc` 和 `hyde_meta` 列，假设文档随对话历史持久化存储
+- **能力发现**：`GET /api/capabilities` 返回 `hyde.available` 和 `hyde.defaultEnabled`，前端按需展示开关按钮
 
 ## 技术栈
 

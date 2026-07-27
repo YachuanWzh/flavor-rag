@@ -145,6 +145,8 @@ def _message_payload(message: Message) -> dict:
         "agentSteps": message.agent_steps,
         "ragModes": message.rag_modes,
         "retrievalChannels": message.retrieval_channels,
+        "hydeDoc": message.hyde_doc,
+        "hydeMeta": message.hyde_meta,
         "createTime": str(message.create_time),
     }
 

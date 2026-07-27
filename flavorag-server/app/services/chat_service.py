@@ -111,6 +111,8 @@ class ChatService:
         agent_steps: list[dict] | None = None,
         rag_modes: dict | None = None,
         retrieval_channels: dict | None = None,
+        hyde_doc: str | None = None,
+        hyde_meta: dict | None = None,
     ) -> str:
         """Save a message and return its ID."""
         msg = Message(
@@ -125,6 +127,8 @@ class ChatService:
             agent_steps=agent_steps,
             rag_modes=rag_modes,
             retrieval_channels=retrieval_channels,
+            hyde_doc=hyde_doc,
+            hyde_meta=hyde_meta,
             create_time=datetime.now(timezone.utc).replace(tzinfo=None),
         )
         self.db.add(msg)

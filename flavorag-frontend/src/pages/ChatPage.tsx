@@ -25,6 +25,7 @@ export default function ChatPage() {
     deepThinkingEnabled, setDeepThinking,
     agenticRagEnabled, setAgenticRag,
     graphRagEnabled, setGraphRag, neighborExpansionEnabled, setNeighborExpansion, graphRevision,
+    hydeEnabled, setHyde,
     progressMessage,
   } = useChatStore();
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
@@ -52,6 +53,12 @@ export default function ChatPage() {
               capabilities.graphRag.available &&
               capabilities.graphRag.defaultEnabled
             );
+            if (capabilities.hyde) {
+              setHyde(
+                capabilities.hyde.available &&
+                capabilities.hyde.defaultEnabled
+              );
+            }
           })
           .catch(() => {
             // Capability discovery is advisory; per-request toggles still work.
@@ -214,6 +221,8 @@ export default function ChatPage() {
             onGraphRagChange={setGraphRag}
             neighborExpansion={neighborExpansionEnabled}
             onNeighborExpansionChange={setNeighborExpansion}
+            hyde={hydeEnabled}
+            onHydeChange={setHyde}
           />
         </main>
 

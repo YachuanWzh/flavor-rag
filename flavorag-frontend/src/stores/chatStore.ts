@@ -13,6 +13,7 @@ interface ChatState {
   agenticRagEnabled: boolean;
   graphRagEnabled: boolean;
   neighborExpansionEnabled: boolean;
+  hydeEnabled: boolean;
   graphRevision: number;
   streamingMessageId: string | null;
   openedSourceMessageId: string | null;
@@ -27,6 +28,7 @@ interface ChatState {
   setAgenticRag: (enabled: boolean) => void;
   setGraphRag: (enabled: boolean) => void;
   setNeighborExpansion: (enabled: boolean) => void;
+  setHyde: (enabled: boolean) => void;
   toggleSourcesPanel: (messageId: string) => void;
 
   sendMessage: (content: string) => Promise<void>;
@@ -44,10 +46,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   isLoading: false,
   isStreaming: false,
-  deepThinkingEnabled: false,
+  deepThinkingEnabled: true,
   agenticRagEnabled: false,
   graphRagEnabled: false,
   neighborExpansionEnabled: false,
+  hydeEnabled: false,
   graphRevision: 0,
   streamingMessageId: null,
   openedSourceMessageId: null,
@@ -76,6 +79,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setAgenticRag: (enabled) => set({ agenticRagEnabled: enabled }),
   setGraphRag: (enabled) => set({ graphRagEnabled: enabled }),
   setNeighborExpansion: (enabled) => set({ neighborExpansionEnabled: enabled }),
+  setHyde: (enabled) => set({ hydeEnabled: enabled }),
   toggleSourcesPanel: (messageId) =>
     set({
       openedSourceMessageId:
@@ -111,6 +115,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       agentic_rag: String(state.agenticRagEnabled),
       graph_rag: String(state.graphRagEnabled),
       neighbor_expansion: String(state.neighborExpansionEnabled),
+      hyde: String(state.hydeEnabled),
     });
     if (state.currentSessionId) {
       params.set("conversation_id", state.currentSessionId);
@@ -135,6 +140,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   ragModes: payload.modes,
                   retrievalChannels: payload.channels,
                   appliedMappings: payload.appliedMappings,
+                  hydeDoc: payload.hydeDoc || m.hydeDoc,
+                  hydeMeta: payload.hydeMeta || m.hydeMeta,
                 }
               : m
           ),
@@ -263,5 +270,7 @@ function formatMessage(m: any): Message {
     ragModes: m.ragModes,
     retrievalChannels: m.retrievalChannels,
     appliedMappings: m.appliedMappings,
+    hydeDoc: m.hydeDoc,
+    hydeMeta: m.hydeMeta,
   };
 }

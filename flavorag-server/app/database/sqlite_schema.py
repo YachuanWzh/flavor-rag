@@ -28,6 +28,8 @@ _COMPATIBILITY_COLUMNS: dict[str, dict[str, str]] = {
         "agent_steps": "JSON",
         "rag_modes": "JSON",
         "retrieval_channels": "JSON",
+        "hyde_doc": "TEXT",
+        "hyde_meta": "JSON",
     },
     "t_intent_node": {
         "tenant_id": "VARCHAR(64) NOT NULL DEFAULT 'default'",

@@ -122,6 +122,16 @@ class Settings(BaseSettings):
     ttft_early_feedback: bool = True  # 立即发送 progress 事件给前端
     ttft_speculative_search: bool = True  # rewrite 期间用原始 query 预搜索
 
+    # HyDE（Hypothetical Document Embeddings）
+    hyde_enabled: bool = False               # 全局默认开关（前端可逐请求覆盖）
+    hyde_model: str = "qwen-turbo-latest"    # 轻量模型，用于生成假设文档
+    hyde_base_url: str = ""                  # 为空时复用 llm_base_url
+    hyde_api_key: str = ""                   # 为空时复用 bailian_api_key / siliconflow_api_key
+    hyde_max_tokens: int = 512               # 假设文档最大 token 数
+    hyde_temperature: float = 0.7            # 生成温度（略高以增加多样性）
+    hyde_channel_weight: float = 0.8         # HyDE 通道在 RRF 融合中的权重
+    hyde_timeout_sec: float = 15.0            # 单次 HyDE 生成超时
+
     # 可观测性
     metrics_enabled: bool = True
     otel_enabled: bool = False

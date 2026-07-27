@@ -40,6 +40,11 @@ async def rag_capabilities(
                 "defaultEnabled": settings.graph_enabled,
                 "status": graph_health.get("status", "unknown"),
             },
+            "hyde": {
+                "available": bool(settings.hyde_model),
+                "defaultEnabled": settings.hyde_enabled,
+                "model": settings.hyde_model,
+            },
         },
     }
 

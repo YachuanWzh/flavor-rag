@@ -90,10 +90,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const state = get();
     if (state.isStreaming || !content.trim()) return;
 
+    // Update session title from default on first message
+    const trimmed = content.trim();
+    if (state.currentSessionId) {
+      const session = state.sessions.find(
+        (s) => s.id === state.currentSessionId,
+      );
+      if (session && session.title === "新对话") {
+        const newTitle =
+          trimmed.slice(0, 30) + (trimmed.length > 30 ? "..." : "");
+        set({
+          sessions: state.sessions.map((s) =>
+            s.id === state.currentSessionId
+              ? { ...s, title: newTitle }
+              : s,
+          ),
+        });
+        // Persist title to backend (fire-and-forget)
+        import("@/services/sessionService").then(
+          ({ renameSession }) =>
+            renameSession(state.currentSessionId!, newTitle).catch(
+              () => {},
+            ),
+        );
+      }
+    }
+
     const userMsg: Message = {
       id: `user_${Date.now()}`,
       role: "user",
-      content: content.trim(),
+      content: trimmed,
     };
 
     const assistantMsg: Message = {

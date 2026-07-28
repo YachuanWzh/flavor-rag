@@ -265,6 +265,23 @@ async def chat(
             db.add(conv)
             await db.flush()
             conversation_id = conv.id
+        else:
+            # Update default title on first user message
+            conv_result = await db.execute(
+                select(Conversation).where(
+                    Conversation.id == conversation_id,
+                    Conversation.user_id == user.id,
+                    Conversation.deleted == 0,
+                )
+            )
+            existing = conv_result.scalar_one_or_none()
+            if existing and existing.title == "新对话":
+                existing.title = question[:30] + (
+                    "..." if len(question) > 30 else ""
+                )
+                existing.last_time = datetime.now(timezone.utc).replace(
+                    tzinfo=None
+                )
 
         # Release the write lock before the long-running retrieval/stream.
         await db.commit()

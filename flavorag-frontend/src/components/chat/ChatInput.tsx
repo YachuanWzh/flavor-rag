@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   Layers,
+  LockKeyhole,
   Network,
   Orbit,
   Send,
@@ -18,6 +19,7 @@ interface Props {
   onAgenticRagChange: (enabled: boolean) => void;
   graphRag: boolean;
   onGraphRagChange: (enabled: boolean) => void;
+  graphRagLocked?: boolean;
   neighborExpansion: boolean;
   onNeighborExpansionChange: (enabled: boolean) => void;
   hyde: boolean;
@@ -29,29 +31,26 @@ interface ModeToggleProps {
   label: string;
   description: string;
   icon: React.ReactNode;
-  tone: "violet" | "amber" | "cyan" | "emerald" | "rose";
+  tone: "amber" | "cyan" | "emerald" | "rose";
   onClick: () => void;
+  disabled?: boolean;
 }
 
 const toneClasses = {
-  violet: {
-    active: "border-violet-300 bg-violet-50 text-violet-700 shadow-[0_0_0_1px_rgba(139,92,246,0.05)]",
-    dot: "bg-violet-500",
-  },
   amber: {
-    active: "border-amber-300 bg-amber-50 text-amber-800 shadow-[0_0_0_1px_rgba(245,158,11,0.05)]",
+    active: "border-amber-300 bg-amber-50 text-amber-800",
     dot: "bg-amber-500",
   },
   cyan: {
-    active: "border-cyan-300 bg-cyan-50 text-cyan-800 shadow-[0_0_0_1px_rgba(6,182,212,0.05)]",
+    active: "border-cyan-300 bg-cyan-50 text-cyan-800",
     dot: "bg-cyan-500",
   },
   emerald: {
-    active: "border-emerald-300 bg-emerald-50 text-emerald-800 shadow-[0_0_0_1px_rgba(16,185,129,0.05)]",
+    active: "border-emerald-300 bg-emerald-50 text-emerald-800",
     dot: "bg-emerald-500",
   },
   rose: {
-    active: "border-rose-300 bg-rose-50 text-rose-800 shadow-[0_0_0_1px_rgba(244,63,94,0.05)]",
+    active: "border-rose-300 bg-rose-50 text-rose-800",
     dot: "bg-rose-500",
   },
 };
@@ -63,15 +62,17 @@ function ModeToggle({
   icon,
   tone,
   onClick,
+  disabled = false,
 }: ModeToggleProps) {
   const palette = toneClasses[tone];
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       aria-pressed={active}
       title={description}
-      className={`group inline-flex min-h-8 items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 ${
+      className={`group inline-flex min-h-8 items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 disabled:cursor-not-allowed ${
         active
           ? palette.active
           : "border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-800"
@@ -79,9 +80,10 @@ function ModeToggle({
     >
       <span className={active ? "opacity-100" : "opacity-60"}>{icon}</span>
       <span>{label}</span>
+      {disabled && <LockKeyhole className="h-3 w-3 opacity-60" />}
       <span
         aria-hidden="true"
-        className={`h-1.5 w-1.5 rounded-full transition ${
+        className={`h-1.5 w-1.5 rounded-full ${
           active ? palette.dot : "bg-slate-300"
         }`}
       />
@@ -93,12 +95,11 @@ export default function ChatInput({
   onSend,
   onCancel,
   isStreaming,
-  deepThinking,
-  onDeepThinkingChange,
   agenticRag,
   onAgenticRagChange,
   graphRag,
   onGraphRagChange,
+  graphRagLocked = false,
   neighborExpansion,
   onNeighborExpansionChange,
   hyde,
@@ -113,13 +114,6 @@ export default function ChatInput({
     setText("");
   };
 
-  const handleKeyDown = (event: React.KeyboardEvent) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      handleSubmit(event);
-    }
-  };
-
   return (
     <form
       onSubmit={handleSubmit}
@@ -130,7 +124,12 @@ export default function ChatInput({
           <textarea
             value={text}
             onChange={(event) => setText(event.target.value)}
-            onKeyDown={handleKeyDown}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                handleSubmit(event);
+              }
+            }}
             placeholder="向知识库提问…"
             rows={2}
             disabled={isStreaming}
@@ -169,16 +168,20 @@ export default function ChatInput({
           <ModeToggle
             active={graphRag}
             label="Graph RAG"
-            description="把知识图谱证据并入召回，并打开关系图"
+            description={
+              graphRagLocked
+                ? "全部知识库检索必须启用 Graph RAG"
+                : "把知识图谱证据并入召回，并打开关系图"
+            }
             icon={<Network className="h-3.5 w-3.5" />}
             tone="cyan"
             onClick={() => onGraphRagChange(!graphRag)}
+            disabled={graphRagLocked}
           />
-          {/* 深度思考按钮已隐藏，默认开启 */}
           <ModeToggle
             active={neighborExpansion}
             label="近邻补偿"
-            description="召回每个chunk前后各两段作为上下文补偿"
+            description="召回每个分块前后的相邻段落作为上下文"
             icon={<Layers className="h-3.5 w-3.5" />}
             tone="emerald"
             onClick={() => onNeighborExpansionChange(!neighborExpansion)}
@@ -186,7 +189,7 @@ export default function ChatInput({
           <ModeToggle
             active={hyde}
             label="HyDE"
-            description="生成假设性答案文档辅助向量检索，提升召回率"
+            description="生成假设性答案辅助向量检索"
             icon={<Sparkles className="h-3.5 w-3.5" />}
             tone="rose"
             onClick={() => onHydeChange(!hyde)}

@@ -28,7 +28,7 @@ export default function ChatPage() {
     addSession, removeSession,
     deepThinkingEnabled, setDeepThinking,
     agenticRagEnabled, setAgenticRag,
-    graphRagEnabled, setGraphRag, neighborExpansionEnabled, setNeighborExpansion, graphRevision,
+    graphRagEnabled, setGraphRag, neighborExpansionEnabled, setNeighborExpansion, graphRevision, graphFocusQuery,
     hydeEnabled, setHyde,
     progressMessage,
   } = useChatStore();
@@ -51,7 +51,7 @@ export default function ChatPage() {
         setSessions(sess);
         setKbs(kbList);
         if (sess.length > 0) setCurrentSession(sess[0].id);
-        if (kbList.length > 0) setSelectedKbId(kbList[0].id);
+        if (kbList.length > 0) setSelectedKbId("*");
         setInitLoading(false);
         fetchRagCapabilities()
           .then((capabilities) => {
@@ -138,6 +138,7 @@ export default function ChatPage() {
             className="w-full text-xs border rounded px-2 py-1.5 bg-white"
           >
             <option value="">— 不检索 —</option>
+            <option value="*">全部知识库</option>
             {kbs.map((kb) => (
               <option key={kb.id} value={kb.id}>{kb.name}</option>
             ))}
@@ -186,6 +187,7 @@ export default function ChatPage() {
                 className="mt-0.5 w-full truncate border-0 bg-transparent p-0 text-xs font-medium text-slate-800 outline-none"
               >
                 <option value="">不检索知识库</option>
+                <option value="*">全部知识库</option>
                 {kbs.map((kb) => (
                   <option key={kb.id} value={kb.id}>{kb.name}</option>
                 ))}
@@ -233,6 +235,7 @@ export default function ChatPage() {
             onAgenticRagChange={setAgenticRag}
             graphRag={graphRagEnabled}
             onGraphRagChange={setGraphRag}
+            graphRagLocked={selectedKbId === "*"}
             neighborExpansion={neighborExpansionEnabled}
             onNeighborExpansionChange={setNeighborExpansion}
             hyde={hydeEnabled}
@@ -243,8 +246,14 @@ export default function ChatPage() {
         {graphRagEnabled && (
           <KnowledgeGraphPanel
             kbId={selectedKbId}
-            kbName={kbs.find((kb) => kb.id === selectedKbId)?.name}
+            kbName={
+              selectedKbId === "*"
+                ? "全部知识库"
+                : kbs.find((kb) => kb.id === selectedKbId)?.name
+            }
             refreshKey={graphRevision}
+            focusQuery={graphFocusQuery}
+            locked={selectedKbId === "*"}
             onClose={() => setGraphRag(false)}
           />
         )}

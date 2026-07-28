@@ -1,8 +1,20 @@
 # flavor-rag
 
-> 版本：v0.0.5 · 企业级 RAG 数据面加固版 · 2026-07-28
+> 版本：v0.0.6 · 跨知识库 Graph RAG 版 · 2026-07-28
 
 flavor-rag 是一个面向企业知识库的全链路 RAG 系统，覆盖多格式摄取、版本化索引、混合检索、证据约束生成、引用、长期记忆、离线评测和生产可观测性。本版本不把登录与权限作为企业级结论的一部分；重点是 RAG 数据面的正确性、可恢复性和可运维性。
+
+## v0.0.6 关键变化
+
+- **跨库检索**：知识库选择器新增“全部知识库”，显式使用 `kb_id=*`；服务端只展开当前用户有读取权限的知识库，向量、BM25、Neo4j 和 LightRAG 按库并发检索，融合后由 PostgreSQL 按精确 KB 集合与文档 ACL 再次过滤。
+- **强制 Graph RAG**：选择“全部知识库”后前端自动开启并锁定 Graph RAG；服务端也会忽略伪造的 `graph_rag=false`，确保跨库请求始终调度图谱通道。
+- **跨库知识关联**：Neo4j 实体新增 `tenant_id` 与 `normalized_name`，同租户、不同知识库的规范化同名实体通过 `CROSS_KB_RELATED` 关联；现有图数据在读取时也能生成同名实体桥。
+- **200 实体知识星图**：关系图按实际实体数展示，上限从 80 提升到 200；支持画布拖拽、鼠标指针锚定滚轮缩放、按钮缩放/复位、知识库聚类与来源图例。
+- **Graph 召回动效**：Graph 通道实际召回证据后，前端从查询匹配实体出发高亮连通路径，显示节点呼吸与边光流；`prefers-reduced-motion` 下自动降级为静态高亮。
+- **知识库创建修复**：前端不再硬编码无效的 Embedding 简写；服务端以 `EMBEDDING_MODEL` 为默认权威，并兼容旧值 `qwen3-embedding-8b`，统一规范化为 SiliconFlow 可识别的 `Qwen/Qwen3-Embedding-8B`。
+- **SDD + TDD**：新增跨库 Graph RAG 与知识库创建契约测试；后端全量 `203 passed`，前端 `6 passed`、TypeScript、生产构建和 200 节点桌面/窄屏视觉 QA 通过。
+
+详细设计见 [跨知识库 Graph RAG SDD](docs/specs/cross-knowledge-base-graph-rag.md)，部署与故障处理见 [运维手册](docs/operations-runbook.md)，完整实现说明见 [技术方案文档](技术方案文档.md)。
 
 ## v0.0.5 关键变化
 
@@ -16,7 +28,7 @@ flavor-rag 是一个面向企业知识库的全链路 RAG 系统，覆盖多格�
 - 企业评测：评测绑定 corpus snapshot、document/index generation、embedding 模型和 prompt 版本，同时计算 Retrieval 与 Answer 指标、95% 置信区间、最小样本门禁和生成阶段 prompt-injection canary。
 - 生产部署：空 PostgreSQL 可直接 `alembic upgrade head`；容器使用锁定依赖、自动迁移、无 reload 多 worker、liveness/readiness、Prometheus 告警和 Grafana 面板。
 
-详细设计见 [0.0.5 SDD](docs/0.0.5-enterprise-rag-sdd.md)，部署与故障处理见 [运维手册](docs/operations-runbook.md)，完整实现说明见 [技术方案文档](技术方案文档.md)。
+0.0.5 的详细设计见 [0.0.5 SDD](docs/0.0.5-enterprise-rag-sdd.md)。
 
 ## 架构
 
@@ -32,8 +44,9 @@ flowchart LR
     M --> A["原子激活 generation"]
     E --> A
     N --> A
-    A --> R["Vector + BM25 + Graph + HyDE"]
-    R --> F["RRF / Dedup / Rerank / Budget"]
+    A --> R["单库 / 全部可读知识库"]
+    R --> X["Vector + BM25 + Graph + HyDE 按库 fan-out"]
+    X --> F["RRF / Dedup / ACL / Rerank / Budget"]
     F --> L["不可信证据约束生成"]
     L --> C["引用校验 + SSE + 持久化"]
     C --> EV["离线评测与质量门禁"]
@@ -116,7 +129,7 @@ LLM_CONTEXT_WINDOW_TOKENS=8192
 LLM_MAX_OUTPUT_TOKENS=2048
 ```
 
-`EMBEDDING_DIM` 只是默认值。创建知识库时会实际探测模型输出维度并写入 index generation；已有 collection 不会因配置变化被删除。
+`EMBEDDING_MODEL` 是新建知识库的服务端默认权威，前端未显式选型时不会重复发送模型名；历史简写 `qwen3-embedding-8b` 会在服务端规范化。`EMBEDDING_DIM` 只是默认值。创建知识库时会实际探测模型输出维度并写入 index generation；已有 collection 不会因配置变化被删除。
 
 ## RAG 数据面
 
@@ -136,6 +149,10 @@ PENDING generation → required indexes success → ACTIVE
 
 ### 检索
 
+- `kb_id=*` 表示“全部可读知识库”；缺省/`null` 仍保留旧的首库选择语义，不与全库范围混用。
+- 全库模式会解析为 `{kb_id, active collection, embedding model}` 范围集合，各检索通道按范围 fan-out；最终 ACL 过滤失败时 fail closed。
+- 全库模式强制 Graph RAG，不能通过前端开关或直接 API 请求关闭。
+- 图谱 API 默认且最多返回 200 个实体；`truncated=true` 仅表示实际匹配实体超过 200。
 - Query rewrite、intent、推测向量检索和可选 HyDE 并行执行。
 - Vector、BM25、Graph 多通道有独立超时、熔断、状态和指标。
 - RRF、vector、reranker 使用独立阈值。

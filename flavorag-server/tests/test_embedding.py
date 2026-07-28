@@ -42,6 +42,21 @@ class TestFactory:
         from app.llm.embedding import EmbeddingClient
         assert isinstance(client, EmbeddingClient)
 
+    def test_legacy_qwen_model_alias_is_canonicalized(self):
+        client = get_embedding_client(
+            api_key="sk-fake-xxx",
+            model="qwen3-embedding-8b",
+        )
+
+        assert client.model == "Qwen/Qwen3-Embedding-8B"
+
+    def test_missing_model_uses_configured_default(self):
+        from app.config.settings import settings
+
+        client = get_embedding_client(api_key="sk-fake-xxx", model=None)
+
+        assert client.model == settings.embedding_model
+
 
 @pytest.mark.asyncio
 async def test_query_embedding_uses_bounded_attempts_and_cache(monkeypatch):

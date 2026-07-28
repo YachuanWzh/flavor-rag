@@ -16,6 +16,18 @@ _query_cache: OrderedDict[tuple[str, str, str], list[float]] = OrderedDict()
 _query_cache_lock = asyncio.Lock()
 _log = get_logger("flavorag.embedding")
 
+_MODEL_ALIASES = {
+    # v0.0.5 and earlier UI default. SiliconFlow requires the provider-qualified
+    # model identifier and returns HTTP 400 for this legacy shorthand.
+    "qwen3-embedding-8b": "Qwen/Qwen3-Embedding-8B",
+}
+
+
+def normalize_embedding_model(model: str | None) -> str:
+    """Resolve configured defaults and supported legacy model aliases."""
+    candidate = (model or "").strip() or settings.embedding_model
+    return _MODEL_ALIASES.get(candidate.lower(), candidate)
+
 
 class EmbeddingClient:
     """OpenAI-compatible embedding API client via HTTPX."""
@@ -28,7 +40,7 @@ class EmbeddingClient:
     ):
         self.api_key = api_key if api_key is not None else settings.siliconflow_api_key
         self.base_url = (base_url or settings.embedding_base_url).rstrip("/")
-        self.model = model or settings.embedding_model
+        self.model = normalize_embedding_model(model)
         self.dim = settings.embedding_dim
 
     async def embed_query(self, text: str) -> list[float]:

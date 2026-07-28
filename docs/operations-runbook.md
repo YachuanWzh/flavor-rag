@@ -1,4 +1,4 @@
-# flavor-rag 0.0.5 运维手册
+# flavor-rag 0.0.6 运维手册
 
 本文只覆盖 RAG 数据面，不讨论登录和授权。生产环境的事实源是 PostgreSQL；Milvus、Elasticsearch 和图索引均可由事实源重建。
 
@@ -13,6 +13,7 @@ uv run alembic upgrade head
 
 cd ../flavorag-frontend
 npm ci
+npm test
 npm run build
 
 docker compose -f ../docker/app.compose.yaml config --quiet
@@ -57,6 +58,14 @@ alembic upgrade head
 - 新 generation 只有在向量数和维度校验通过后才切换；失败时旧 collection 保持 active。
 - reconciliation worker 每 30 分钟对账 PostgreSQL active chunk 与 Milvus，缺失项进入 repair queue，孤儿向量被清理。
 - retired/failed collection 默认保留 7 天后删除，可用 `INDEX_RETIRED_RETENTION_DAYS` 调整。
+
+## 跨库 Graph RAG
+
+- `kb_id=*` 只表示当前用户全部可读知识库，不表示绕过租户/ACL 的系统全局范围。
+- 全库请求会按知识库数放大 Vector、BM25 和 Graph 查询量，应监控 Graph 通道延迟、超时与 breaker 状态。
+- 组合图公共上限为 200 个实体；`truncated=true` 是正常的容量提示，不是图服务错误。
+- v0.0.6 之后重新处理的文档会持久化 `tenant_id`、`normalized_name` 和 `CROSS_KB_RELATED`。历史图可在读取时获得严格同名的临时跨库桥；若需要忽略标点/空格的规范化关联，应通过既有摄取/索引修复流程重新处理文档，不要直接批量修改 Neo4j。
+- Graph/LightRAG 故障可按 optional channel 降级，但全库请求仍会调度 Graph 通道并在 channel status 中暴露失败。
 
 ## 队列事故
 

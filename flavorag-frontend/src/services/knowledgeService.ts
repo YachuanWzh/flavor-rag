@@ -17,12 +17,12 @@ export async function fetchKnowledgeBases(): Promise<KnowledgeBase[]> {
 
 export async function createKnowledgeBase(
   name: string,
-  embeddingModel: string = "qwen3-embedding-8b",
+  embeddingModel?: string,
   pipelineId: string = ""
 ): Promise<KnowledgeBase> {
   const form = new FormData();
   form.append("name", name);
-  form.append("embedding_model", embeddingModel);
+  if (embeddingModel) form.append("embedding_model", embeddingModel);
   if (pipelineId) form.append("pipeline_id", pipelineId);
   return api.post("/api/knowledge-base", form);
 }

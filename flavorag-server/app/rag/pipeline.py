@@ -113,6 +113,14 @@ async def _intent_for_pipeline(
     )
 
 
+@dataclass(frozen=True)
+class RetrievalScope:
+    kb_id: str
+    kb_name: str
+    collection_name: str
+    embedding_model: str | None = None
+
+
 @dataclass
 class RAGContext:
     question: str
@@ -134,6 +142,7 @@ class RAGContext:
     memories: list[dict] = field(default_factory=list)  # mem0 relevant facts
     final_top_k: int | None = None
     embedding_model: str | None = None
+    retrieval_scopes: list[RetrievalScope] = field(default_factory=list)
 
 
 @dataclass
@@ -199,6 +208,118 @@ class RAGPipeline:
         return await self.milvus.search(
             query, collection_name, top_k=top_k
         )
+
+    @staticmethod
+    def _resolved_scopes(
+        ctx: RAGContext, fallback_collection: str
+    ) -> list[RetrievalScope]:
+        if ctx.retrieval_scopes:
+            return ctx.retrieval_scopes
+        if not ctx.kb_id:
+            return []
+        return [
+            RetrievalScope(
+                kb_id=ctx.kb_id,
+                kb_name="",
+                collection_name=ctx.collection_name or fallback_collection,
+                embedding_model=ctx.embedding_model,
+            )
+        ]
+
+    async def _search_vector_scopes(
+        self,
+        queries: list[str],
+        scopes: list[RetrievalScope],
+        *,
+        top_k: int,
+    ) -> list[SearchResult]:
+        batches = await asyncio.gather(
+            *(
+                self._search_vector(
+                    query,
+                    scope.collection_name,
+                    top_k=top_k,
+                    embedding_model=scope.embedding_model,
+                )
+                for query in queries
+                for scope in scopes
+            )
+        )
+        return [item for batch in batches for item in batch]
+
+    async def _search_keyword_scopes(
+        self,
+        queries: list[str],
+        scopes: list[RetrievalScope],
+        *,
+        top_k: int,
+    ) -> list[SearchResult]:
+        batches = await asyncio.gather(
+            *(
+                self.es.search(query, scope.kb_id, top_k=top_k)
+                for query in queries
+                for scope in scopes
+            )
+        )
+        return [item for batch in batches for item in batch]
+
+    async def _search_graph_scopes(
+        self,
+        queries: list[str],
+        scopes: list[RetrievalScope],
+        *,
+        top_k: int,
+        timeout_seconds: float,
+    ) -> list[SearchResult]:
+        async def search_one(query: str, scope: RetrievalScope) -> list[SearchResult]:
+            output = await self.native_graph.search(
+                query,
+                kb_id=scope.kb_id,
+                top_k=top_k,
+            )
+            try:
+                response = await asyncio.wait_for(
+                    self.graph_client.query_graph(
+                        query,
+                        top_k=top_k,
+                        kb_id=scope.kb_id,
+                        collection_name=scope.collection_name,
+                        enabled=True,
+                    ),
+                    timeout=timeout_seconds,
+                )
+                output.extend(
+                    SearchResult(
+                        chunk_id=hit.get("chunk_id") or hit.get("id", ""),
+                        doc_id=hit.get("doc_id", ""),
+                        content=hit.get("content", ""),
+                        score=float(hit.get("score", 0.0)),
+                        metadata={
+                            "graphEntity": hit.get("entity", ""),
+                            "knowledgeBaseId": scope.kb_id,
+                        },
+                    )
+                    for hit in response.get("results", [])
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                _pipeline_log.warning(
+                    "lightrag_query_timeout_using_native_graph",
+                    query=query[:80],
+                    kb_id=scope.kb_id,
+                )
+            except Exception as exc:
+                _pipeline_log.warning(
+                    "lightrag_query_failed_using_native_graph",
+                    query=query[:80],
+                    kb_id=scope.kb_id,
+                    error=type(exc).__name__,
+                )
+            return output
+
+        batches = await asyncio.gather(
+            *(search_one(query, scope) for query in queries for scope in scopes)
+        )
+        return [item for batch in batches for item in batch]
 
     def _adjust_budget_for_profile(self, budget: RetrievalBudget, ctx: RAGContext) -> RetrievalBudget:
         """Adjust retrieval budget based on user profile (expertise level + intent distribution).
@@ -407,6 +528,7 @@ class RAGPipeline:
             or "default_store"
         )
         _pipeline_log.info("collection_resolved", collection_name=collection_name)
+        scopes = self._resolved_scopes(ctx, collection_name)
 
         search_question = rewritten or ctx.question
 
@@ -417,77 +539,29 @@ class RAGPipeline:
         t_search = datetime.now(timezone.utc).replace(tzinfo=None)
 
         async def vector_search() -> list[SearchResult]:
-            batches = await asyncio.gather(
-                *(
-                    self._search_vector(
-                        query,
-                        collection_name,
-                        top_k=budget.per_channel_top_k,
-                        embedding_model=ctx.embedding_model,
-                    )
-                    for query in subqueries
-                )
+            return await self._search_vector_scopes(
+                subqueries,
+                scopes,
+                top_k=budget.per_channel_top_k,
             )
-            return [item for batch in batches for item in batch]
 
         async def keyword_search() -> list[SearchResult]:
-            batches = await asyncio.gather(
-                *(
-                    self.es.search(
-                        query,
-                        ctx.kb_id or collection_name,
-                        top_k=budget.per_channel_top_k,
-                    )
-                    for query in subqueries
-                )
+            return await self._search_keyword_scopes(
+                subqueries,
+                scopes,
+                top_k=budget.per_channel_top_k,
             )
-            return [item for batch in batches for item in batch]
 
         async def graph_search() -> list[SearchResult]:
-            output: list[SearchResult] = []
-            for query in subqueries:
-                native_results = await self.native_graph.search(
-                    query,
-                    kb_id=ctx.kb_id or "",
-                    top_k=budget.per_channel_top_k,
-                )
-                output.extend(native_results)
-                try:
-                    response = await asyncio.wait_for(
-                        self.graph_client.query_graph(
-                            query,
-                            top_k=budget.per_channel_top_k,
-                            kb_id=ctx.kb_id or "",
-                            collection_name=ctx.collection_name or "",
-                            enabled=True,
-                        ),
-                        timeout=max(
-                            0.5,
-                            min(1.5, budget.channel_timeout_ms / 2000),
-                        ),
-                    )
-                    output.extend(
-                        SearchResult(
-                            chunk_id=hit.get("chunk_id") or hit.get("id", ""),
-                            doc_id=hit.get("doc_id", ""),
-                            content=hit.get("content", ""),
-                            score=float(hit.get("score", 0.0)),
-                            metadata={"graphEntity": hit.get("entity", "")},
-                        )
-                        for hit in response.get("results", [])
-                    )
-                except (TimeoutError, asyncio.TimeoutError):
-                    _pipeline_log.warning(
-                        "lightrag_query_timeout_using_native_graph",
-                        query=query[:80],
-                    )
-                except Exception as exc:
-                    _pipeline_log.warning(
-                        "lightrag_query_failed_using_native_graph",
-                        query=query[:80],
-                        error=type(exc).__name__,
-                    )
-            return output
+            return await self._search_graph_scopes(
+                subqueries,
+                scopes,
+                top_k=budget.per_channel_top_k,
+                timeout_seconds=max(
+                    0.5,
+                    min(1.5, budget.channel_timeout_ms / 2000),
+                ),
+            )
 
         requested_channels = set(intent_resolution.search_channels)
         if "bm25" in requested_channels:
@@ -502,8 +576,9 @@ class RAGPipeline:
         graph_enabled = (
             settings.graph_enabled if ctx.graph_rag is None else ctx.graph_rag
         )
+        global_scope = ctx.kb_id is None and bool(ctx.retrieval_scopes)
         if graph_enabled and (
-            not requested_channels or "graph" in requested_channels
+            global_scope or not requested_channels or "graph" in requested_channels
         ):
             channels["graph"] = graph_search
         guarded_channels = {}
@@ -622,7 +697,11 @@ class RAGPipeline:
                     },
                 )
 
-        if ctx.kb_id:
+        post_process_scopes = self._resolved_scopes(
+            ctx, ctx.collection_name or "default_store"
+        )
+        allowed_kb_ids = [scope.kb_id for scope in post_process_scopes]
+        if allowed_kb_ids:
             principal = Principal(
                 user_id=ctx.user_id,
                 tenant_id=ctx.tenant_id,
@@ -630,9 +709,14 @@ class RAGPipeline:
                 role=ctx.role,
             )
             async with async_session_factory() as session:
-                deduped = await filter_authorized_results(
-                    session, principal, deduped, kb_id=ctx.kb_id
-                )
+                if len(allowed_kb_ids) == 1:
+                    deduped = await filter_authorized_results(
+                        session, principal, deduped, kb_id=allowed_kb_ids[0]
+                    )
+                else:
+                    deduped = await filter_authorized_results(
+                        session, principal, deduped, kb_ids=allowed_kb_ids
+                    )
         else:
             deduped = []
         recall_count = len(deduped)
@@ -786,15 +870,23 @@ class RAGPipeline:
         # Speculative vector search with original query (while LLM calls in flight)
         speculative_task: asyncio.Task | None = None
         collection_name = ctx.collection_name or "default_store"
-        speculative_collection_name = collection_name
-        if settings.ttft_speculative_search:
+        speculative_scopes = self._resolved_scopes(ctx, collection_name)
+        speculative_scope = (
+            speculative_scopes[0] if len(speculative_scopes) == 1 else None
+        )
+        speculative_collection_name = (
+            speculative_scope.collection_name
+            if speculative_scope
+            else collection_name
+        )
+        if settings.ttft_speculative_search and speculative_scope:
             async def _speculative_vector():
                 try:
                     return await self._search_vector(
                         ctx.question,
-                        collection_name,
+                        speculative_scope.collection_name,
                         top_k=budget.per_channel_top_k,
-                        embedding_model=ctx.embedding_model,
+                        embedding_model=speculative_scope.embedding_model,
                     )
                 except Exception:
                     return []
@@ -917,6 +1009,7 @@ class RAGPipeline:
             or (intent.get("collection_name") if intent else None)
             or "default_store"
         )
+        scopes = self._resolved_scopes(ctx, collection_name)
 
         # Build subqueries from rewrite result
         search_question = rewritten or ctx.question
@@ -965,64 +1058,33 @@ class RAGPipeline:
             ):
                 return speculative_results
             # Otherwise search with all subqueries
-            batches = await asyncio.gather(
-                *(
-                    self._search_vector(
-                        query,
-                        collection_name,
-                        top_k=budget.per_channel_top_k,
-                        embedding_model=ctx.embedding_model,
-                    )
-                    for query in subqueries
-                )
+            results = await self._search_vector_scopes(
+                subqueries,
+                scopes,
+                top_k=budget.per_channel_top_k,
             )
-            results = [item for batch in batches for item in batch]
             # Merge speculative results if query was rewritten
             if speculative_results and rewritten:
                 results = speculative_results + results
             return results
 
         async def keyword_search() -> list[SearchResult]:
-            batches = await asyncio.gather(
-                *(
-                    self.es.search(query, ctx.kb_id or collection_name, top_k=budget.per_channel_top_k)
-                    for query in subqueries
-                )
+            return await self._search_keyword_scopes(
+                subqueries,
+                scopes,
+                top_k=budget.per_channel_top_k,
             )
-            return [item for batch in batches for item in batch]
 
         async def graph_search() -> list[SearchResult]:
-            output: list[SearchResult] = []
-            for query in subqueries:
-                native_results = await self.native_graph.search(
-                    query, kb_id=ctx.kb_id or "", top_k=budget.per_channel_top_k
-                )
-                output.extend(native_results)
-                try:
-                    response = await asyncio.wait_for(
-                        self.graph_client.query_graph(
-                            query, top_k=budget.per_channel_top_k,
-                            kb_id=ctx.kb_id or "",
-                            collection_name=ctx.collection_name or "",
-                            enabled=True,
-                        ),
-                        timeout=max(0.5, min(1.5, budget.channel_timeout_ms / 2000)),
-                    )
-                    output.extend(
-                        SearchResult(
-                            chunk_id=hit.get("chunk_id") or hit.get("id", ""),
-                            doc_id=hit.get("doc_id", ""),
-                            content=hit.get("content", ""),
-                            score=float(hit.get("score", 0.0)),
-                            metadata={"graphEntity": hit.get("entity", "")},
-                        )
-                        for hit in response.get("results", [])
-                    )
-                except (TimeoutError, asyncio.TimeoutError):
-                    _pipeline_log.warning("lightrag_query_timeout", query=query[:80])
-                except Exception as exc:
-                    _pipeline_log.warning("lightrag_query_failed", query=query[:80], error=type(exc).__name__)
-            return output
+            return await self._search_graph_scopes(
+                subqueries,
+                scopes,
+                top_k=budget.per_channel_top_k,
+                timeout_seconds=max(
+                    0.5,
+                    min(1.5, budget.channel_timeout_ms / 2000),
+                ),
+            )
 
         requested_channels = set(intent_resolution.search_channels)
         if "bm25" in requested_channels:
@@ -1033,7 +1095,10 @@ class RAGPipeline:
         if settings.es_enabled and (not requested_channels or "keyword" in requested_channels):
             channels["keyword"] = keyword_search
         graph_enabled = settings.graph_enabled if ctx.graph_rag is None else ctx.graph_rag
-        if graph_enabled and (not requested_channels or "graph" in requested_channels):
+        global_scope = ctx.kb_id is None and bool(ctx.retrieval_scopes)
+        if graph_enabled and (
+            global_scope or not requested_channels or "graph" in requested_channels
+        ):
             channels["graph"] = graph_search
 
         # HyDE vector channel — additional retrieval channel that searches with
@@ -1042,11 +1107,10 @@ class RAGPipeline:
             _hyde_doc = hyde_result.hypothetical_doc
 
             async def hyde_vector_search() -> list[SearchResult]:
-                return await self._search_vector(
-                    _hyde_doc,
-                    collection_name,
+                return await self._search_vector_scopes(
+                    [_hyde_doc],
+                    scopes,
                     top_k=budget.per_channel_top_k,
-                    embedding_model=ctx.embedding_model,
                 )
 
             channels["hyde_vector"] = hyde_vector_search
@@ -1181,15 +1245,24 @@ class RAGPipeline:
                     output_data={"after_count": neighbor_after, "neighbors_added": neighbor_after - neighbor_before},
                 )
 
-        if ctx.kb_id:
+        post_process_scopes = self._resolved_scopes(
+            ctx, ctx.collection_name or "default_store"
+        )
+        allowed_kb_ids = [scope.kb_id for scope in post_process_scopes]
+        if allowed_kb_ids:
             principal = Principal(
                 user_id=ctx.user_id, tenant_id=ctx.tenant_id,
                 department_id=ctx.department_id, role=ctx.role,
             )
             async with async_session_factory() as session:
-                deduped = await filter_authorized_results(
-                    session, principal, deduped, kb_id=ctx.kb_id
-                )
+                if len(allowed_kb_ids) == 1:
+                    deduped = await filter_authorized_results(
+                        session, principal, deduped, kb_id=allowed_kb_ids[0]
+                    )
+                else:
+                    deduped = await filter_authorized_results(
+                        session, principal, deduped, kb_ids=allowed_kb_ids
+                    )
         else:
             deduped = []
         recall_count = len(deduped)

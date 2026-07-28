@@ -166,11 +166,13 @@ async def filter_authorized_results(
     principal: Principal,
     results: list[SearchResult],
     *,
-    kb_id: str,
+    kb_id: str | None = None,
+    kb_ids: list[str] | None = None,
 ) -> list[SearchResult]:
     """Fail-closed post-filter for every external retrieval channel."""
     chunk_ids = [item.chunk_id for item in results if item.chunk_id]
-    if not chunk_ids:
+    allowed_kb_ids = list(dict.fromkeys(kb_ids or ([kb_id] if kb_id else [])))
+    if not chunk_ids or not allowed_kb_ids:
         return []
     rows = await session.execute(
         select(KnowledgeChunk.id).join(
@@ -178,7 +180,7 @@ async def filter_authorized_results(
             KnowledgeDocument.id == KnowledgeChunk.doc_id,
         ).where(
             KnowledgeChunk.id.in_(chunk_ids),
-            KnowledgeChunk.kb_id == kb_id,
+            KnowledgeChunk.kb_id.in_(allowed_kb_ids),
             KnowledgeChunk.tenant_id == principal.tenant_id,
             KnowledgeChunk.deleted == 0,
             KnowledgeChunk.enabled == 1,

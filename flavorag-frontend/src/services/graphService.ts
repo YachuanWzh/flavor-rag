@@ -1,5 +1,6 @@
 import { api } from "@/services/api";
 import type { GraphView, RagCapabilities } from "@/types";
+import { clampGraphLimit } from "@/components/chat/knowledgeGraphUtils";
 
 export async function fetchRagCapabilities() {
   return api.get<RagCapabilities, RagCapabilities>("/api/rag/v3/capabilities");
@@ -14,7 +15,7 @@ export async function fetchKnowledgeGraph(
       kb_id: kbId,
       entity: options.entity || "*",
       depth: options.depth || 2,
-      limit: options.limit || 80,
+      limit: clampGraphLimit(options.limit),
     },
   });
 }

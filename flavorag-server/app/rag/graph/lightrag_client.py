@@ -178,7 +178,7 @@ class LightRAGClient:
         *,
         entity: str = "*",
         depth: int = 2,
-        limit: int = 80,
+        limit: int = 200,
         scope_tokens: Iterable[str] = (),
         enabled: bool | None = None,
     ) -> dict:
@@ -355,7 +355,7 @@ class LightRAGClient:
         return {
             "nodes": nodes,
             "edges": edges,
-            "truncated": bool(payload.get("is_truncated")) or len(nodes) >= limit,
+            "truncated": bool(payload.get("is_truncated")),
         }
 
     @staticmethod

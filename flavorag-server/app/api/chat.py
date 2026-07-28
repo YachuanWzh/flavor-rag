@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from app.database.session import get_db
 from app.auth.dependencies import get_current_user
 from app.models import User, Conversation, KnowledgeBase, gen_id
-from app.rag.pipeline import RAGPipeline, RAGContext
+from app.rag.pipeline import RAGPipeline, RAGContext, RetrievalScope
 from app.rag.trace import TraceLogger
 from app.rag.rate_limiter import RateLimiter
 from app.llm.client import collect_agentic_generation, get_llm_client
@@ -45,6 +45,50 @@ class ChatRequest(BaseModel):
     graph_rag: bool | None = None
     neighbor_expansion: bool = False
     hyde: bool = False
+
+
+def effective_graph_rag(
+    kb_id: str | None,
+    requested: bool | None,
+    *,
+    server_default: bool,
+) -> bool:
+    """Global retrieval always schedules Graph RAG, regardless of the client."""
+    if kb_id == "*":
+        return True
+    return server_default if requested is None else requested
+
+
+async def resolve_chat_kb_scopes(
+    db: AsyncSession,
+    user: User,
+    kb_id: str | None,
+) -> list[RetrievalScope]:
+    """Resolve a client scope to the exact readable KB/collection set."""
+    principal = principal_from_user(user)
+    if kb_id and kb_id != "*":
+        kb = await require_kb(db, principal, kb_id, Permission.READ)
+        rows = [kb]
+    else:
+        statement = (
+            select(KnowledgeBase)
+            .where(kb_access_predicate(principal, Permission.READ))
+            .order_by(KnowledgeBase.name, KnowledgeBase.id)
+        )
+        if kb_id != "*":
+            statement = statement.limit(1)
+        result = await db.execute(statement)
+        rows = list(result.scalars().all())
+
+    return [
+        RetrievalScope(
+            kb_id=kb.id,
+            kb_name=kb.name,
+            collection_name=kb.active_collection_name or kb.collection_name,
+            embedding_model=kb.embedding_model,
+        )
+        for kb in rows
+    ]
 
 
 def _agentic_replay_tokens(tokens: list[str], chunk_chars: int) -> list[str]:
@@ -237,8 +281,10 @@ async def chat(
     effective_agentic_rag = (
         settings.agentic_rag_enabled if agentic_rag is None else agentic_rag
     )
-    effective_graph_rag = (
-        settings.graph_enabled if graph_rag is None else graph_rag
+    effective_graph_rag_enabled = effective_graph_rag(
+        kb_id,
+        graph_rag,
+        server_default=settings.graph_enabled,
     )
 
     # Rate limiting
@@ -347,39 +393,22 @@ async def chat(
             await db.commit()
 
             # 3. Resolve kb_id → collection_name (auto-select first KB if none given)
-            resolved_kb_id = kb_id
-            collection_name: str | None = None
-            embedding_model: str | None = None
-            if not resolved_kb_id:
-                # Auto-select first available knowledge base
-                first_kb = await db.execute(
-                    select(
-                        KnowledgeBase.id,
-                        KnowledgeBase.collection_name,
-                        KnowledgeBase.active_collection_name,
-                        KnowledgeBase.embedding_model,
-                    )
-                    .where(
-                        kb_access_predicate(
-                            principal_from_user(user), Permission.READ
-                        )
-                    )
-                    .limit(1)
-                )
-                first_row = first_kb.first()
-                if first_row:
-                    resolved_kb_id = first_row[0]
-                    collection_name = first_row[2] or first_row[1]
-                    embedding_model = first_row[3]
-            else:
-                kb = await require_kb(
-                    db,
-                    principal_from_user(user),
-                    resolved_kb_id,
-                    Permission.READ,
-                )
-                collection_name = kb.active_collection_name or kb.collection_name
-                embedding_model = kb.embedding_model
+            retrieval_scopes = await resolve_chat_kb_scopes(db, user, kb_id)
+            is_global_scope = kb_id == "*"
+            primary_scope = retrieval_scopes[0] if retrieval_scopes else None
+            resolved_kb_id = (
+                None if is_global_scope else (primary_scope.kb_id if primary_scope else None)
+            )
+            collection_name = (
+                primary_scope.collection_name
+                if primary_scope and not is_global_scope
+                else None
+            )
+            embedding_model = (
+                primary_scope.embedding_model
+                if primary_scope and not is_global_scope
+                else None
+            )
 
             # 4. RAG retrieval
             if settings.ttft_early_feedback:
@@ -410,7 +439,7 @@ async def chat(
                 kb_id=resolved_kb_id, collection_name=collection_name,
                 embedding_model=embedding_model,
                 history=history, deep_thinking=deep_thinking,
-                graph_rag=effective_graph_rag,
+                graph_rag=effective_graph_rag_enabled,
                 enable_neighbor_expansion=neighbor_expansion,
                 enable_hyde=hyde,
                 trace_run_id=trace_id,
@@ -420,6 +449,7 @@ async def chat(
                 role=user.role,
                 profile=user_profile,
                 memories=user_memories,
+                retrieval_scopes=retrieval_scopes,
             )
             agent_steps: list[dict] = []
             if effective_agentic_rag:
@@ -454,7 +484,7 @@ async def chat(
                     "taskId": trace_id,
                     "modes": {
                         "agenticRag": effective_agentic_rag,
-                        "graphRag": effective_graph_rag,
+                        "graphRag": effective_graph_rag_enabled,
                         "neighborExpansion": neighbor_expansion,
                         "hyde": hyde,
                     },
@@ -490,7 +520,7 @@ async def chat(
                     sources=[],
                     rag_modes={
                         "agenticRag": effective_agentic_rag,
-                        "graphRag": effective_graph_rag,
+                        "graphRag": effective_graph_rag_enabled,
                         "neighborExpansion": neighbor_expansion,
                         "hyde": hyde,
                     },
@@ -524,7 +554,7 @@ async def chat(
                             "recommendedQuestions": [],
                             "modes": {
                                 "agenticRag": effective_agentic_rag,
-                                "graphRag": effective_graph_rag,
+                                "graphRag": effective_graph_rag_enabled,
                                 "neighborExpansion": neighbor_expansion,
                                 "hyde": hyde,
                             },
@@ -561,7 +591,7 @@ async def chat(
                     agent_steps=agent_steps,
                     rag_modes={
                         "agenticRag": effective_agentic_rag,
-                        "graphRag": effective_graph_rag,
+                        "graphRag": effective_graph_rag_enabled,
                         "neighborExpansion": neighbor_expansion,
                         "hyde": hyde,
                     },
@@ -581,7 +611,7 @@ async def chat(
                     metadata={
                         "channels": rag_result.channel_statuses,
                         "agenticRag": effective_agentic_rag,
-                        "graphRag": effective_graph_rag,
+                        "graphRag": effective_graph_rag_enabled,
                         "neighborExpansion": neighbor_expansion,
                         "hyde": hyde,
                     },
@@ -595,7 +625,7 @@ async def chat(
                         "sources": [],
                         "modes": {
                             "agenticRag": effective_agentic_rag,
-                            "graphRag": effective_graph_rag,
+                            "graphRag": effective_graph_rag_enabled,
                             "neighborExpansion": neighbor_expansion,
                             "hyde": hyde,
                         },
@@ -773,7 +803,7 @@ async def chat(
                 agent_steps=agent_steps,
                 rag_modes={
                     "agenticRag": effective_agentic_rag,
-                    "graphRag": effective_graph_rag,
+                    "graphRag": effective_graph_rag_enabled,
                     "neighborExpansion": neighbor_expansion,
                     "hyde": hyde,
                 },
@@ -800,7 +830,7 @@ async def chat(
                 metadata={
                     "channels": rag_result.channel_statuses,
                     "agenticRag": effective_agentic_rag,
-                    "graphRag": effective_graph_rag,
+                    "graphRag": effective_graph_rag_enabled,
                     "neighborExpansion": neighbor_expansion,
                     "hyde": hyde,
                     "generationRetry": generation_retry,
@@ -818,7 +848,7 @@ async def chat(
                     "citationStats": citation_stats,
                     "modes": {
                         "agenticRag": effective_agentic_rag,
-                        "graphRag": effective_graph_rag,
+                        "graphRag": effective_graph_rag_enabled,
                         "neighborExpansion": neighbor_expansion,
                         "hyde": hyde,
                     },

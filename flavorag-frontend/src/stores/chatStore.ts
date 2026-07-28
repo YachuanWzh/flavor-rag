@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { Message, Session, SourceRef } from "@/types";
 import { createStreamResponse, type StreamHandlers } from "@/hooks/useStreamResponse";
 import { chatErrorMessage } from "@/lib/errors";
+import { graphRagForScope } from "@/components/chat/knowledgeGraphUtils";
 
 interface ChatState {
   sessions: Session[];
@@ -16,6 +17,7 @@ interface ChatState {
   neighborExpansionEnabled: boolean;
   hydeEnabled: boolean;
   graphRevision: number;
+  graphFocusQuery: string;
   streamingMessageId: string | null;
   openedSourceMessageId: string | null;
   progressStage: string | null;
@@ -53,13 +55,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   neighborExpansionEnabled: false,
   hydeEnabled: false,
   graphRevision: 0,
+  graphFocusQuery: "",
   streamingMessageId: null,
   openedSourceMessageId: null,
   progressStage: null,
   progressMessage: null,
 
   setSessions: (sessions) => set({ sessions }),
-  setSelectedKbId: (id) => set({ selectedKbId: id }),
+  setSelectedKbId: (id) =>
+    set((state) => ({
+      selectedKbId: id,
+      graphRagEnabled: graphRagForScope(id, state.graphRagEnabled),
+    })),
 
   setCurrentSession: (id) => {
     set({ currentSessionId: id, messages: [] });
@@ -78,7 +85,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setMessages: (msgs) => set({ messages: msgs }),
   setDeepThinking: (enabled) => set({ deepThinkingEnabled: enabled }),
   setAgenticRag: (enabled) => set({ agenticRagEnabled: enabled }),
-  setGraphRag: (enabled) => set({ graphRagEnabled: enabled }),
+  setGraphRag: (enabled) =>
+    set((state) => ({
+      graphRagEnabled: graphRagForScope(state.selectedKbId, enabled),
+    })),
   setNeighborExpansion: (enabled) => set({ neighborExpansionEnabled: enabled }),
   setHyde: (enabled) => set({ hydeEnabled: enabled }),
   toggleSourcesPanel: (messageId) =>
@@ -200,6 +210,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }));
       },
       onFinish: (payload) => {
+        const graphRecallSucceeded =
+          state.graphRagEnabled &&
+          Number(payload.channels?.graph?.count || 0) > 0;
         set((s) => ({
           messages: s.messages.map((m) =>
             m.id === s.streamingMessageId
@@ -220,7 +233,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           streamingMessageId: null,
           progressStage: null,
           progressMessage: null,
-          graphRevision: s.graphRevision + (state.graphRagEnabled ? 1 : 0),
+          graphRevision: s.graphRevision + (graphRecallSucceeded ? 1 : 0),
+          graphFocusQuery: graphRecallSucceeded ? trimmed : s.graphFocusQuery,
         }));
       },
       onDone: () => {

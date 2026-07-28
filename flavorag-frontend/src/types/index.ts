@@ -132,6 +132,8 @@ export interface GraphNode {
   type?: string;
   description?: string;
   documentId?: string;
+  knowledgeBaseId?: string;
+  knowledgeBaseName?: string;
 }
 
 export interface GraphEdge {
@@ -140,6 +142,8 @@ export interface GraphEdge {
   target: string;
   label?: string;
   description?: string;
+  type?: string;
+  crossKnowledgeBase?: boolean;
 }
 
 export interface GraphView {

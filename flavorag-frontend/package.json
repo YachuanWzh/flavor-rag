@@ -1,12 +1,13 @@
 {
   "name": "flavorag-frontend",
   "private": true,
-  "version": "0.0.5",
+  "version": "0.0.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9",
@@ -39,6 +40,7 @@
     "postcss": "^8.4",
     "tailwindcss": "^3.4",
     "typescript": "^5.5",
-    "vite": "^5.4"
+    "vite": "^5.4",
+    "vitest": "^2.1"
   }
 }

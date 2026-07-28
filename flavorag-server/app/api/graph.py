@@ -1,18 +1,21 @@
 """Authenticated Graph RAG capabilities and knowledge-graph views."""
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user
 from app.config.logging_config import get_logger
 from app.config.settings import settings
 from app.database.session import get_db
-from app.models import User
+from app.models import KnowledgeBase, User
 from app.rag.graph.lightrag_client import LightRAGClient
 from app.rag.graph.neo4j_store import Neo4jGraphStore
 from app.security.access import Permission
-from app.security.service import principal_from_user, require_kb
+from app.security.service import kb_access_predicate, principal_from_user, require_kb
 
 router = APIRouter(prefix="/api/rag/v3", tags=["graph-rag"])
 _log = get_logger("flavorag.api.graph")
@@ -56,20 +59,28 @@ async def graph_view(
     kb_id: str = Query(..., description="知识库ID"),
     entity: str = Query("*", description="中心实体；* 表示知识库全图"),
     depth: int = Query(2, ge=1, le=5),
-    limit: int = Query(80, ge=1, le=500),
+    limit: int = Query(200, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """Return a permission-scoped graph for the chat-side visualisation."""
-    kb = await require_kb(
-        db,
-        principal_from_user(user),
-        kb_id,
-        Permission.READ,
-    )
+    principal = principal_from_user(user)
+    if kb_id == "*":
+        result = await db.execute(
+            select(KnowledgeBase)
+            .where(kb_access_predicate(principal, Permission.READ))
+            .order_by(KnowledgeBase.name, KnowledgeBase.id)
+        )
+        knowledge_bases = list(result.scalars().all())
+    else:
+        knowledge_bases = [
+            await require_kb(db, principal, kb_id, Permission.READ)
+        ]
+    kb_ids = [kb.id for kb in knowledge_bases]
+    kb_names = {kb.id: getattr(kb, "name", "") for kb in knowledge_bases}
     try:
         native_graph = await Neo4jGraphStore().fetch_graph(
-            kb_id=kb.id,
+            kb_ids=kb_ids,
             entity=entity,
             limit=limit,
         )
@@ -77,19 +88,48 @@ async def graph_view(
         _log.warning(
             "neo4j_graph_view_failed",
             error_type=type(exc).__name__,
-            kb_id=kb.id,
+            kb_id=kb_id,
         )
         native_graph = {"nodes": [], "edges": [], "truncated": False}
-    try:
-        enriched_graph = await LightRAGClient().fetch_graph(
-            entity=entity,
-            depth=depth,
-            limit=limit,
-            scope_tokens=(kb.id, kb.collection_name),
-            enabled=True,
+    enriched_graphs = []
+    if knowledge_bases:
+        async def fetch_enriched(kb):
+            try:
+                graph = await LightRAGClient().fetch_graph(
+                    entity=entity,
+                    depth=depth,
+                    limit=limit,
+                    scope_tokens=(
+                        kb.id,
+                        getattr(kb, "active_collection_name", None)
+                        or kb.collection_name,
+                    ),
+                    enabled=True,
+                )
+                if kb_id == "*":
+                    for node in graph.get("nodes", []):
+                        node["knowledgeBaseId"] = kb.id
+                        node["knowledgeBaseName"] = getattr(kb, "name", "")
+                return graph
+            except Exception:
+                return {"nodes": [], "edges": [], "truncated": False}
+
+        enriched_graphs = await asyncio.gather(
+            *(fetch_enriched(kb) for kb in knowledge_bases)
         )
-    except Exception:
-        enriched_graph = {"nodes": [], "edges": [], "truncated": False}
+    enriched_graph = {
+        "nodes": [
+            node for graph in enriched_graphs for node in graph.get("nodes", [])
+        ],
+        "edges": [
+            edge for graph in enriched_graphs for edge in graph.get("edges", [])
+        ],
+        "truncated": any(graph.get("truncated") for graph in enriched_graphs),
+    }
+
+    for node in native_graph.get("nodes", []):
+        node_kb_id = str(node.get("knowledgeBaseId") or "")
+        node["knowledgeBaseName"] = kb_names.get(node_kb_id, "")
 
     nodes_by_id = {
         str(node["id"]): node
@@ -114,6 +154,7 @@ async def graph_view(
         "edges": visible_edges,
         "truncated": bool(
             native_graph.get("truncated") or enriched_graph.get("truncated")
+            or len(nodes_by_id) > limit
         ),
     }
     return {

@@ -106,11 +106,14 @@ async def list_knowledge_bases(
 @router.post("")
 async def create_knowledge_base(
     name: str = Form(...),
-    embedding_model: str = Form("qwen3-embedding-8b"),
+    embedding_model: str | None = Form(None),
     pipeline_id: str = Form(""),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    from app.llm.embedding import normalize_embedding_model
+
+    embedding_model = normalize_embedding_model(embedding_model)
     collection_name = f"kb_{gen_id()}"
 
     kb = KnowledgeBase(

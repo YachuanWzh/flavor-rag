@@ -93,6 +93,65 @@ def test_semantic_prompt_batches_bound_chunks_and_keep_every_chunk():
     ] == [f"chunk-{index}" for index in range(5)]
 
 
+def test_semantic_prompt_uses_configured_candidate_limits(monkeypatch):
+    from app.config.settings import settings
+    from app.rag.graph.semantic_extractor import _system_prompt
+
+    monkeypatch.setattr(settings, "graph_semantic_max_entities_per_batch", 7)
+    monkeypatch.setattr(
+        settings,
+        "graph_semantic_max_relationships_per_batch",
+        9,
+    )
+
+    prompt = _system_prompt()
+
+    assert "最多输出 7 个实体、9 条关系" in prompt
+
+
+def test_semantic_evidence_strictness_can_be_configured():
+    from app.rag.graph.semantic_extractor import validate_extraction
+
+    payload = {
+        "entities": [
+            {"name": "ServiceA", "type": "service", "chunk_id": "chunk-1"},
+            {"name": "Kafka", "type": "technology", "chunk_id": "chunk-1"},
+        ],
+        "relationships": [
+            {
+                "source": "ServiceA",
+                "target": "Kafka",
+                "type": "USES",
+                "confidence": 0.9,
+                "evidence": "Kafka is used for events.",
+                "chunk_id": "chunk-1",
+            }
+        ],
+    }
+    chunks = [
+        {
+            "chunk_id": "chunk-1",
+            "content": "ServiceA architecture. Kafka is used for events.",
+        }
+    ]
+
+    strict = validate_extraction(
+        payload,
+        chunks=chunks,
+        min_confidence=0.7,
+        require_endpoints_in_evidence=True,
+    )
+    relaxed = validate_extraction(
+        payload,
+        chunks=chunks,
+        min_confidence=0.7,
+        require_endpoints_in_evidence=False,
+    )
+
+    assert strict["relationships"] == []
+    assert len(relaxed["relationships"]) == 1
+
+
 def test_semantic_validation_keeps_only_grounded_confident_relations():
     from app.rag.graph.semantic_extractor import validate_extraction
 
@@ -217,6 +276,8 @@ async def test_extractor_uses_zero_temperature_and_persists_validated_output(
 
     monkeypatch.setattr(settings, "graph_semantic_enabled", True)
     monkeypatch.setattr(settings, "graph_semantic_min_confidence", 0.70)
+    monkeypatch.setattr(settings, "graph_semantic_temperature", 0.25)
+    monkeypatch.setattr(settings, "graph_semantic_max_tokens", 777)
     calls = {}
 
     class FakeLLM:
@@ -267,7 +328,8 @@ async def test_extractor_uses_zero_temperature_and_persists_validated_output(
         store=FakeStore(),
     )
 
-    assert calls["temperature"] == 0.0
+    assert calls["temperature"] == 0.25
+    assert calls["max_tokens"] == 777
     assert "[chunk_id=chunk-1]" in calls["messages"][1]["content"]
     assert calls["store"]["model"] == "injected-test-model"
     assert result == {

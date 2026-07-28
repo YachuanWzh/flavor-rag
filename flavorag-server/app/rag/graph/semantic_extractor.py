@@ -47,21 +47,21 @@ RELATION_TYPES = frozenset(
     }
 )
 
-_SYSTEM_PROMPT = """你是知识图谱关系抽取器。只依据给定原文输出 JSON，不要解释。
+_SYSTEM_PROMPT_TEMPLATE = """你是知识图谱关系抽取器。只依据给定原文输出 JSON，不要解释。
 规则：
 1. 实体必须在原文中逐字出现，禁止补充常识或猜测。
 2. 关系必须由同一 chunk 中的一段原文直接支持。
 3. JSON、API、HTTP 等通用词可以作为句内实体，但不能因为“都出现过”就推断关系。
-   evidence 必须直接出现 source 和 target；不要使用代词或跨句猜测。
+   {endpoint_rule}
 4. 关系类型只能取：USES, DEPENDS_ON, IMPLEMENTS, PART_OF, EXPOSES,
    PRODUCES, CONSUMES, STORES_IN, EVALUATED_ON, COMPARED_WITH, EXTENDS,
    INTEGRATES_WITH。
 5. confidence 是 0 到 1。没有明确主谓关系就不要输出。
 6. chunk_id 必须照抄输入标记。
-7. 每次最多输出 12 个实体、16 条关系，只保留最明确、置信度最高的结果；
+7. 每次最多输出 {max_entities} 个实体、{max_relationships} 条关系，
+   只保留最明确、置信度最高的结果；
    没有明确关系时返回空数组。
-8. 方向必须严格：A PART_OF B 表示 A 是 B 的一部分；A STORES_IN B
-   表示 A 被存储在 B 中。“删除/清理 B”绝不是 STORES_IN B。
+8. {direction_rule}
 
 输出结构：
 {
@@ -75,6 +75,42 @@ _SYSTEM_PROMPT = """你是知识图谱关系抽取器。只依据给定原文输
 }
 实体类型只能取：system, service, component, api, data, model, algorithm,
 standard, organization, person, concept, technology。"""
+
+
+def _bounded_int(value: int, minimum: int, maximum: int) -> int:
+    return max(minimum, min(int(value), maximum))
+
+
+def _system_prompt() -> str:
+    max_entities = _bounded_int(
+        settings.graph_semantic_max_entities_per_batch,
+        1,
+        100,
+    )
+    max_relationships = _bounded_int(
+        settings.graph_semantic_max_relationships_per_batch,
+        1,
+        200,
+    )
+    endpoint_rule = (
+        "evidence 必须直接出现 source 和 target；不要使用代词或跨句猜测。"
+        if settings.graph_semantic_require_endpoints_in_evidence
+        else "evidence 必须直接支持关系，不得使用跨 chunk 猜测。"
+    )
+    direction_rules = []
+    if settings.graph_semantic_validate_part_of_direction:
+        direction_rules.append("A PART_OF B 表示 A 是 B 的一部分")
+    if settings.graph_semantic_reject_negative_stores:
+        direction_rules.append(
+            "A STORES_IN B 表示 A 被存储在 B 中；“删除/清理 B”不是 STORES_IN B"
+        )
+    direction_rule = "；".join(direction_rules) or "关系方向必须与原文一致"
+    return (
+        _SYSTEM_PROMPT_TEMPLATE.replace("{endpoint_rule}", endpoint_rule)
+        .replace("{max_entities}", str(max_entities))
+        .replace("{max_relationships}", str(max_relationships))
+        .replace("{direction_rule}", direction_rule)
+    )
 
 
 def _value(item: Any, key: str) -> Any:
@@ -91,13 +127,18 @@ def _relation_evidence_is_consistent(
     target: str,
     relation_type: str,
     evidence: str,
+    require_endpoints: bool,
+    reject_negative_stores: bool,
+    validate_part_of_direction: bool,
 ) -> bool:
     folded = evidence.casefold()
     source_folded = source.casefold()
     target_folded = target.casefold()
-    if source_folded not in folded or target_folded not in folded:
+    if require_endpoints and (
+        source_folded not in folded or target_folded not in folded
+    ):
         return False
-    if relation_type == "STORES_IN" and any(
+    if reject_negative_stores and relation_type == "STORES_IN" and any(
         term in folded
         for term in (
             "delete",
@@ -111,7 +152,7 @@ def _relation_evidence_is_consistent(
         )
     ):
         return False
-    if relation_type == "PART_OF":
+    if validate_part_of_direction and relation_type == "PART_OF":
         # "A's B" / "A 的 B" normally means B is part of A. Reject the
         # common reversed extraction A -[PART_OF]-> B.
         reverse_patterns = (
@@ -147,8 +188,58 @@ def validate_extraction(
     *,
     chunks: list[dict],
     min_confidence: float,
+    max_entity_name_chars: int | None = None,
+    max_description_chars: int | None = None,
+    min_evidence_chars: int | None = None,
+    max_evidence_chars: int | None = None,
+    require_endpoints_in_evidence: bool | None = None,
+    reject_negative_stores: bool | None = None,
+    validate_part_of_direction: bool | None = None,
 ) -> dict:
     """Reject hallucinated entities/relations and retain source evidence."""
+    max_name_chars = _bounded_int(
+        max_entity_name_chars
+        if max_entity_name_chars is not None
+        else settings.graph_semantic_max_entity_name_chars,
+        2,
+        200,
+    )
+    max_description = _bounded_int(
+        max_description_chars
+        if max_description_chars is not None
+        else settings.graph_semantic_max_description_chars,
+        0,
+        1000,
+    )
+    min_evidence = _bounded_int(
+        min_evidence_chars
+        if min_evidence_chars is not None
+        else settings.graph_semantic_min_evidence_chars,
+        1,
+        200,
+    )
+    max_evidence = _bounded_int(
+        max_evidence_chars
+        if max_evidence_chars is not None
+        else settings.graph_semantic_max_evidence_chars,
+        min_evidence,
+        2000,
+    )
+    require_endpoints = (
+        require_endpoints_in_evidence
+        if require_endpoints_in_evidence is not None
+        else settings.graph_semantic_require_endpoints_in_evidence
+    )
+    reject_negative = (
+        reject_negative_stores
+        if reject_negative_stores is not None
+        else settings.graph_semantic_reject_negative_stores
+    )
+    validate_part_of = (
+        validate_part_of_direction
+        if validate_part_of_direction is not None
+        else settings.graph_semantic_validate_part_of_direction
+    )
     payload = _extract_json_object(raw) if isinstance(raw, str) else raw
     chunk_text = {
         str(_value(chunk, "chunk_id") or _value(chunk, "id")): str(
@@ -164,7 +255,7 @@ def validate_extraction(
         if not isinstance(item, dict):
             rejected += 1
             continue
-        name = _compact(item.get("name", ""))[:120]
+        name = _compact(item.get("name", ""))[:max_name_chars]
         entity_type = str(item.get("type") or "concept").strip().casefold()
         requested_chunk = str(item.get("chunk_id") or "")
         candidate_ids = (
@@ -190,7 +281,9 @@ def validate_extraction(
         row = {
             "name": name,
             "type": entity_type,
-            "description": _compact(item.get("description", ""))[:360],
+            "description": _compact(item.get("description", ""))[
+                :max_description
+            ],
             "chunk_id": matched_chunk,
             "content": chunk_text[matched_chunk],
         }
@@ -207,7 +300,7 @@ def validate_extraction(
         target_key = _compact(item.get("target", "")).casefold()
         relation_type = str(item.get("type") or "").strip().upper()
         chunk_id = str(item.get("chunk_id") or "")
-        evidence = _compact(item.get("evidence", ""))[:600]
+        evidence = _compact(item.get("evidence", ""))[:max_evidence]
         try:
             confidence = float(item.get("confidence"))
         except (TypeError, ValueError):
@@ -221,13 +314,16 @@ def validate_extraction(
             or relation_type not in RELATION_TYPES
             or confidence < min_confidence
             or confidence > 1.0
-            or len(evidence) < 8
+            or len(evidence) < min_evidence
             or evidence.casefold() not in compact_chunk.casefold()
             or not _relation_evidence_is_consistent(
                 source=entities_by_name.get(source_key, {}).get("name", ""),
                 target=entities_by_name.get(target_key, {}).get("name", ""),
                 relation_type=relation_type,
                 evidence=evidence,
+                require_endpoints=require_endpoints,
+                reject_negative_stores=reject_negative,
+                validate_part_of_direction=validate_part_of,
             )
             or signature in seen_relations
         ):
@@ -239,7 +335,9 @@ def validate_extraction(
                 "source": entities_by_name[source_key]["name"],
                 "target": entities_by_name[target_key]["name"],
                 "type": relation_type,
-                "description": _compact(item.get("description", ""))[:360],
+                "description": _compact(item.get("description", ""))[
+                    :max_description
+                ],
                 "confidence": confidence,
                 "evidence": evidence,
                 "chunk_id": chunk_id,
@@ -386,6 +484,8 @@ async def extract_and_store_semantic_graph(
             )
             for api_key, base_url, model in provider_candidates
         ]
+        if not settings.graph_semantic_provider_fallback_enabled:
+            attempts = attempts[:1]
 
     selected = [chunk for _text, batch in batches for chunk in batch]
     combined_entities: dict[str, dict] = {}
@@ -397,7 +497,7 @@ async def extract_and_store_semantic_graph(
 
     for batch_index, (text, batch) in enumerate(batches):
         messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": _system_prompt()},
             {"role": "user", "content": f"请抽取以下文档：\n\n{text}"},
         ]
         validated = None
@@ -412,15 +512,25 @@ async def extract_and_store_semantic_graph(
                 ):
                     async for token in client.chat_stream(
                         messages,
-                        temperature=0.0,
-                        max_tokens=settings.graph_semantic_max_tokens,
+                        temperature=max(
+                            0.0,
+                            min(settings.graph_semantic_temperature, 2.0),
+                        ),
+                        max_tokens=_bounded_int(
+                            settings.graph_semantic_max_tokens,
+                            256,
+                            8192,
+                        ),
                     ):
                         if not token.startswith("__THINK__"):
                             tokens.append(token)
                 validated = validate_extraction(
                     "".join(tokens),
                     chunks=batch,
-                    min_confidence=settings.graph_semantic_min_confidence,
+                    min_confidence=max(
+                        0.0,
+                        min(settings.graph_semantic_min_confidence, 1.0),
+                    ),
                 )
                 used_models.append(model)
                 for relation in validated["relationships"]:

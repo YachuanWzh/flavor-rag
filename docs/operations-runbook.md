@@ -74,6 +74,8 @@ alembic upgrade head
   `semantic_graph_enrichment_failed` 和 `t_index_repair_job`，再核对
   `GRAPH_SEMANTIC_API_KEY`（为空时复用主 LLM key）、模型、超时和 provider 限额。
 - 弱关系偏多时提高 `GRAPH_SEMANTIC_MIN_CONFIDENCE`；漏边较多时先抽样检查文档表述是否明确，再考虑调整模型。不要直接在 Neo4j 中手工改置信度掩盖抽取问题。
+- `--concurrency` 未传时读取 `GRAPH_SEMANTIC_BACKFILL_CONCURRENCY`，默认 2、运行时最大 8。
+  生产环境不建议关闭三个严格校验开关；确需放宽时先用 `--limit` 抽样并人工检查证据。
 - 历史图不需要重建知识库、重新 chunk 或重新 Embedding：
 
 ```bash

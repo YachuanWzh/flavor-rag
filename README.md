@@ -16,7 +16,7 @@ flavor-rag 是一个面向企业知识库的全链路 RAG 系统，覆盖多格�
 - **失败可恢复**：语义 provider 临时失败不会回滚已写好的基础图；系统会创建持久化 Graph repair job，按退避策略自动重跑。
 - **历史数据原地升级**：不用新建知识库，也不用重新 chunk/Embedding。名称桥继续使用 `python -m app.rag.graph.backfill --apply`；语义关系先用 `python -m app.rag.graph.semantic_backfill` 预览，再加 `--apply` 从现有 active chunks 抽取。
 - **看得见证据**：知识星图选中实体后会展示关系类型、置信度和支持该关系的原文，方便人工判断这条边是否可信。
-- **一遍过门禁**：后端 `219 passed`，前端 `12 passed`，TypeScript 与 Vite 生产构建通过；真实数据验证了 `flavor-code → Harness → huamulan-agent` 的语义边 + 跨库锚点路径。
+- **一遍过门禁**：后端 `221 passed`，前端 `12 passed`，TypeScript 与 Vite 生产构建通过；真实数据验证了 `flavor-code → Harness → huamulan-agent` 的语义边 + 跨库锚点路径。
 
 ```mermaid
 flowchart LR
@@ -165,7 +165,21 @@ LLM_MAX_OUTPUT_TOKENS=2048
 GRAPH_ENABLED=true
 GRAPH_SEMANTIC_ENABLED=true
 GRAPH_SEMANTIC_MODEL=qwen-plus-latest
+GRAPH_SEMANTIC_TEMPERATURE=0
+GRAPH_SEMANTIC_MAX_TOKENS=2048
+GRAPH_SEMANTIC_MAX_INPUT_CHARS=4000
+GRAPH_SEMANTIC_BATCH_CHUNKS=6
+GRAPH_SEMANTIC_MAX_ENTITIES_PER_BATCH=12
+GRAPH_SEMANTIC_MAX_RELATIONSHIPS_PER_BATCH=16
+GRAPH_SEMANTIC_TIMEOUT_SEC=45
 GRAPH_SEMANTIC_MIN_CONFIDENCE=0.70
+GRAPH_SEMANTIC_MIN_EVIDENCE_CHARS=8
+GRAPH_SEMANTIC_MAX_EVIDENCE_CHARS=600
+GRAPH_SEMANTIC_REQUIRE_ENDPOINTS_IN_EVIDENCE=true
+GRAPH_SEMANTIC_REJECT_NEGATIVE_STORES=true
+GRAPH_SEMANTIC_VALIDATE_PART_OF_DIRECTION=true
+GRAPH_SEMANTIC_PROVIDER_FALLBACK_ENABLED=true
+GRAPH_SEMANTIC_BACKFILL_CONCURRENCY=2
 ```
 
 `EMBEDDING_MODEL` 是新建知识库的服务端默认权威，前端未显式选型时不会重复发送模型名；历史简写 `qwen3-embedding-8b` 会在服务端规范化。`EMBEDDING_DIM` 只是默认值。创建知识库时会实际探测模型输出维度并写入 index generation；已有 collection 不会因配置变化被删除。
@@ -175,6 +189,22 @@ GRAPH_SEMANTIC_MIN_CONFIDENCE=0.70
 生产环境建议先抽样核验，再从 `0.70` 调整。长文档会按字符数和 chunk 数分批，避免一次
 prompt 过大；显式语义模型不可用时会尝试已配置且端点匹配的 HyDE/Mem0 轻量模型。语义
 抽取属于增强通道，所有兼容模型都失败时基础图仍可用。
+
+调参时可以按目的理解，不需要一次改完：
+
+| 目标 | 参数 | 默认值 | 影响 |
+|---|---|---:|---|
+| 更快/更省 | `MAX_INPUT_CHARS`、`BATCH_CHUNKS`、`MAX_TOKENS` | 4000 / 6 / 2048 | 越小单次越快，但批次数可能增加 |
+| 控制图密度 | `MAX_ENTITIES_PER_BATCH`、`MAX_RELATIONSHIPS_PER_BATCH` | 12 / 16 | 越小越偏向少而精 |
+| 控制可信度 | `MIN_CONFIDENCE`、`MIN_EVIDENCE_CHARS` | 0.70 / 8 | 越高/越长越严格 |
+| 控制随机性 | `TEMPERATURE` | 0 | 图谱抽取建议保持 0 |
+| 严格证据 | `REQUIRE_ENDPOINTS_IN_EVIDENCE` | true | 要求证据原句同时出现关系两端 |
+| 防方向误判 | `REJECT_NEGATIVE_STORES`、`VALIDATE_PART_OF_DIRECTION` | true / true | 拦截“删除却标存储”和 `PART_OF` 反向 |
+| 故障降级 | `PROVIDER_FALLBACK_ENABLED` | true | 主模型失败时尝试已配置的兼容轻量模型 |
+| 历史回填 | `BACKFILL_CONCURRENCY` | 2 | 最大运行时仍限制为 8 |
+
+完整配置及默认值以 [.env.example](.env.example) 为准。长度、温度、置信度、token 和并发
+在服务端还有安全边界，超范围配置会被收敛到安全值。
 
 ## RAG 数据面
 

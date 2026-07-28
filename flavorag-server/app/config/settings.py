@@ -115,11 +115,23 @@ class Settings(BaseSettings):
     graph_semantic_model: str = "qwen-plus-latest"
     graph_semantic_base_url: str = ""
     graph_semantic_api_key: str = ""
+    graph_semantic_temperature: float = 0.0
     graph_semantic_max_tokens: int = 2048
     graph_semantic_max_input_chars: int = 4000
     graph_semantic_batch_chunks: int = 6
+    graph_semantic_max_entities_per_batch: int = 12
+    graph_semantic_max_relationships_per_batch: int = 16
     graph_semantic_timeout_sec: float = 45.0
     graph_semantic_min_confidence: float = 0.70
+    graph_semantic_max_entity_name_chars: int = 120
+    graph_semantic_max_description_chars: int = 360
+    graph_semantic_min_evidence_chars: int = 8
+    graph_semantic_max_evidence_chars: int = 600
+    graph_semantic_require_endpoints_in_evidence: bool = True
+    graph_semantic_reject_negative_stores: bool = True
+    graph_semantic_validate_part_of_direction: bool = True
+    graph_semantic_provider_fallback_enabled: bool = True
+    graph_semantic_backfill_concurrency: int = 2
     graph_semantic_prompt_version: str = "v1"
 
     # Neo4j（可选）

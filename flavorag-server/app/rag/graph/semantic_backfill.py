@@ -14,6 +14,7 @@ import json
 
 from sqlalchemy import or_, select
 
+from app.config.settings import settings
 from app.database.session import async_session_factory
 from app.models import KnowledgeBase, KnowledgeChunk, KnowledgeDocument
 from app.rag.graph.semantic_extractor import extract_and_store_semantic_graph
@@ -51,7 +52,7 @@ async def backfill(
     kb_id: str = "",
     doc_id: str = "",
     limit: int = 0,
-    concurrency: int = 2,
+    concurrency: int | None = None,
 ) -> dict:
     async with async_session_factory() as session:
         query = (
@@ -104,7 +105,12 @@ async def backfill(
     if not apply:
         return summary
 
-    semaphore = asyncio.Semaphore(max(1, min(concurrency, 8)))
+    resolved_concurrency = (
+        settings.graph_semantic_backfill_concurrency
+        if concurrency is None
+        else concurrency
+    )
+    semaphore = asyncio.Semaphore(max(1, min(resolved_concurrency, 8)))
 
     async def process(item: dict) -> None:
         async with semaphore:
@@ -148,7 +154,12 @@ def main() -> None:
     parser.add_argument("--kb-id", default="", help="只处理指定知识库")
     parser.add_argument("--doc-id", default="", help="只处理指定文档")
     parser.add_argument("--limit", type=int, default=0, help="最多处理多少篇文档")
-    parser.add_argument("--concurrency", type=int, default=2, help="LLM 并发，最大 8")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help="LLM 并发，最大 8；缺省读取 GRAPH_SEMANTIC_BACKFILL_CONCURRENCY",
+    )
     args = parser.parse_args()
     result = asyncio.run(
         backfill(

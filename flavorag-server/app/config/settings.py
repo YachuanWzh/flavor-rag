@@ -170,6 +170,24 @@ class Settings(BaseSettings):
     mcp_allowed_tools: str = ""
     mcp_tools_json: str = "{}"
 
+    # mem0 长期记忆 + 用户画像
+    mem0_enabled: bool = True                          # 是否启用 mem0 记忆层
+    mem0_collection_name: str = "user_memories"        # Milvus collection 名称
+    mem0_model: str = "deepseek-v4-flash"              # 记忆提取 LLM（复用 HyDE 配置）
+    mem0_base_url: str = "https://api.deepseek.com/v1"  # LLM base URL
+    mem0_api_key: str = ""                             # 为空时复用 hyde_api_key
+    mem0_max_tokens: int = 1024                        # 提取 prompt 最大 token
+    mem0_timeout_sec: float = 20.0                     # 提取超时
+    mem0_search_top_k: int = 5                         # 检索时拉取的记忆条数
+
+    # 用户画像更新策略：incremental（每次对话后增量）| daily（每日定时全量）
+    profile_update_mode: str = "incremental"
+    profile_daily_cron: str = "0 2 * * *"              # 每日凌晨 2 点执行
+    profile_llm_model: str = "deepseek-v4-flash"        # 画像聚合 LLM
+    profile_llm_base_url: str = "https://api.deepseek.com/v1"
+    profile_llm_api_key: str = ""                     # 为空时复用 mem0_api_key
+    profile_min_queries_for_build: int = 5             # 最少提问数才构建画像
+
     # flavor-code 集成
     flavor_code_integration_enabled: bool = False
     flavor_code_api_tokens: str = ""

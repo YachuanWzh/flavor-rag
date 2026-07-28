@@ -15,6 +15,7 @@ import SchedulePage from "./pages/admin/SchedulePage";
 import IngestionPipelinePage from "./pages/admin/IngestionPipelinePage";
 import EvaluationPage from "./pages/admin/EvaluationPage";
 import AccessControlPage from "./pages/admin/AccessControlPage";
+import UserProfilePage from "./pages/admin/UserProfilePage";
 import KnowledgeBasePage from "./pages/knowledge/KnowledgeBasePage";
 import KnowledgeBaseDetailPage from "./pages/knowledge/KnowledgeBaseDetailPage";
 import KnowledgeChunksPage from "./pages/knowledge/KnowledgeChunksPage";
@@ -45,6 +46,7 @@ export const router = createBrowserRouter([
           { path: "ingestion", element: <IngestionPipelinePage /> },
           { path: "evaluation", element: <EvaluationPage /> },
           { path: "access", element: <AccessControlPage /> },
+          { path: "profiles", element: <UserProfilePage /> },
         ],
       },
       { path: "knowledge", element: <KnowledgeBasePage /> },

@@ -20,6 +20,7 @@ from app.api.evaluation import router as evaluation_router
 from app.api.graph import router as graph_router
 from app.api.monitoring import router as monitoring_router
 from app.api.assets import router as assets_router
+from app.api.user_profile import router as user_profile_router
 from app.config.settings import settings
 from app.config.logging_config import get_logger, configure_root_logger
 from app.observability.metrics import MetricsMiddleware, render_metrics
@@ -31,6 +32,7 @@ _doc_schedule_scheduler = None
 _index_sync_scheduler = None
 _ingestion_watchdog = None
 _ingestion_job_worker = None
+_profile_scheduler = None
 
 
 async def _seed_admin_user():
@@ -146,6 +148,17 @@ async def lifespan(app: FastAPI):
     if setup_otel(app):
         _log.info("otel_enabled", endpoint=settings.otel_exporter_otlp_endpoint)
 
+    # Start profile daily scheduler (mem0 user profiling)
+    global _profile_scheduler
+    try:
+        from app.memory.profile_scheduler import ProfileDailyScheduler
+
+        _profile_scheduler = ProfileDailyScheduler()
+        await _profile_scheduler.start()
+        _log.info("profile_scheduler_started")
+    except Exception as exc:
+        _log.warning("profile_scheduler_failed", error=str(exc))
+
     _log.info("server_started", port=settings.server_port)
     yield
     # Shutdown: stop schedulers
@@ -179,6 +192,12 @@ async def lifespan(app: FastAPI):
             _log.info("ingestion_job_worker_stopped")
         except Exception as exc:
             _log.warning("ingestion_job_worker_stop_failed", error=str(exc))
+    if _profile_scheduler:
+        try:
+            await _profile_scheduler.stop()
+            _log.info("profile_scheduler_stopped")
+        except Exception as exc:
+            _log.warning("profile_scheduler_stop_failed", error=str(exc))
     # Close shared ES client
     try:
         from app.rag.search.keyword import close_es_client
@@ -228,6 +247,7 @@ app.include_router(evaluation_router)
 app.include_router(graph_router)
 app.include_router(monitoring_router)
 app.include_router(assets_router)
+app.include_router(user_profile_router)
 
 
 @app.get("/api/health")

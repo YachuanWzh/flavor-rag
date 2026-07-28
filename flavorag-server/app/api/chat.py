@@ -20,6 +20,7 @@ from app.rag.rate_limiter import RateLimiter
 from app.llm.client import get_llm_client
 from app.services.chat_service import ChatService
 from app.config.settings import settings
+from app.config.logging_config import get_logger
 from app.rag.recommendations import recommend_questions
 from app.security.access import Permission
 from app.security.service import (
@@ -29,6 +30,8 @@ from app.security.service import (
 )
 
 router = APIRouter(prefix="/api/rag/v3", tags=["chat"])
+
+_log = get_logger("flavorag.api.chat")
 
 
 def _ensure_citations(answer: str, sources: list[dict]) -> tuple[str, dict]:
@@ -200,6 +203,23 @@ async def chat(
                     + json.dumps({"stage": "retrieving", "message": "正在检索相关资料..."}, ensure_ascii=False)
                     + "\n\n"
                 )
+            # ── mem0: fetch user profile + relevant memories for RAG injection ──
+            user_profile = None
+            user_memories: list[dict] = []
+            if settings.mem0_enabled:
+                try:
+                    from app.memory.profile_builder import get_profile_for_rag
+                    from app.memory.mem0_client import Mem0Manager
+
+                    user_profile = await get_profile_for_rag(db, user.id)
+                    user_memories = await Mem0Manager.get_instance().search(
+                        user_id=user.id,
+                        query=question,
+                        top_k=settings.mem0_search_top_k,
+                    )
+                except Exception as exc:
+                    _log.warning("mem0_injection_failed", error=str(exc)[:200])
+
             ctx = RAGContext(
                 question=question, conversation_id=conversation_id,
                 kb_id=resolved_kb_id, collection_name=collection_name,
@@ -212,6 +232,8 @@ async def chat(
                 tenant_id=user.tenant_id or "default",
                 department_id=user.department_id or "",
                 role=user.role,
+                profile=user_profile,
+                memories=user_memories,
             )
             agent_steps: list[dict] = []
             if effective_agentic_rag:
@@ -231,6 +253,10 @@ async def chat(
                 )
             else:
                 rag_result = await rag_pipeline.run(ctx)
+
+            # Pass mem0 memories + profile through rag_result for prompt injection
+            rag_result.memories = ctx.memories
+            rag_result.profile = ctx.profile
 
             # Release SQLite write lock before streaming the (slow) LLM answer.
             await db.commit()
@@ -393,6 +419,23 @@ async def chat(
             context_text = "\n\n---\n\n".join(
                 f"[来源 {i + 1}] {c['content']}" for i, c in enumerate(rag_result.context_chunks)
             )
+            # ── mem0: inject user memories + profile into system prompt ──
+            memory_block = ""
+            if rag_result.memories:
+                memory_facts = "\n".join(
+                    f"- {m.get('content', '')}"
+                    for m in rag_result.memories
+                    if m.get('content')
+                )
+                memory_block = f"\n\n## 用户记忆\n以下是你已经了解的关于用户的信息，请在回答中适当参考：\n{memory_facts}\n"
+            profile_block = ""
+            if rag_result.profile and rag_result.profile.get("domain_summary"):
+                profile_block = f"\n## 用户画像\n{rag_result.profile['domain_summary']}\n"
+                level = rag_result.profile.get("expertise_level")
+                if level == "expert":
+                    profile_block += "用户专业水平较高，可以使用专业术语，无需过多解释基础概念。\n"
+                elif level == "junior":
+                    profile_block += "用户专业水平较初级，请适当解释专业术语，回答尽量简洁明了。\n"
             if rag_result.response_mode == "system":
                 system_prompt = "你是一个简洁、友好的企业智能助手。直接回应用户，不要声称检索了资料。"
             else:
@@ -419,6 +462,8 @@ async def chat(
                         "请在回答中引用对应的来源编号，系统会在回答下方自动展示这些图片和表格。\n\n"
                         f"参考资料：\n{context_text}"
                     )
+                # Append memory + profile blocks to any prompt path
+                system_prompt += memory_block + profile_block
             messages = [{"role": "system", "content": system_prompt}]
             for h in history[-16:]:
                 messages.append({"role": h["role"], "content": h["content"]})
@@ -519,6 +564,36 @@ async def chat(
             )
             yield f"event: finish\ndata: {finish}\n\n"
             yield "event: done\ndata: {}\n\n"
+
+            # ── mem0: async memory extraction + profile update after conversation ──
+            if settings.mem0_enabled:
+                try:
+                    from app.memory.mem0_client import Mem0Manager
+                    from app.memory.profile_builder import build_or_update_profile
+                    from app.database.session import async_session_factory
+
+                    # Build conversation messages for memory extraction
+                    conv_messages = [
+                        {"role": "user", "content": question},
+                        {"role": "assistant", "content": full_content[:2000]},
+                    ]
+                    # Fire-and-forget: extract + store memory facts
+                    await Mem0Manager.get_instance().add(
+                        user_id=user.id,
+                        tenant_id=user.tenant_id or "default",
+                        messages=conv_messages,
+                    )
+                    # Incremental profile update if configured
+                    if settings.profile_update_mode == "incremental":
+                        async with async_session_factory() as profile_session:
+                            await build_or_update_profile(
+                                profile_session,
+                                user.id,
+                                user.tenant_id or "default",
+                            )
+                            await profile_session.commit()
+                except Exception as exc:
+                    _log.warning("mem0_post_conversation_failed", error=str(exc)[:200])
 
         except Exception as e:
             # Some exceptions (e.g. asyncio.TimeoutError) stringify to an

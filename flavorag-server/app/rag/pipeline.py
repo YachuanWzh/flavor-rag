@@ -54,6 +54,9 @@ class RAGContext:
     tenant_id: str = "default"
     department_id: str = ""
     role: str = "user"
+    # ── mem0 long-term memory + user profile injection ──
+    profile: dict | None = None       # user profile dict (7 dimensions)
+    memories: list[dict] = field(default_factory=list)  # mem0 relevant facts
 
 
 @dataclass
@@ -78,6 +81,8 @@ class RAGResult:
     applied_mappings: list[dict] = field(default_factory=list)
     hyde_doc: str | None = None           # HyDE 生成的假设文档内容
     hyde_meta: dict = field(default_factory=dict)  # HyDE 元信息(model/duration_ms/timed_out)
+    memories: list[dict] = field(default_factory=list)  # mem0 相关记忆事实（注入生成 prompt）
+    profile: dict | None = None           # 用户画像（注入生成 prompt）
 
 
 class RAGPipeline:
@@ -99,6 +104,40 @@ class RAGPipeline:
             for name in ("vector", "keyword", "graph", "hyde_vector")
         }
 
+    def _adjust_budget_for_profile(self, budget: RetrievalBudget, ctx: RAGContext) -> RetrievalBudget:
+        """Adjust retrieval budget based on user profile (expertise level + intent distribution).
+
+        - expert users get +3 top_k and +10 max_candidates (deeper retrieval)
+        - junior users get default (simpler, faster)
+        - users with high analysis intent rate get +2 final_top_k
+        """
+        profile = ctx.profile
+        if not profile:
+            return budget
+
+        level = (profile.get("expertise_level") or "").lower()
+        if level == "expert":
+            budget.per_channel_top_k += 3
+            budget.max_candidates += 10
+        elif level == "junior":
+            # Keep defaults for simplicity
+            pass
+
+        intent_dist = profile.get("intent_distribution") or {}
+        # If analysis/reasoning intents dominate, give more final context
+        analysis_rate = intent_dist.get("analysis", 0) + intent_dist.get("comparison", 0)
+        if analysis_rate > 0.3:
+            budget.final_top_k = min(budget.final_top_k + 2, 10)
+
+        _pipeline_log.info(
+            "profile_budget_adjusted",
+            level=level,
+            per_channel_top_k=budget.per_channel_top_k,
+            max_candidates=budget.max_candidates,
+            final_top_k=budget.final_top_k,
+        )
+        return budget
+
     async def run(self, ctx: RAGContext) -> RAGResult:
         t0 = time.time()
         trace_id = ctx.trace_run_id
@@ -111,6 +150,7 @@ class RAGPipeline:
             context_max_chars=settings.retrieval_context_max_chars,
             max_subqueries=settings.query_decomposition_max_queries,
         )
+        budget = self._adjust_budget_for_profile(budget, ctx)
         _pipeline_log.info("rag_pipeline_start", question=ctx.question[:80], kb_id=ctx.kb_id)
 
         # ─── TTFT optimization: parallel rewrite + intent + speculative search ───

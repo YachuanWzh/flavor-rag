@@ -1,6 +1,6 @@
 ﻿import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Integer, SmallInteger, Text, BigInteger, DateTime, JSON
+from sqlalchemy import Column, String, Integer, SmallInteger, Text, BigInteger, DateTime, JSON, Float
 from sqlalchemy.orm import DeclarativeBase, declared_attr
 
 
@@ -601,3 +601,64 @@ class IngestionJob(Base, TimestampMixin):
     chunk_count = Column(Integer, default=0)
     error_message = Column(Text)
     created_by = Column(String(20), nullable=False)
+
+
+# ============================================================
+# User Profile (mem0 长期记忆 + 用户画像)
+# ============================================================
+
+
+class UserProfile(Base):
+    """用户画像表 — 由行为统计 + LLM 聚合生成，周期性更新。
+
+    七个维度：
+      1. 基础信息（关联 User 表）
+      2. 专业领域画像（LLM 抽取）
+      3. 意图偏好分布（自动统计）
+      4. 知识库偏好（自动统计）
+      5. 查询风格画像（自动统计）
+      6. 反馈信号画像（自动统计）
+      7. 记忆事实摘要（mem0）
+    """
+
+    __tablename__ = "t_user_profile"
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    user_id = Column(String(20), nullable=False, unique=True)
+    tenant_id = Column(String(64), nullable=False, default="default")
+
+    # 维度2: 专业领域画像（LLM 聚合）
+    domains = Column(JSON)                    # ["DevOps", "数据库", "安全"]
+    expertise_level = Column(String(16))      # junior / mid / expert
+    domain_summary = Column(Text)             # LLM 生成的自然语言摘要
+
+    # 维度3: 意图偏好分布（自动统计）
+    intent_distribution = Column(JSON)         # {"factual": 0.4, "analysis": 0.3, ...}
+
+    # 维度4: 知识库偏好（自动统计）
+    preferred_kbs = Column(JSON)              # [{"kb_id": "x", "kb_name": "...", "count": 120}]
+    preferred_doc_types = Column(JSON)        # {"PARA": 0.6, "TABLE": 0.3, "CODE": 0.1}
+
+    # 维度5: 查询风格画像（自动统计）
+    avg_query_length = Column(Float)
+    deep_thinking_rate = Column(Float)
+    graph_rag_rate = Column(Float)
+    hyde_rate = Column(Float)
+
+    # 维度6: 反馈信号画像（自动统计）
+    thumbs_up_count = Column(Integer, default=0)
+    thumbs_down_count = Column(Integer, default=0)
+    follow_up_rate = Column(Float)
+    satisfaction_topics = Column(JSON)         # 低满意度主题聚类
+
+    # 维度7: 记忆事实摘要（mem0）
+    mem0_facts_count = Column(Integer, default=0)
+    mem0_last_sync = Column(DateTime)
+
+    # 元数据
+    total_queries = Column(Integer, default=0)
+    total_conversations = Column(Integer, default=0)
+    last_active_time = Column(DateTime)
+    profile_version = Column(Integer, default=1)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)

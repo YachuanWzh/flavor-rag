@@ -33,14 +33,13 @@ class Settings(BaseSettings):
     # 模型供应商 API Key
     siliconflow_api_key: str = ""
     bailian_api_key: str = ""
-    aihubmix_api_key: str = ""
 
     # Embedding
     embedding_base_url: str = "https://api.siliconflow.cn/v1"
     embedding_model: str = "Qwen/Qwen3-Embedding-8B"
     embedding_dim: int = 4096
     embedding_query_timeout_sec: float = 25.0
-    embedding_query_max_attempts: int = 1
+    embedding_query_max_attempts: int = 2
 
     # LLM
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -148,8 +147,11 @@ class Settings(BaseSettings):
     # 可观测性
     metrics_enabled: bool = True
     otel_enabled: bool = False
-    otel_exporter_otlp_endpoint: str = "http://localhost:4318"
+    otel_exporter_otlp_endpoint: str = "http://localhost:14318"
     otel_service_name: str = "flavorag-server"
+    prometheus_ui_url: str = "http://localhost:19090"
+    grafana_ui_url: str = "http://localhost:13000"
+    jaeger_ui_url: str = "http://localhost:16687"
     trace_store_content: bool = False
     trace_retention_days: int = 30
     index_retired_retention_days: int = 7
@@ -190,6 +192,17 @@ class Settings(BaseSettings):
     agentic_rag_enabled: bool = False
     agent_max_steps: int = 4
     agent_tool_timeout_sec: int = 10
+    # Agentic 最终生成：前三次使用高质量模型，失败后降级两次。
+    agentic_primary_model: str = ""  # 为空时复用 reasoning_model
+    agentic_fallback_model: str = ""  # 为空时复用 hyde_model / mem0_model
+    agentic_model_base_url: str = ""
+    agentic_model_api_key: str = ""
+    agentic_primary_attempts: int = 3
+    agentic_fallback_attempts: int = 2
+    agentic_retry_base_delay_sec: float = 1.0
+    agentic_retry_max_delay_sec: float = 8.0
+    agentic_replay_chunk_chars: int = 2
+    agentic_replay_interval_ms: int = 18
     sql_tool_enabled: bool = False
     sql_tool_allowed_relations: str = ""
     mcp_tool_enabled: bool = False

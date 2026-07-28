@@ -1,4 +1,6 @@
 ﻿"""Unit tests for LightRAG client."""
+from types import SimpleNamespace
+
 import pytest
 from app.rag.graph.lightrag_client import LightRAGClient
 from app.config.settings import settings
@@ -81,3 +83,41 @@ class TestImport:
     def test_module_importable(self):
         from app.rag.graph import lightrag_client
         assert hasattr(lightrag_client, "LightRAGClient")
+
+
+@pytest.mark.asyncio
+async def test_graph_view_degrades_when_neo4j_is_unavailable(monkeypatch):
+    from app.api import graph as graph_module
+
+    async def fake_require_kb(*_args, **_kwargs):
+        return SimpleNamespace(id="kb-1", collection_name="collection-1")
+
+    class UnavailableNeo4j:
+        async def fetch_graph(self, **_kwargs):
+            raise RuntimeError("neo4j unavailable")
+
+    class AvailableLightRAG:
+        async def fetch_graph(self, **_kwargs):
+            return {
+                "nodes": [{"id": "node-1", "name": "Flavor"}],
+                "edges": [],
+                "truncated": False,
+            }
+
+    monkeypatch.setattr(graph_module, "require_kb", fake_require_kb)
+    monkeypatch.setattr(graph_module, "principal_from_user", lambda _user: object())
+    monkeypatch.setattr(graph_module, "Neo4jGraphStore", UnavailableNeo4j)
+    monkeypatch.setattr(graph_module, "LightRAGClient", AvailableLightRAG)
+    monkeypatch.setattr(graph_module._log, "warning", lambda *args, **kwargs: None)
+
+    result = await graph_module.graph_view(
+        kb_id="kb-1",
+        entity="*",
+        depth=2,
+        limit=80,
+        db=None,
+        user=object(),
+    )
+
+    assert result["code"] == "0"
+    assert result["data"]["nodes"] == [{"id": "node-1", "name": "Flavor"}]

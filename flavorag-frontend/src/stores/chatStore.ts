@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { Message, Session, SourceRef } from "@/types";
 import { createStreamResponse, type StreamHandlers } from "@/hooks/useStreamResponse";
+import { chatErrorMessage } from "@/lib/errors";
 
 interface ChatState {
   sessions: Session[];
@@ -229,7 +230,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set((s) => ({
           messages: s.messages.map((m) =>
             m.id === s.streamingMessageId
-              ? { ...m, content: m.content || `[错误] ${error.message}` }
+              ? { ...m, content: m.content || chatErrorMessage(error) }
               : m
           ),
           isLoading: false,
@@ -256,7 +257,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((s) => ({
         messages: s.messages.map((m) =>
           m.id === s.streamingMessageId
-            ? { ...m, content: m.content || `[错误] ${msg}` }
+            ? { ...m, content: m.content || chatErrorMessage(new Error(msg)) }
             : m
         ),
         isLoading: false,

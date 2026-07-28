@@ -1,5 +1,6 @@
 import axios from "axios";
 import { notifyForbidden } from "@/components/common/ForbiddenToast";
+import { friendlyErrorMessage } from "@/lib/errors";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
 
@@ -36,9 +37,9 @@ api.interceptors.response.use(
       localStorage.clear();
       window.location.href = "/login";
     } else if (error?.response?.status === 403) {
-      const detail = error.response.data?.detail || "权限不足，无法执行此操作";
+      const detail = friendlyErrorMessage(error);
       notifyForbidden(detail);
     }
-    return Promise.reject(error);
+    return Promise.reject(new Error(friendlyErrorMessage(error)));
   }
 );

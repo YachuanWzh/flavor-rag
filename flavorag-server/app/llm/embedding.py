@@ -7,12 +7,14 @@ import random
 from collections import OrderedDict
 
 import httpx
+from app.config.logging_config import get_logger
 from app.config.settings import settings
 
 _BATCH_SIZE = 16
 _QUERY_CACHE_MAX_SIZE = 256
 _query_cache: OrderedDict[tuple[str, str, str], list[float]] = OrderedDict()
 _query_cache_lock = asyncio.Lock()
+_log = get_logger("flavorag.embedding")
 
 
 class EmbeddingClient:
@@ -92,11 +94,25 @@ class EmbeddingClient:
                     return vectors
             except Exception as e:
                 last_err = e
+                error_detail = str(e) or type(e).__name__
+                _log.warning(
+                    "embedding_attempt_failed",
+                    attempt=attempt + 1,
+                    max_attempts=attempts,
+                    model=self.model,
+                    error_type=type(e).__name__,
+                    error=error_detail[:300],
+                )
                 if attempt + 1 < attempts:
                     await asyncio.sleep(1.0 * (attempt + 1))
 
+        error_detail = (
+            str(last_err) or type(last_err).__name__
+            if last_err is not None
+            else "unknown error"
+        )
         raise RuntimeError(
-            f"Embedding failed after {attempts} attempt(s): {last_err}"
+            f"Embedding failed after {attempts} attempt(s): {error_detail}"
         )
 
 

@@ -14,6 +14,7 @@ Usage per module:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sys
@@ -68,6 +69,40 @@ class StructuredFormatter(logging.Formatter):
         if value is None:
             return "null"
         return json.dumps(value, ensure_ascii=False)
+
+
+class PersistentErrorAuditHandler(logging.Handler):
+    """Mirror ERROR/CRITICAL log records into the durable error audit.
+
+    Records are placed on the application-owned audit queue so logging stays
+    non-blocking and database work is drained before shutdown.
+    """
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        event = record.getMessage().lower()
+        if record.levelno < logging.ERROR and not any(
+            marker in event for marker in ("failed", "error", "timeout")
+        ):
+            return
+        if _error_audit_queue is None:
+            return
+
+        error_value = getattr(record, "error", None)
+        exc = RuntimeError(str(error_value or record.getMessage()))
+        context = {
+            "logger": record.name,
+            "module": record.module,
+            "method": record.funcName,
+            "line": record.lineno,
+            "event": record.getMessage(),
+        }
+        error_type = getattr(record, "error_type", None)
+        if error_type:
+            context["error_type"] = error_type
+        _error_audit_queue.put_nowait((exc, record.name, context))
 
 
 class _StructuredAdapter(logging.LoggerAdapter):
@@ -127,6 +162,48 @@ class _StructuredAdapter(logging.LoggerAdapter):
 
 
 _loggers: dict[str, logging.LoggerAdapter] = {}
+_error_audit_queue: asyncio.Queue | None = None
+_error_audit_task: asyncio.Task | None = None
+
+
+async def start_error_audit_worker() -> None:
+    """Start the single database writer used by persistent log auditing."""
+    global _error_audit_queue, _error_audit_task
+    if _error_audit_task is not None and not _error_audit_task.done():
+        return
+    _error_audit_queue = asyncio.Queue()
+
+    async def drain() -> None:
+        from app.error_handling import record_system_error
+
+        assert _error_audit_queue is not None
+        while True:
+            item = await _error_audit_queue.get()
+            try:
+                if item is None:
+                    return
+                exc, component, context = item
+                await record_system_error(
+                    exc,
+                    component=component,
+                    context=context,
+                )
+            finally:
+                _error_audit_queue.task_done()
+
+    _error_audit_task = asyncio.create_task(drain())
+
+
+async def stop_error_audit_worker() -> None:
+    """Flush queued audits and stop the writer before the DB engine closes."""
+    global _error_audit_queue, _error_audit_task
+    if _error_audit_queue is None or _error_audit_task is None:
+        return
+    await _error_audit_queue.join()
+    _error_audit_queue.put_nowait(None)
+    await _error_audit_task
+    _error_audit_queue = None
+    _error_audit_task = None
 
 
 def get_logger(name: str) -> logging.LoggerAdapter:
@@ -147,6 +224,7 @@ def get_logger(name: str) -> logging.LoggerAdapter:
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(StructuredFormatter())
         logger.addHandler(handler)
+        logger.addHandler(PersistentErrorAuditHandler())
         logger.setLevel(logging.DEBUG)
         # Prevent propagation to root logger to avoid duplicate output
         logger.propagate = False
@@ -163,4 +241,5 @@ def configure_root_logger(level: int = logging.INFO):
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(StructuredFormatter())
         root.addHandler(handler)
+        root.addHandler(PersistentErrorAuditHandler())
         root.setLevel(level)

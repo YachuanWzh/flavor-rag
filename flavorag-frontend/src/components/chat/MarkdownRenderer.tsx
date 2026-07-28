@@ -131,8 +131,26 @@ export default function MarkdownRenderer({
               );
             },
             a({ children, href }) {
-              if (href?.startsWith("source:")) {
-                const index = Number(href.slice("source:".length)) - 1;
+              const label = React.Children.toArray(children)
+                .filter((child): child is string | number =>
+                  typeof child === "string" || typeof child === "number",
+                )
+                .join("")
+                .trim();
+              const numericLabel = label.match(/^\[?(\d+)\]?$/);
+              const sourceNumber = href?.startsWith("source:")
+                ? Number(href.slice("source:".length))
+                : numericLabel
+                  ? Number(numericLabel[1])
+                  : 0;
+              const isSourceLink =
+                !!onSourceClick &&
+                Number.isInteger(sourceNumber) &&
+                sourceNumber >= 1 &&
+                sourceNumber <= sourceCount;
+
+              if (isSourceLink) {
+                const index = sourceNumber - 1;
                 return (
                   <button
                     type="button"

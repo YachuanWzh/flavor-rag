@@ -1,6 +1,7 @@
 ﻿from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.auth import router as auth_router
@@ -23,9 +24,19 @@ from app.api.monitoring import router as monitoring_router
 from app.api.assets import router as assets_router
 from app.api.user_profile import router as user_profile_router
 from app.config.settings import settings
-from app.config.logging_config import get_logger, configure_root_logger
+from app.config.logging_config import (
+    configure_root_logger,
+    get_logger,
+    start_error_audit_worker,
+    stop_error_audit_worker,
+)
 from app.observability.metrics import MetricsMiddleware, render_metrics
 from app.observability.otel import setup_otel
+from app.error_handling import (
+    http_exception_handler,
+    unhandled_exception_handler,
+    validation_exception_handler,
+)
 
 _log = get_logger("flavorag.server")
 _url_scheduler = None
@@ -81,6 +92,7 @@ async def _seed_admin_user():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_root_logger()
+    await start_error_audit_worker()
     from app.database.session import engine
 
     _log.info("server_starting", database_backend=engine.url.get_backend_name())
@@ -325,6 +337,9 @@ async def lifespan(app: FastAPI):
         _log.info("es_client_closed")
     except Exception as exc:
         _log.warning("es_client_close_failed", error=str(exc))
+    # Flush persistent error audits before disposing the database engine.
+    await stop_error_audit_worker()
+
     # Dispose DB engine: aiosqlite pooled connections each hold a non-daemon
     # worker thread — without dispose() the process never exits and uvicorn
     # reload hangs forever waiting to join the old worker.
@@ -337,6 +352,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="flavor-rag API", version="0.0.5", lifespan=lifespan)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(HTTPException, http_exception_handler)
+app.add_exception_handler(Exception, unhandled_exception_handler)
 
 app.add_middleware(AuditMiddleware)
 if settings.metrics_enabled:

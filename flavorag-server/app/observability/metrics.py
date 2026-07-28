@@ -74,6 +74,20 @@ LLM_STREAM_FAILURES = Counter(
     "Failed LLM stream calls by model.",
     ["model"],
 )
+LLM_RETRY_ATTEMPTS = Counter(
+    "flavorag_llm_retry_attempts_total",
+    "Agentic LLM calls by model tier and outcome.",
+    ["model", "tier", "outcome"],
+)
+LLM_MODEL_FALLBACKS = Counter(
+    "flavorag_llm_model_fallbacks_total",
+    "Agentic requests that switched from the primary to fallback model.",
+)
+SYSTEM_ERRORS = Counter(
+    "flavorag_system_errors_total",
+    "Audited system errors by component and error category.",
+    ["component", "category"],
+)
 RAG_E2E_LATENCY = Histogram(
     "flavorag_rag_end_to_end_duration_seconds",
     "End-to-end duration through final persisted streamed answer.",

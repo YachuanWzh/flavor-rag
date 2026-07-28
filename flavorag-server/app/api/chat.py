@@ -19,7 +19,7 @@ from app.models import User, Conversation, KnowledgeBase, gen_id
 from app.rag.pipeline import RAGPipeline, RAGContext
 from app.rag.trace import TraceLogger
 from app.rag.rate_limiter import RateLimiter
-from app.llm.client import get_llm_client
+from app.llm.client import collect_agentic_generation, get_llm_client
 from app.services.chat_service import ChatService
 from app.config.settings import settings
 from app.config.logging_config import get_logger
@@ -45,6 +45,21 @@ class ChatRequest(BaseModel):
     graph_rag: bool | None = None
     neighbor_expansion: bool = False
     hyde: bool = False
+
+
+def _agentic_replay_tokens(tokens: list[str], chunk_chars: int) -> list[str]:
+    """Split buffered generation into small SSE deltas for visual streaming."""
+    chunk_size = max(1, min(32, chunk_chars))
+    replay: list[str] = []
+    for token in tokens:
+        is_thinking = token.startswith("__THINK__")
+        prefix = "__THINK__" if is_thinking else ""
+        content = token[len(prefix):] if is_thinking else token
+        replay.extend(
+            prefix + content[start:start + chunk_size]
+            for start in range(0, len(content), chunk_size)
+        )
+    return replay
 
 
 async def _update_memory_after_chat(
@@ -661,20 +676,39 @@ async def chat(
             )
             messages[0]["content"] = system_prompt
             t_llm_start = time.time()
-            llm_client = get_llm_client(
-                api_key=rag_result.model_api_key,
-                base_url=rag_result.model_base_url,
-                model=rag_result.model_name,
-            )
 
             # 8. Stream LLM response
             full_content = ""
             thinking_content = ""
+            generation_model = rag_result.model_name or settings.llm_model
+            generation_retry = {
+                "attempts": 1,
+                "fallbackUsed": False,
+                "failures": [],
+            }
 
-            async with asyncio.timeout(settings.llm_generation_timeout_sec):
-                async for token in llm_client.chat_stream(
-                    messages, max_tokens=settings.llm_max_output_tokens
-                ):
+            if effective_agentic_rag:
+                generation = await collect_agentic_generation(
+                    messages,
+                    api_key=rag_result.model_api_key,
+                    base_url=rag_result.model_base_url,
+                    max_tokens=settings.llm_max_output_tokens,
+                )
+                generation_model = generation.model
+                generation_retry = {
+                    "attempts": generation.attempts,
+                    "fallbackUsed": generation.fallback_used,
+                    "failures": generation.failures,
+                }
+                replay_tokens = _agentic_replay_tokens(
+                    generation.tokens,
+                    settings.agentic_replay_chunk_chars,
+                )
+                replay_delay = max(
+                    0,
+                    min(100, settings.agentic_replay_interval_ms),
+                ) / 1000
+                for token_index, token in enumerate(replay_tokens):
                     if await request.is_disconnected():
                         break
                     if token.startswith("__THINK__"):
@@ -683,6 +717,26 @@ async def chat(
                     else:
                         full_content += token
                         yield f"event: message\ndata: {json.dumps({'type': 'response', 'delta': token})}\n\n"
+                    if replay_delay and token_index + 1 < len(replay_tokens):
+                        await asyncio.sleep(replay_delay)
+            else:
+                llm_client = get_llm_client(
+                    api_key=rag_result.model_api_key,
+                    base_url=rag_result.model_base_url,
+                    model=rag_result.model_name,
+                )
+                async with asyncio.timeout(settings.llm_generation_timeout_sec):
+                    async for token in llm_client.chat_stream(
+                        messages, max_tokens=settings.llm_max_output_tokens
+                    ):
+                        if await request.is_disconnected():
+                            break
+                        if token.startswith("__THINK__"):
+                            thinking_content += token[9:]
+                            yield f"event: message\ndata: {json.dumps({'type': 'think', 'delta': token[9:]})}\n\n"
+                        else:
+                            full_content += token
+                            yield f"event: message\ndata: {json.dumps({'type': 'response', 'delta': token})}\n\n"
 
             llm_duration = int((time.time() - t_llm_start) * 1000)
 
@@ -742,13 +796,14 @@ async def chat(
                 total_duration_ms=total_duration,
                 recall_count=len(rag_result.context_chunks),
                 final_count=len(rag_result.sources),
-                model_name=rag_result.model_name or "",
+                model_name=generation_model,
                 metadata={
                     "channels": rag_result.channel_statuses,
                     "agenticRag": effective_agentic_rag,
                     "graphRag": effective_graph_rag,
                     "neighborExpansion": neighbor_expansion,
                     "hyde": hyde,
+                    "generationRetry": generation_retry,
                 },
             )
             await db.commit()
@@ -800,7 +855,26 @@ async def chat(
                     await trace.finalize(trace_id, status="error", error_message=error_msg)
                 except Exception:
                     pass
-            yield f"event: error\ndata: {json.dumps({'error': error_msg})}\n\n"
+            from app.error_handling import describe_error, record_system_error
+
+            friendly = describe_error(e)
+            error_id = await record_system_error(
+                e,
+                component="chat.stream",
+                context={
+                    "method": "chat",
+                    "trace_id": trace_id,
+                    "conversation_id": conversation_id,
+                    "agentic": effective_agentic_rag,
+                },
+            )
+            payload = {
+                "code": friendly.code,
+                "message": friendly.message,
+                "errorId": error_id,
+                "retryable": friendly.retryable,
+            }
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_stream(),

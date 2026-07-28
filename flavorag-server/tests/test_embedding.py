@@ -1,4 +1,5 @@
 ﻿"""Unit tests for embedding module — mock client only."""
+import httpx
 import pytest
 from app.llm.embedding import MockEmbeddingClient, get_embedding_client
 
@@ -75,3 +76,92 @@ async def test_query_embedding_uses_bounded_attempts_and_cache(monkeypatch):
 
     assert first == second == [0.25, 0.75]
     assert calls == [(["cache-me"], 7.0, 1)]
+
+
+@pytest.mark.asyncio
+async def test_embedding_retries_transient_timeout(monkeypatch):
+    from app.llm import embedding as embedding_module
+
+    calls = 0
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"index": 0, "embedding": [0.25, 0.75]}]}
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise httpx.ReadTimeout("")
+            return FakeResponse()
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(embedding_module.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(embedding_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(embedding_module._log, "warning", lambda *args, **kwargs: None)
+
+    client = embedding_module.EmbeddingClient(
+        api_key="test-key",
+        base_url="https://embedding.invalid/v1",
+        model="test-model",
+    )
+    vectors = await client._call_with_retry(
+        ["retry-me"],
+        timeout_sec=1.0,
+        max_attempts=2,
+    )
+
+    assert vectors == [[0.25, 0.75]]
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_embedding_error_preserves_empty_exception_type(monkeypatch):
+    from app.llm import embedding as embedding_module
+
+    class AlwaysTimeoutClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(
+        embedding_module.httpx,
+        "AsyncClient",
+        AlwaysTimeoutClient,
+    )
+    monkeypatch.setattr(embedding_module._log, "warning", lambda *args, **kwargs: None)
+
+    client = embedding_module.EmbeddingClient(
+        api_key="test-key",
+        base_url="https://embedding.invalid/v1",
+        model="test-model",
+    )
+    with pytest.raises(RuntimeError, match="ReadTimeout"):
+        await client._call_with_retry(
+            ["fail-me"],
+            timeout_sec=1.0,
+            max_attempts=1,
+        )

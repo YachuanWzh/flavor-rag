@@ -2,13 +2,14 @@ name: flavorag-observability
 
 # Prometheus + Grafana + Jaeger for the flavorag-server on the host machine.
 # The app listens on host port 9090 (settings.server_port), so Prometheus is
-# published on 9091 to avoid the clash.
+# published on 19090 to avoid clashes with the app, Milvus and local tooling.
 #
 #   docker compose -f observability-stack.compose.yaml up -d
 #
-#   Prometheus UI : http://localhost:9091
-#   Grafana       : http://localhost:3000  (admin / admin)
-#   Jaeger UI     : http://localhost:16686 (traces; set OTEL_ENABLED=true)
+#   Prometheus UI : http://localhost:19090
+#   Grafana       : http://localhost:13000  (admin / admin)
+#   Jaeger UI     : http://localhost:16687 (traces; set OTEL_ENABLED=true)
+#   OTLP HTTP     : http://localhost:14318
 
 services:
   prometheus:
@@ -18,7 +19,7 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=15d"
     ports:
-      - "9091:9090"
+      - "19090:9090"
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./observability/flavorag-alerts.yml:/etc/prometheus/flavorag-alerts.yml:ro
@@ -35,7 +36,7 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_USERS_ALLOW_SIGN_UP: "false"
     ports:
-      - "3000:3000"
+      - "13000:3000"
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
@@ -50,8 +51,8 @@ services:
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
-      - "16686:16686"   # UI
-      - "4318:4318"     # OTLP HTTP (matches otel_exporter_otlp_endpoint)
+      - "16687:16686"   # UI
+      - "14318:4318"    # OTLP HTTP (matches otel_exporter_otlp_endpoint)
     restart: unless-stopped
 
 volumes:

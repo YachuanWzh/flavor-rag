@@ -71,6 +71,16 @@ docker compose -f docker/app.compose.yaml up -d --build
 - liveness：`http://localhost:9090/api/health/live`
 - readiness：`http://localhost:9090/api/health/ready`
 - Prometheus metrics：`http://localhost:9090/metrics`
+- Prometheus UI：`http://localhost:19090`
+- Grafana：`http://localhost:13000`（默认账号/密码：`admin` / `admin`）
+- Jaeger UI：`http://localhost:16687`
+- OpenTelemetry OTLP HTTP：`http://localhost:14318`
+
+启动可观测性组件：
+
+```bash
+docker compose -f docker/observability-stack.compose.yaml up -d
+```
 
 Compose 中 `SOURCE_STORAGE_BACKEND=s3`，源文件保存在 RustFS。仅本地开发可使用默认的 `local`。
 
@@ -78,7 +88,7 @@ Compose 中 `SOURCE_STORAGE_BACKEND=s3`，源文件保存在 RustFS。仅本地�
 
 ```bash
 cd flavorag-server
-uv sync --locked --extra dev
+uv sync --locked --extra dev --extra otel
 uv run alembic upgrade head
 uv run uvicorn app.main:app --host 0.0.0.0 --port 9090
 

@@ -4,10 +4,10 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir uv==0.11.28
 COPY pyproject.toml uv.lock ./
-RUN uv sync --locked --no-dev --no-install-project
+RUN uv sync --locked --no-dev --extra otel --no-install-project
 
 COPY . .
-RUN uv sync --locked --no-dev
+RUN uv sync --locked --no-dev --extra otel
 RUN chmod +x /app/docker-entrypoint.sh
 
 ENV PATH="/app/.venv/bin:${PATH}"

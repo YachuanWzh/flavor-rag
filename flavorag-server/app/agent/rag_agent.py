@@ -13,6 +13,23 @@ from app.tools.mcp_tool import ControlledMCPClient, MCPToolTarget
 from app.agent.planner import plan_next_action
 
 
+def _retrieval_tool_timeout_sec(*, enable_hyde: bool) -> float:
+    """Allow the pipeline's bounded phases to finish before cancelling it."""
+    understanding_timeout = settings.query_understanding_timeout_sec
+    if enable_hyde and settings.hyde_enabled:
+        understanding_timeout = max(
+            understanding_timeout,
+            settings.hyde_timeout_sec,
+        )
+    return max(
+        float(settings.agent_tool_timeout_sec),
+        understanding_timeout
+        + settings.retrieval_total_timeout_ms / 1000
+        + settings.reranker_timeout_sec
+        + 5.0,
+    )
+
+
 class ControlledRAGAgent:
     """Bounded retrieve/tool/finish loop used when Agentic RAG is enabled."""
 
@@ -50,7 +67,9 @@ class ControlledRAGAgent:
             "retrieve",
             retrieve,
             read_only=True,
-            timeout_sec=settings.retrieval_total_timeout_ms / 1000,
+            timeout_sec=_retrieval_tool_timeout_sec(
+                enable_hyde=context.enable_hyde,
+            ),
         )
         if settings.sql_tool_enabled:
             relations = {

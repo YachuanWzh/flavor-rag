@@ -58,11 +58,12 @@ export function createStreamResponse(
       });
 
       if (!response.ok) {
-        let detail = `HTTP ${response.status}`;
+        let detail = "服务暂时不可用，请稍后重试。";
         try {
           const errBody = await response.text();
           const parsed = JSON.parse(errBody);
-          detail = parsed.detail || parsed.message || detail;
+          detail = parsed.message || (response.status < 500 ? parsed.detail : "") || detail;
+          if (parsed.errorId) detail += `（错误编号：${parsed.errorId}）`;
         } catch {}
         throw new Error(detail);
       }
@@ -110,11 +111,14 @@ export function createStreamResponse(
           case "cancel":
             handlers.onCancel?.(payload);
             break;
-          case "error":
-            handlers.onError?.(
-              new Error(payload?.error || "服务暂时不可用，请稍后重试")
-            );
+          case "error": {
+            const message = payload?.message || "服务暂时不可用，请稍后重试";
+            const reference = payload?.errorId
+              ? `${message}（错误编号：${payload.errorId}）`
+              : message;
+            handlers.onError?.(new Error(reference));
             break;
+          }
         }
         eventName = "message";
         dataLines = [];

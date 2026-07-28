@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user
+from app.config.logging_config import get_logger
 from app.config.settings import settings
 from app.database.session import get_db
 from app.models import User
@@ -14,6 +15,7 @@ from app.security.access import Permission
 from app.security.service import principal_from_user, require_kb
 
 router = APIRouter(prefix="/api/rag/v3", tags=["graph-rag"])
+_log = get_logger("flavorag.api.graph")
 
 
 @router.get("/capabilities")
@@ -65,11 +67,19 @@ async def graph_view(
         kb_id,
         Permission.READ,
     )
-    native_graph = await Neo4jGraphStore().fetch_graph(
-        kb_id=kb.id,
-        entity=entity,
-        limit=limit,
-    )
+    try:
+        native_graph = await Neo4jGraphStore().fetch_graph(
+            kb_id=kb.id,
+            entity=entity,
+            limit=limit,
+        )
+    except Exception as exc:
+        _log.warning(
+            "neo4j_graph_view_failed",
+            error_type=type(exc).__name__,
+            kb_id=kb.id,
+        )
+        native_graph = {"nodes": [], "edges": [], "truncated": False}
     try:
         enriched_graph = await LightRAGClient().fetch_graph(
             entity=entity,

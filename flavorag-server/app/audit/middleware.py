@@ -26,6 +26,7 @@ Example in an API handler:
 from __future__ import annotations
 
 import contextvars
+import uuid
 from typing import Any
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -66,9 +67,14 @@ class AuditMiddleware(BaseHTTPMiddleware):
         # Capture client IP and User-Agent
         ctx["ip"] = request.client.host if request.client else ""
         ctx["user_agent"] = request.headers.get("User-Agent", "")
+        ctx["request_id"] = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:16]
+        ctx["method"] = request.method
+        ctx["path"] = request.url.path
 
         token = _audit_ctx.set(ctx)
         try:
-            return await call_next(request)
+            response = await call_next(request)
+            response.headers["X-Request-ID"] = ctx["request_id"]
+            return response
         finally:
             _audit_ctx.reset(token)

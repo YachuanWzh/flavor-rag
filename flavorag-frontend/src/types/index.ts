@@ -143,6 +143,9 @@ export interface GraphEdge {
   label?: string;
   description?: string;
   type?: string;
+  confidence?: number | null;
+  evidence?: string;
+  model?: string;
   crossKnowledgeBase?: boolean;
 }
 
@@ -150,6 +153,15 @@ export interface GraphView {
   nodes: GraphNode[];
   edges: GraphEdge[];
   truncated: boolean;
+  truncatedByType?: Record<string, boolean>;
+  typeStats?: Array<{
+    type: string;
+    count: number;
+    truncated: boolean;
+  }>;
+  limitMode?: "total" | "perType";
+  limitPerType?: number | null;
+  sourceTruncated?: boolean;
   disabled?: boolean;
 }
 

@@ -2,7 +2,10 @@ import { create } from "zustand";
 import type { Message, Session, SourceRef } from "@/types";
 import { createStreamResponse, type StreamHandlers } from "@/hooks/useStreamResponse";
 import { chatErrorMessage } from "@/lib/errors";
-import { graphRagForScope } from "@/components/chat/knowledgeGraphUtils";
+import {
+  graphRecallFocusForMessages,
+  graphRagForScope,
+} from "@/components/chat/knowledgeGraphUtils";
 
 interface ChatState {
   sessions: Session[];
@@ -69,7 +72,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     })),
 
   setCurrentSession: (id) => {
-    set({ currentSessionId: id, messages: [] });
+    set({
+      currentSessionId: id,
+      messages: [],
+      graphFocusQuery: "",
+    });
     // Fetch messages for this session
     const token = localStorage.getItem("token") || "";
     fetch(`/api/conversations/${id}/messages`, {
@@ -77,8 +84,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     })
       .then((r) => r.json())
       .then((data) => {
-        if (data.code === "0") {
-          set({ messages: data.data.map((m: any) => formatMessage(m)) });
+        if (data.code === "0" && get().currentSessionId === id) {
+          const messages = data.data.map((m: any) => formatMessage(m));
+          const graphFocusQuery = graphRecallFocusForMessages(messages);
+          set((state) => ({
+            messages,
+            graphFocusQuery,
+            graphRevision:
+              state.graphRevision + (graphFocusQuery ? 1 : 0),
+          }));
         }
       });
   },
@@ -211,7 +225,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       },
       onFinish: (payload) => {
         const graphRecallSucceeded =
-          state.graphRagEnabled &&
+          (payload.modes?.graphRag ?? state.graphRagEnabled) &&
           Number(payload.channels?.graph?.count || 0) > 0;
         set((s) => ({
           messages: s.messages.map((m) =>
@@ -295,6 +309,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessions: s.sessions.filter((sess) => sess.id !== id),
       currentSessionId: s.currentSessionId === id ? null : s.currentSessionId,
       messages: s.currentSessionId === id ? [] : s.messages,
+      graphFocusQuery:
+        s.currentSessionId === id ? "" : s.graphFocusQuery,
     })),
 }));
 

@@ -1,4 +1,4 @@
-# flavor-rag 0.0.6 运维手册
+# flavor-rag 0.0.7 运维手册
 
 本文只覆盖 RAG 数据面，不讨论登录和授权。生产环境的事实源是 PostgreSQL；Milvus、Elasticsearch 和图索引均可由事实源重建。
 
@@ -63,9 +63,34 @@ alembic upgrade head
 
 - `kb_id=*` 只表示当前用户全部可读知识库，不表示绕过租户/ACL 的系统全局范围。
 - 全库请求会按知识库数放大 Vector、BM25 和 Graph 查询量，应监控 Graph 通道延迟、超时与 breaker 状态。
-- 组合图公共上限为 200 个实体；`truncated=true` 是正常的容量提示，不是图服务错误。
+- 单库组合图上限为 200 个实体；全库组合图按规范化实体类型分别最多 200 个，查看 `truncatedByType/typeStats` 可定位被截断的类型。`truncated=true` 是正常容量提示，不是图服务错误。
 - v0.0.6 之后重新处理的文档会持久化 `tenant_id`、`normalized_name` 和 `CROSS_KB_RELATED`。历史图可在读取时获得严格同名的临时跨库桥；若需要忽略标点/空格的规范化关联，应通过既有摄取/索引修复流程重新处理文档，不要直接批量修改 Neo4j。
 - Graph/LightRAG 故障可按 optional channel 降级，但全库请求仍会调度 Graph 通道并在 channel status 中暴露失败。
+
+### v0.0.7 语义关系抽取
+
+- 新增/修改文档会自动从现有 chunks 抽取带证据的 `SEMANTIC_RELATED`；删除文档或知识库沿用 `IndexSyncService` 清理，不需要单独删图。
+- 语义抽取失败不会删除基础图，并会进入持久化 Graph repair queue。先查日志事件
+  `semantic_graph_enrichment_failed` 和 `t_index_repair_job`，再核对
+  `GRAPH_SEMANTIC_API_KEY`（为空时复用主 LLM key）、模型、超时和 provider 限额。
+- 弱关系偏多时提高 `GRAPH_SEMANTIC_MIN_CONFIDENCE`；漏边较多时先抽样检查文档表述是否明确，再考虑调整模型。不要直接在 Neo4j 中手工改置信度掩盖抽取问题。
+- 历史图不需要重建知识库、重新 chunk 或重新 Embedding：
+
+```bash
+cd flavorag-server
+
+# 只统计范围，不调用 LLM、不写图
+python -m app.rag.graph.semantic_backfill
+
+# 建议先小范围抽样
+python -m app.rag.graph.semantic_backfill --apply --limit 20 --concurrency 2
+
+# 指定知识库；抽样通过后再去掉 limit
+python -m app.rag.graph.semantic_backfill --apply --kb-id <kb_id> --concurrency 2
+```
+
+- 回填结果中的 `complete/failed/entities/edges/rejected` 必须留档。`failed > 0` 时先按
+  `failures[].docId` 重跑指定文档，不要无脑提高并发。模型 provider 的限流通常应把并发维持在 1–2。
 
 ## 队列事故
 

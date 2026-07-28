@@ -1,13 +1,14 @@
 # Cross-Knowledge-Base Graph RAG — SDD
 
-Status: implementation target  
+Status: implemented in v0.0.7
 Date: 2026-07-28
 
 ## 1. Goal
 
 Add a permission-safe `全部` retrieval scope that searches every knowledge
 base the current principal can read, requires Graph RAG for that scope, and
-renders a combined interactive knowledge graph with at most 200 entities.
+renders a combined interactive knowledge graph with at most 200 entities per
+normalized entity type in the global scope.
 
 The feature must preserve single-knowledge-base behavior and must never turn
 the global scope into a tenant-wide authorization bypass.
@@ -26,9 +27,12 @@ the global scope into a tenant-wide authorization bypass.
    panning and wheel/button zoom, and exposes keyboard-focusable nodes.
 6. A successful graph retrieval animates the relevant node-to-node path. The
    animation is disabled under `prefers-reduced-motion`.
-7. The graph returns the actual extracted node count until the hard display
-   limit of 200. `truncated=true` is returned only when more than 200 matching
-   nodes exist.
+7. A concrete knowledge base retains the total 200-entity cap. The global
+   scope applies the 200 cap independently to each normalized entity type;
+   `truncatedByType` identifies only the types whose matching nodes exceed it.
+8. At overview zoom, the UI renders `knowledge base × entity type` aggregate
+   constellations. At detail zoom it renders only nodes and edges intersecting
+   the viewport plus a bounded overscan margin.
 
 ## 3. Scope resolution and authorization
 
@@ -64,18 +68,39 @@ During graph ingestion each entity also stores:
   removal.
 
 Entities with the same non-empty normalized name, in different knowledge bases
-inside the same tenant, receive a deterministic `CROSS_KB_RELATED` edge labeled
-`跨库同名实体`. This is the reliable baseline association: explainable,
-idempotent, and independent of an optional LLM. It does not connect different
-tenants.
+inside the same tenant, are eligible for a deterministic `CROSS_KB_RELATED`
+edge labeled `跨库同名实体`. Generic code/structure tokens are retained as local
+nodes but are not cross-linkable. To avoid a complete bipartite explosion, the
+highest-local-degree representative per knowledge base is selected and one edge
+is retained per knowledge-base pair. This is the reliable baseline association:
+explainable, idempotent, and independent of an optional LLM. It does not connect
+different tenants.
 
-Future semantic synonym or LLM-extracted cross-library edges must use a
-different relation type and retain confidence/provenance; they must not replace
-the deterministic baseline.
+Legacy graph nodes are upgraded in place by the idempotent backfill command.
+New, updated, and deleted documents maintain only their affected normalized
+entity groups during ordinary ingestion; no re-chunk or vector re-index is
+required solely to maintain cross-knowledge-base edges.
+
+v0.0.7 adds evidence-grounded `SEMANTIC_RELATED` edges without replacing the
+deterministic baseline. A zero-temperature lightweight LLM may propose entities
+and allow-listed relation types, but the server accepts them only when both
+entities occur in the supplied document, the evidence occurs verbatim in the
+cited chunk, and confidence meets the configured threshold. Each accepted edge
+retains `chunk_id`, `doc_id`, `kb_id`, `tenant_id`, evidence, confidence, model,
+prompt version, and a deterministic evidence ID. Generic transport/format terms
+such as JSON, API, HTTP, XML, and YAML are explicitly ineligible for name-only
+cross-library bridges.
+
+Document ingestion replaces semantic data by document ID. Deletion removes the
+document's nodes and relations and rebuilds only affected deterministic bridges;
+knowledge-base deletion invokes the same operation for every document. Existing
+active chunks can be semantically backfilled in place without re-chunking or
+embedding through `python -m app.rag.graph.semantic_backfill --apply`.
 
 The graph read API accepts either one resolved KB or the complete authorized KB
 set. It returns `knowledgeBaseId`/`knowledgeBaseName` on nodes and
-`crossKnowledgeBase`/`type` on edges.
+`crossKnowledgeBase`/`type` on edges. Empty or whitespace-only entity types are
+normalized into the `unclassified` quota.
 
 ## 5. Retrieval execution
 
@@ -105,6 +130,8 @@ The visual language is a “knowledge star map”:
 - solid local relations and dashed luminous cross-library bridges;
 - one orchestrated recall-path light flow after successful graph recall;
 - node selection dims unrelated nodes and exposes description/provenance.
+- a semantic zoom transition: overview bubbles encode provenance, entity type,
+  and member count; detail zoom reveals the individual constellation.
 
 Interaction state is a transform `{x, y, scale}`:
 
@@ -112,12 +139,20 @@ Interaction state is a transform `{x, y, scale}`:
 - wheel zoom is centered on the pointer and clamped to `0.45..2.5`;
 - buttons zoom and reset;
 - the canvas does not scroll the page while wheel-zooming;
+- overview mode draws aggregate bubbles and aggregate inter-type relations;
+- detail mode culls offscreen nodes and any edge without two rendered endpoints;
+- selected and recalled nodes remain render-pinned even just outside the
+  viewport so interaction feedback does not disappear;
 - reduced-motion users receive static highlighted paths.
 
 ## 7. API compatibility
 
 - Existing concrete `kb_id` calls remain valid.
-- Graph limit defaults to 200 and is capped at 200 by the public endpoint.
+- Graph `limit` defaults to 200 and is capped at 200. For a concrete KB it is a
+  total node limit; for `kb_id=*` it is a per-normalized-type limit.
+- Graph responses add `limitMode`, `limitPerType`, `typeStats`, and
+  `truncatedByType`; existing `truncated` remains the aggregate compatibility
+  flag.
 - Existing graph node/edge fields remain; provenance and cross-edge fields are
   additive.
 - `null`/missing chat KB behavior remains legacy auto-selection. Only `*`
@@ -139,11 +174,17 @@ Interaction state is a transform `{x, y, scale}`:
    resolved KB.
 5. Cross-KB graph writes include tenant and normalized name and create
    `CROSS_KB_RELATED`, never across tenants.
-6. Combined graph reads include multiple KBs, cross-edge metadata and at most
-   200 nodes.
-7. Exactly 200 nodes is not truncated; 201 nodes is truncated.
+6. Combined graph reads include multiple KBs and cross-edge metadata.
+7. A global graph with 200 nodes in each of several types returns all of them;
+   the 201st node truncates only its own type.
 8. The legacy Qwen embedding shorthand resolves to the configured
    provider-qualified model identifier.
+9. Semantic extraction rejects hallucinated entities, fabricated evidence,
+   illegal relation types, duplicate relations, and confidence below threshold.
+10. Semantic writes replace prior document edges idempotently and retain
+    evidence/model/prompt provenance.
+11. Semantic model failure preserves the deterministic graph and allows the
+    optional LightRAG enrichment step to continue.
 
 ### Frontend
 
@@ -155,6 +196,10 @@ Interaction state is a transform `{x, y, scale}`:
    with a deterministic high-degree fallback.
 5. Knowledge-base creation omits `embedding_model` by default but preserves an
    explicitly selected custom model.
+6. Overview aggregation groups by knowledge base and normalized entity type
+   and preserves aggregate edge counts.
+7. Detail rendering excludes offscreen nodes/edges while retaining overscan
+   and explicitly pinned interaction nodes.
 
 ## 9. Definition of done
 
@@ -163,5 +208,6 @@ Interaction state is a transform `{x, y, scale}`:
 - Full backend test suite passes, or every unrelated environmental failure is
   recorded with evidence.
 - Frontend unit tests, TypeScript checking and production build pass.
-- The graph is visually inspected at small, medium and 200-node fixtures.
+- The graph is visually inspected at small, medium, 200-node, and multi-type
+  600+ node fixtures.
 - `git log` is unchanged by this work: no intermediate or final commit is made.

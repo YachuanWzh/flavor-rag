@@ -14,6 +14,46 @@ from app.observability.metrics import INDEX_REPAIR_JOBS
 _log = get_logger("flavorag.index_repair")
 
 
+async def repair_graph_document(kb, chunks) -> None:
+    """Rebuild deterministic + semantic graph, then refresh LightRAG."""
+    from app.rag.graph.lightrag_client import LightRAGClient
+    from app.rag.graph.neo4j_store import Neo4jGraphStore
+    from app.rag.graph.semantic_extractor import extract_and_store_semantic_graph
+
+    graph_payload = [
+        {
+            "doc_id": chunk.doc_id,
+            "chunk_id": chunk.id,
+            "tenant_id": chunk.tenant_id,
+            "content": chunk.content,
+        }
+        for chunk in chunks
+    ]
+    collection_name = kb.active_collection_name or kb.collection_name
+    await Neo4jGraphStore().upsert_chunks(
+        kb_id=kb.id,
+        collection_name=collection_name,
+        chunks=graph_payload,
+    )
+    await extract_and_store_semantic_graph(
+        kb_id=kb.id,
+        collection_name=collection_name,
+        chunks=graph_payload,
+    )
+    try:
+        await LightRAGClient().insert_documents_batch(
+            kb.id,
+            graph_payload,
+            collection_name=collection_name,
+        )
+    except Exception as exc:
+        _log.warning(
+            "index_repair_lightrag_enqueue_failed",
+            doc_id=(chunks[0].doc_id if chunks else ""),
+            error=str(exc),
+        )
+
+
 class IndexRepairWorker:
     def __init__(self, poll_interval_sec: int = 15):
         self.poll_interval_sec = poll_interval_sec
@@ -126,23 +166,7 @@ class IndexRepairWorker:
                         kb.id,
                     )
                 elif job.channel == "graph":
-                    from app.rag.graph.neo4j_store import Neo4jGraphStore
-
-                    await Neo4jGraphStore().upsert_chunks(
-                        kb_id=kb.id,
-                        collection_name=(
-                            kb.active_collection_name or kb.collection_name
-                        ),
-                        chunks=[
-                            {
-                                "doc_id": chunk.doc_id,
-                                "chunk_id": chunk.id,
-                                "tenant_id": chunk.tenant_id,
-                                "content": chunk.content,
-                            }
-                            for chunk in chunks
-                        ],
-                    )
+                    await repair_graph_document(kb, chunks)
                 elif job.channel == "milvus":
                     from app.llm.embedding import get_embedding_client
                     from app.rag.search.vector import MilvusSearchChannel

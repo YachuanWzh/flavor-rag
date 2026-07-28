@@ -351,7 +351,7 @@ async def lifespan(app: FastAPI):
     _log.info("server_shutting_down")
 
 
-app = FastAPI(title="flavor-rag API", version="0.0.6", lifespan=lifespan)
+app = FastAPI(title="flavor-rag API", version="0.0.7", lifespan=lifespan)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
@@ -389,12 +389,12 @@ app.include_router(user_profile_router)
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok", "version": "0.0.6"}
+    return {"status": "ok", "version": "0.0.7"}
 
 
 @app.get("/api/health/live")
 async def liveness_check():
-    return {"status": "ok", "version": "0.0.6"}
+    return {"status": "ok", "version": "0.0.7"}
 
 
 @app.get("/api/health/ready")
@@ -407,7 +407,7 @@ async def readiness_check():
         status_code=200 if ready else 503,
         content={
             "status": "ready" if ready else "not_ready",
-            "version": "0.0.6",
+            "version": "0.0.7",
             "checks": checks,
         },
     )

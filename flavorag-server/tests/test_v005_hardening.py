@@ -191,6 +191,33 @@ def test_citation_validator_rejects_wrong_evidence_reference():
     assert stats["invalidCitations"] == 1
 
 
+def test_citation_validator_preserves_gfm_table_structure():
+    from app.api.chat import _validate_citations
+
+    table = (
+        "| Dimension | Integration |\n"
+        "| --- | --- |\n"
+        "| Protocol | MCP exposes retrieval as tools |\n"
+        "| Client | Agent invokes those tools |\n"
+    )
+    answer, stats = _validate_citations(
+        f"Recommended architecture.[1]\n\n{table}\nThis keeps the boundary clear.[1]",
+        [
+            {
+                "content": (
+                    "The recommended architecture uses MCP retrieval tools "
+                    "and keeps a clear client boundary."
+                )
+            }
+        ],
+    )
+
+    assert table in answer
+    assert "| --- | --- |[1]" not in answer
+    assert "| Protocol | MCP exposes retrieval as tools |[1]" not in answer
+    assert stats["cited"] == [1]
+
+
 def test_end_to_end_answer_metrics_cover_grounding_and_citations():
     from app.evaluation.runner import evaluate_answer_quality
 

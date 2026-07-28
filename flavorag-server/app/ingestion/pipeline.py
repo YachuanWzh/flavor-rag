@@ -388,6 +388,24 @@ class IngestionPipeline:
                 kb_id=kb_id,
                 **native_result,
             )
+            semantic_ok = True
+            try:
+                from app.rag.graph.semantic_extractor import (
+                    extract_and_store_semantic_graph,
+                )
+
+                await extract_and_store_semantic_graph(
+                    kb_id=kb_id,
+                    collection_name=collection_name,
+                    chunks=payload,
+                )
+            except Exception as exc:
+                semantic_ok = False
+                _ingest_log.warning(
+                    "semantic_graph_enrichment_failed",
+                    kb_id=kb_id,
+                    error=str(exc),
+                )
             try:
                 await LightRAGClient().insert_documents_batch(
                     kb_id,
@@ -400,7 +418,7 @@ class IngestionPipeline:
                     kb_id=kb_id,
                     error=str(exc),
                 )
-            return True
+            return semantic_ok
         except Exception as exc:
             _ingest_log.warning(
                 "graph_sync_failed",

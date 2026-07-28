@@ -1,18 +1,52 @@
 # flavor-rag
 
-> 版本：v0.0.6 · 跨知识库 Graph RAG 版 · 2026-07-28
+> 版本：v0.0.7 · 可信语义知识图谱版 · 2026-07-28
 
 flavor-rag 是一个面向企业知识库的全链路 RAG 系统，覆盖多格式摄取、版本化索引、混合检索、证据约束生成、引用、长期记忆、离线评测和生产可观测性。本版本不把登录与权限作为企业级结论的一部分；重点是 RAG 数据面的正确性、可恢复性和可运维性。
+
+## v0.0.7 关键变化
+
+以前的跨库边主要回答“两个库里有没有同名实体”。这很稳定，但 `JSON`、`API`
+这类通用词即使同时出现，也不代表两个知识库真的有关。v0.0.7 改为三层混合图谱：
+
+- **基础层（不调用 LLM）**：标题、代码标识符和同一 chunk 共现关系，保证模型不可用时仍有图。
+- **语义层（轻量 LLM）**：从原文抽取 `USES`、`DEPENDS_ON`、`IMPLEMENTS` 等白名单关系。每条边必须带原文证据、chunk ID、置信度、模型和 prompt 版本；实体或证据不在原文、关系类型越界、置信度低于阈值都会被拒绝。
+- **跨库层（高精度对齐）**：只把同租户、不同库中的有效同名实体作为跨库锚点。`JSON`、`API`、`HTTP`、`XML`、`YAML` 等通用词明确禁止生成名称型跨库桥，避免“都提过一个常见词”造成假关联。
+- **增量维护**：新建或修改文档时自动替换该文档的旧语义边；删除文档时清理其图节点并重建受影响的跨库桥；删除知识库沿用逐文档清理。新增知识库不需要额外操作，第一篇文档入库时自然进入图谱。
+- **失败可恢复**：语义 provider 临时失败不会回滚已写好的基础图；系统会创建持久化 Graph repair job，按退避策略自动重跑。
+- **历史数据原地升级**：不用新建知识库，也不用重新 chunk/Embedding。名称桥继续使用 `python -m app.rag.graph.backfill --apply`；语义关系先用 `python -m app.rag.graph.semantic_backfill` 预览，再加 `--apply` 从现有 active chunks 抽取。
+- **看得见证据**：知识星图选中实体后会展示关系类型、置信度和支持该关系的原文，方便人工判断这条边是否可信。
+- **一遍过门禁**：后端 `219 passed`，前端 `12 passed`，TypeScript 与 Vite 生产构建通过；真实数据验证了 `flavor-code → Harness → huamulan-agent` 的语义边 + 跨库锚点路径。
+
+```mermaid
+flowchart LR
+    D["新增 / 修改文档"] --> C["现有 chunks"]
+    C --> B["规则基础图"]
+    C --> L["轻量 LLM 关系抽取"]
+    L --> V{"原文证据 + 类型白名单 + 置信度"}
+    V -->|通过| S["SEMANTIC_RELATED"]
+    V -->|拒绝| X["不写入"]
+    B --> A["有效实体跨库对齐"]
+    S --> A
+    A --> G["可追溯知识星图"]
+    R["删除文档 / 知识库"] --> K["删除所属节点和边并局部重建跨库桥"]
+```
+
+该方案采用业界常见的“结构化抽取 + 实体消歧 + 证据来源 + 增量更新”组合，而不是让
+LLM 自由生成整张图。设计参考
+[Microsoft GraphRAG 方法](https://microsoft.github.io/graphrag/index/methods/)、
+[GraphRAG 输出模型](https://microsoft.github.io/graphrag/index/outputs/)和
+[Neo4j GraphRAG Knowledge Graph Builder](https://neo4j.com/docs/neo4j-graphrag-python/current/user_guide_kg_builder.html)。
 
 ## v0.0.6 关键变化
 
 - **跨库检索**：知识库选择器新增“全部知识库”，显式使用 `kb_id=*`；服务端只展开当前用户有读取权限的知识库，向量、BM25、Neo4j 和 LightRAG 按库并发检索，融合后由 PostgreSQL 按精确 KB 集合与文档 ACL 再次过滤。
 - **强制 Graph RAG**：选择“全部知识库”后前端自动开启并锁定 Graph RAG；服务端也会忽略伪造的 `graph_rag=false`，确保跨库请求始终调度图谱通道。
-- **跨库知识关联**：Neo4j 实体新增 `tenant_id` 与 `normalized_name`，同租户、不同知识库的规范化同名实体通过 `CROSS_KB_RELATED` 关联；现有图数据在读取时也能生成同名实体桥。
-- **200 实体知识星图**：关系图按实际实体数展示，上限从 80 提升到 200；支持画布拖拽、鼠标指针锚定滚轮缩放、按钮缩放/复位、知识库聚类与来源图例。
+- **跨库知识关联**：Neo4j 实体新增 `tenant_id`、`normalized_name` 与 `cross_linkable`，过滤通用噪声后，同租户、不同知识库的规范化同名实体通过代表性 `CROSS_KB_RELATED` 关联；历史图可原地回填，后续文档增删改自动维护受影响的跨库桥。
+- **分类型知识星图**：单库最多 200 实体，全库按实体类型分别最多 200；支持“知识库 × 类型”语义缩放聚合、可视域与 overscan 裁剪、最多 420 个详情节点绘制预算、画布拖拽和指针锚定缩放。
 - **Graph 召回动效**：Graph 通道实际召回证据后，前端从查询匹配实体出发高亮连通路径，显示节点呼吸与边光流；`prefers-reduced-motion` 下自动降级为静态高亮。
 - **知识库创建修复**：前端不再硬编码无效的 Embedding 简写；服务端以 `EMBEDDING_MODEL` 为默认权威，并兼容旧值 `qwen3-embedding-8b`，统一规范化为 SiliconFlow 可识别的 `Qwen/Qwen3-Embedding-8B`。
-- **SDD + TDD**：新增跨库 Graph RAG 与知识库创建契约测试；后端全量 `203 passed`，前端 `6 passed`、TypeScript、生产构建和 200 节点桌面/窄屏视觉 QA 通过。
+- **SDD + TDD**：新增跨库 Graph RAG、分类型容量、视域渲染与知识库创建契约测试；后端全量 `207 passed`，前端 `12 passed`、TypeScript、生产构建及真实 333 节点全库视觉 QA 通过。
 
 详细设计见 [跨知识库 Graph RAG SDD](docs/specs/cross-knowledge-base-graph-rag.md)，部署与故障处理见 [运维手册](docs/operations-runbook.md)，完整实现说明见 [技术方案文档](技术方案文档.md)。
 
@@ -40,7 +74,7 @@ flowchart LR
     P --> G["Pending document generation"]
     G --> M["Milvus required"]
     G --> E["Elasticsearch optional/required"]
-    G --> N["Neo4j / LightRAG optional/required"]
+    G --> N["Neo4j 基础图 + 证据语义图 + LightRAG"]
     M --> A["原子激活 generation"]
     E --> A
     N --> A
@@ -127,9 +161,20 @@ EMBEDDING_DIM=4096
 LLM_MODEL=qwen-plus-latest
 LLM_CONTEXT_WINDOW_TOKENS=8192
 LLM_MAX_OUTPUT_TOKENS=2048
+
+GRAPH_ENABLED=true
+GRAPH_SEMANTIC_ENABLED=true
+GRAPH_SEMANTIC_MODEL=qwen-plus-latest
+GRAPH_SEMANTIC_MIN_CONFIDENCE=0.70
 ```
 
 `EMBEDDING_MODEL` 是新建知识库的服务端默认权威，前端未显式选型时不会重复发送模型名；历史简写 `qwen3-embedding-8b` 会在服务端规范化。`EMBEDDING_DIM` 只是默认值。创建知识库时会实际探测模型输出维度并写入 index generation；已有 collection 不会因配置变化被删除。
+
+`GRAPH_SEMANTIC_MODEL` 建议使用支持稳定 JSON 输出的低温轻量模型。它只负责抽取候选，
+服务端仍会做证据和 schema 校验。提高 `GRAPH_SEMANTIC_MIN_CONFIDENCE` 会减少边但提升精度；
+生产环境建议先抽样核验，再从 `0.70` 调整。长文档会按字符数和 chunk 数分批，避免一次
+prompt 过大；显式语义模型不可用时会尝试已配置且端点匹配的 HyDE/Mem0 轻量模型。语义
+抽取属于增强通道，所有兼容模型都失败时基础图仍可用。
 
 ## RAG 数据面
 

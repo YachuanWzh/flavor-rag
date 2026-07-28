@@ -205,6 +205,23 @@ class IndexerNode:
                             chunks=graph_payload,
                         )
                         try:
+                            from app.rag.graph.semantic_extractor import (
+                                extract_and_store_semantic_graph,
+                            )
+
+                            await extract_and_store_semantic_graph(
+                                kb_id=ctx.kb_id,
+                                collection_name=collection_name,
+                                chunks=graph_payload,
+                            )
+                        except Exception as exc:
+                            graph_ok = False
+                            _log.warning(
+                                "indexer_semantic_graph_enrichment_failed",
+                                doc_id=ctx.doc_id,
+                                error=str(exc),
+                            )
+                        try:
                             await LightRAGClient().insert_documents_batch(
                                 ctx.kb_id,
                                 graph_payload,

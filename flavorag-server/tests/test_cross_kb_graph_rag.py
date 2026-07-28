@@ -194,6 +194,10 @@ def test_entity_normalization_is_stable_and_unicode_aware():
     from app.rag.graph.neo4j_store import Neo4jGraphStore
 
     assert Neo4jGraphStore._normalized_name(" Graph-RAG / 图 谱 ") == "graphrag图谱"
+    assert Neo4jGraphStore._is_cross_kb_candidate("Graph RAG") is True
+    assert Neo4jGraphStore._is_cross_kb_candidate("Embedding") is True
+    assert Neo4jGraphStore._is_cross_kb_candidate("TABLE") is False
+    assert Neo4jGraphStore._is_cross_kb_candidate("IF") is False
 
 
 @pytest.mark.asyncio
@@ -244,11 +248,101 @@ async def test_cross_kb_edges_are_tenant_scoped_and_keep_canonical_chunk_id(
     cross_write = next(
         query
         for query, _kwargs in calls
-        if "MERGE (entity)-[forward:CROSS_KB_RELATED]" in query
+        if "MERGE (source)-[relation:CROSS_KB_RELATED]" in query
     )
     assert entity_write["rows"][0]["chunk_id"] == "chunk-a"
     assert entity_write["rows"][0]["tenant_id"] == "tenant-a"
-    assert "tenant_id: row.tenant_id" in cross_write
+    assert entity_write["rows"][0]["cross_linkable"] is True
+    assert "candidate.cross_linkable = true" in cross_write
+    assert "head(collect(candidate)) AS representative" in cross_write
+
+
+@pytest.mark.asyncio
+async def test_legacy_graph_backfill_plans_one_bridge_per_kb_pair(monkeypatch):
+    from app.rag.graph.neo4j_store import Neo4jGraphStore
+
+    graph_nodes = [
+        {
+            "id": "a-low",
+            "name": "Graph RAG",
+            "kb_id": "kb-a",
+            "tenant_id": None,
+            "normalized_name": None,
+            "cross_linkable": None,
+            "local_degree": 1,
+        },
+        {
+            "id": "a-high",
+            "name": "Graph-RAG",
+            "kb_id": "kb-a",
+            "tenant_id": None,
+            "normalized_name": None,
+            "cross_linkable": None,
+            "local_degree": 8,
+        },
+        {
+            "id": "b",
+            "name": "graph_rag",
+            "kb_id": "kb-b",
+            "tenant_id": None,
+            "normalized_name": None,
+            "cross_linkable": None,
+            "local_degree": 3,
+        },
+        {
+            "id": "noise-a",
+            "name": "TABLE",
+            "kb_id": "kb-a",
+            "tenant_id": None,
+            "normalized_name": None,
+            "cross_linkable": None,
+            "local_degree": 10,
+        },
+        {
+            "id": "noise-b",
+            "name": "Table",
+            "kb_id": "kb-b",
+            "tenant_id": None,
+            "normalized_name": None,
+            "cross_linkable": None,
+            "local_degree": 10,
+        },
+    ]
+
+    class Result:
+        async def data(self):
+            return graph_nodes
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def run(self, _query, **_kwargs):
+            return Result()
+
+    class Driver:
+        def session(self):
+            return Session()
+
+    store = Neo4jGraphStore()
+    monkeypatch.setattr(store, "_driver", lambda: Driver())
+
+    summary = await store.backfill_cross_kb_relations(
+        kb_tenants={"kb-a": "tenant-a", "kb-b": "tenant-a"},
+        apply=False,
+    )
+
+    assert summary == {
+        "knowledgeBases": 2,
+        "nodesScanned": 5,
+        "nodesUpdated": 5,
+        "sharedNames": 1,
+        "crossEdges": 1,
+        "applied": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -306,3 +400,45 @@ async def test_combined_graph_caps_at_200_and_reports_true_truncation(
     assert len(graph["nodes"]) == expected_count
     assert graph["truncated"] is truncated
     assert {node["knowledgeBaseId"] for node in graph["nodes"]} == {"kb-a", "kb-b"}
+
+
+def test_global_graph_limit_is_applied_independently_per_entity_type():
+    from app.api.graph import _limit_graph_nodes
+
+    nodes = [
+        {"id": f"concept-{index}", "type": "Concept"}
+        for index in range(201)
+    ] + [
+        {"id": f"identifier-{index}", "type": "identifier"}
+        for index in range(200)
+    ]
+
+    result = _limit_graph_nodes(nodes, limit=200, per_type=True)
+
+    assert len(result["nodes"]) == 400
+    assert result["limitMode"] == "perType"
+    assert result["limitPerType"] == 200
+    assert result["truncated"] is True
+    assert result["truncatedByType"] == {"concept": True}
+    assert result["typeStats"] == [
+        {"type": "concept", "count": 200, "truncated": True},
+        {"type": "identifier", "count": 200, "truncated": False},
+    ]
+
+
+def test_single_kb_graph_retains_total_entity_limit():
+    from app.api.graph import _limit_graph_nodes
+
+    nodes = [
+        {"id": f"concept-{index}", "type": "concept"}
+        for index in range(150)
+    ] + [
+        {"id": f"identifier-{index}", "type": "identifier"}
+        for index in range(150)
+    ]
+
+    result = _limit_graph_nodes(nodes, limit=200, per_type=False)
+
+    assert len(result["nodes"]) == 200
+    assert result["limitMode"] == "total"
+    assert result["truncated"] is True

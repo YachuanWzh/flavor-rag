@@ -21,9 +21,12 @@ import {
 import { fetchKnowledgeGraph } from "@/services/graphService";
 import type { GraphNode, GraphView } from "@/types";
 import {
+  aggregateGraphForOverview,
+  cullGraphToViewport,
   MAX_GRAPH_NODES,
   nextViewportForWheel,
   recallPathEdges,
+  shouldAggregateGraph,
   type GraphViewport,
 } from "./knowledgeGraphUtils";
 
@@ -46,6 +49,7 @@ interface PositionedNode extends GraphNode {
 const WIDTH = 1100;
 const HEIGHT = 760;
 const INITIAL_VIEWPORT: GraphViewport = { x: 0, y: 0, scale: 1 };
+const OVERVIEW_SCALE = 0.78;
 const palette = [
   "#22d3ee",
   "#818cf8",
@@ -96,37 +100,54 @@ function layoutGraph(view: GraphView | null): PositionedNode[] {
     const groupRadius = groupCount > 1 ? Math.min(275, 130 + groupCount * 24) : 0;
     const centerX = WIDTH / 2 + Math.cos(groupAngle) * groupRadius;
     const centerY = HEIGHT / 2 + Math.sin(groupAngle) * groupRadius * 0.72;
-    const ordered = [...nodes].sort(
-      (a, b) =>
-        (degrees.get(b.id) || 0) - (degrees.get(a.id) || 0) ||
-        a.name.localeCompare(b.name),
+    const typeGroups = new Map<string, GraphNode[]>();
+    nodes.forEach((node) => {
+      const type = node.type?.trim().toLocaleLowerCase() || "unclassified";
+      typeGroups.set(type, [...(typeGroups.get(type) || []), node]);
+    });
+    const orderedTypes = [...typeGroups.entries()].sort(([a], [b]) =>
+      a.localeCompare(b),
     );
-    const spacing =
-      groupCount === 1
-        ? Math.max(24, 42 - ordered.length * 0.08)
-        : Math.max(20, 34 - ordered.length * 0.06);
+    const typeOrbit = orderedTypes.length > 1
+      ? Math.min(170, 72 + orderedTypes.length * 18)
+      : 0;
 
-    return ordered.map((node, index) => {
-      if (index === 0) {
+    return orderedTypes.flatMap(([type, typedNodes], typeIndex) => {
+      const typeAngle =
+        (typeIndex / Math.max(1, orderedTypes.length)) * Math.PI * 2 -
+        Math.PI / 2;
+      const typeCenterX = centerX + Math.cos(typeAngle) * typeOrbit;
+      const typeCenterY = centerY + Math.sin(typeAngle) * typeOrbit * 0.72;
+      const ordered = [...typedNodes].sort(
+        (a, b) =>
+          (degrees.get(b.id) || 0) - (degrees.get(a.id) || 0) ||
+          a.name.localeCompare(b.name),
+      );
+      const spacing = Math.max(16, 28 - ordered.length * 0.035);
+
+      return ordered.map((node, index) => {
+        const radius = Math.sqrt(index) * spacing;
+        const angle =
+          index * goldenAngle + hash(`${groupId}:${type}`) * 0.001;
         return {
           ...node,
-          x: centerX,
-          y: centerY,
+          x: typeCenterX + Math.cos(angle) * radius,
+          y: typeCenterY + Math.sin(angle) * radius * 0.82,
           color: nodeColor(node),
           degree: degrees.get(node.id) || 0,
         };
-      }
-      const radius = Math.sqrt(index) * spacing;
-      const angle = index * goldenAngle + hash(groupId) * 0.001;
-      return {
-        ...node,
-        x: centerX + Math.cos(angle) * radius,
-        y: centerY + Math.sin(angle) * radius * 0.82,
-        color: nodeColor(node),
-        degree: degrees.get(node.id) || 0,
-      };
+      });
     });
   });
+}
+
+function initialViewport(nodeCount: number, globalScope: boolean): GraphViewport {
+  if (!globalScope || nodeCount <= 120) return INITIAL_VIEWPORT;
+  return {
+    x: (WIDTH * (1 - OVERVIEW_SCALE)) / 2,
+    y: (HEIGHT * (1 - OVERVIEW_SCALE)) / 2,
+    scale: OVERVIEW_SCALE,
+  };
 }
 
 function readableError(error: unknown) {
@@ -178,7 +199,7 @@ export default function KnowledgeGraphPanel({
         setView(result);
         setActiveEntity(focus || "*");
         setSelectedId(null);
-        setViewport(INITIAL_VIEWPORT);
+        setViewport(initialViewport(result.nodes.length, kbId === "*"));
       } catch (reason) {
         setError(readableError(reason));
         setView(null);
@@ -199,6 +220,24 @@ export default function KnowledgeGraphPanel({
     [positioned],
   );
   const selected = selectedId ? byId.get(selectedId) : undefined;
+  const selectedEdges = useMemo(
+    () =>
+      selectedId && view
+        ? view.edges
+            .filter(
+              (edge) =>
+                edge.source === selectedId || edge.target === selectedId,
+            )
+            .sort(
+              (left, right) =>
+                Number(Boolean(right.evidence)) -
+                  Number(Boolean(left.evidence)) ||
+                (right.confidence || 0) - (left.confidence || 0),
+            )
+            .slice(0, 4)
+        : [],
+    [selectedId, view],
+  );
   const connectedIds = useMemo(() => {
     if (!selectedId || !view) return new Set<string>();
     const ids = new Set<string>([selectedId]);
@@ -210,7 +249,7 @@ export default function KnowledgeGraphPanel({
   }, [selectedId, view]);
   const recalledEdges = useMemo(
     () =>
-      view && refreshKey > 0
+      view && focusQuery.trim()
         ? recallPathEdges(view, focusQuery, Math.min(7, view.edges.length))
         : new Set<string>(),
     [focusQuery, refreshKey, view],
@@ -226,6 +265,34 @@ export default function KnowledgeGraphPanel({
     });
     return ids;
   }, [recalledEdges, view]);
+  const aggregateMode = shouldAggregateGraph(
+    positioned.length,
+    viewport.scale,
+  );
+  const overview = useMemo(
+    () => aggregateGraphForOverview(positioned, view?.edges || []),
+    [positioned, view],
+  );
+  const overviewById = useMemo(
+    () => new Map(overview.nodes.map((node) => [node.id, node])),
+    [overview.nodes],
+  );
+  const pinnedIds = useMemo(() => {
+    const ids = new Set(recalledNodes);
+    if (selectedId) ids.add(selectedId);
+    return ids;
+  }, [recalledNodes, selectedId]);
+  const detailRender = useMemo(
+    () =>
+      cullGraphToViewport(
+        positioned,
+        view?.edges || [],
+        viewport,
+        { width: WIDTH, height: HEIGHT, overscan: 90, maxNodes: 420 },
+        pinnedIds,
+      ),
+    [pinnedIds, positioned, view, viewport],
+  );
   const knowledgeBases = useMemo(() => {
     const values = new Map<string, { name: string; color: string }>();
     positioned.forEach((node) => {
@@ -279,7 +346,9 @@ export default function KnowledgeGraphPanel({
             <p className="mt-0.5 truncate text-[11px] text-slate-400">
               {kbName || "请选择知识库"}
               {view
-                ? ` · ${view.nodes.length} 个实体 · ${view.edges.length} 条关系`
+                ? ` · ${view.nodes.length} 个实体 · ${view.edges.length} 条关系${
+                    view.limitMode === "perType" ? " · 每类≤200" : ""
+                  }`
                 : ""}
             </p>
           </div>
@@ -465,7 +534,37 @@ export default function KnowledgeGraphPanel({
             <g
               transform={`translate(${viewport.x} ${viewport.y}) scale(${viewport.scale})`}
             >
-              {view.edges.map((edge) => {
+              {aggregateMode && overview.edges.map((edge) => {
+                const source = overviewById.get(edge.source);
+                const target = overviewById.get(edge.target);
+                if (!source || !target) return null;
+                const recalled = edge.memberEdgeIds.some((id) =>
+                  recalledEdges.has(id),
+                );
+                return (
+                  <line
+                    key={edge.id}
+                    x1={source.x}
+                    y1={source.y}
+                    x2={target.x}
+                    y2={target.y}
+                    stroke={
+                      recalled
+                        ? "#67e8f9"
+                        : edge.crossKnowledgeBase
+                          ? "#c084fc"
+                          : "#456174"
+                    }
+                    strokeWidth={Math.min(7, 1.4 + Math.sqrt(edge.count))}
+                    strokeDasharray={recalled ? "8 6" : undefined}
+                    opacity={recalled ? 1 : 0.48}
+                    filter={recalled ? "url(#path-glow)" : undefined}
+                    className={recalled ? "graph-flow" : undefined}
+                  />
+                );
+              })}
+
+              {!aggregateMode && detailRender.edges.map((edge) => {
                 const source = byId.get(edge.source);
                 const target = byId.get(edge.target);
                 if (!source || !target) return null;
@@ -495,7 +594,11 @@ export default function KnowledgeGraphPanel({
                     />
                     {edge.label &&
                       !muted &&
-                      (cross || positioned.length <= 28) && (
+                      (recalled ||
+                        detailRender.nodes.length <= 45 ||
+                        (cross &&
+                          detailRender.nodes.length <= 100 &&
+                          viewport.scale >= 1.45)) && (
                         <text
                           x={(source.x + target.x) / 2}
                           y={(source.y + target.y) / 2 - 6}
@@ -513,7 +616,88 @@ export default function KnowledgeGraphPanel({
                 );
               })}
 
-              {positioned.map((node) => {
+              {aggregateMode && overview.nodes.map((node) => {
+                const recalled = node.memberIds.some((id) =>
+                  recalledNodes.has(id),
+                );
+                const radius = Math.min(56, 22 + Math.sqrt(node.count) * 2.1);
+                const color = node.color || "#22d3ee";
+                return (
+                  <g
+                    key={node.id}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`放大查看 ${node.knowledgeBaseName || "知识库"}的${node.name}实体，共 ${node.count} 个`}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={() => {
+                      const nextScale = 1.18;
+                      setViewport({
+                        x: WIDTH / 2 - node.x * nextScale,
+                        y: HEIGHT / 2 - node.y * nextScale,
+                        scale: nextScale,
+                      });
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      const nextScale = 1.18;
+                      setViewport({
+                        x: WIDTH / 2 - node.x * nextScale,
+                        y: HEIGHT / 2 - node.y * nextScale,
+                        scale: nextScale,
+                      });
+                    }}
+                    className="cursor-zoom-in outline-none"
+                  >
+                    <circle
+                      cx={node.x}
+                      cy={node.y}
+                      r={radius + 8}
+                      fill={color}
+                      opacity=".1"
+                      className={recalled ? "node-breathe" : undefined}
+                    />
+                    <circle
+                      cx={node.x}
+                      cy={node.y}
+                      r={radius}
+                      fill="#0a1d29"
+                      stroke={color}
+                      strokeWidth={recalled ? 3 : 2}
+                      filter={recalled ? "url(#node-glow)" : undefined}
+                    />
+                    <text
+                      x={node.x}
+                      y={node.y - 2}
+                      textAnchor="middle"
+                      className="fill-white text-[16px] font-semibold tabular-nums"
+                    >
+                      {node.count}
+                    </text>
+                    <text
+                      x={node.x}
+                      y={node.y + 14}
+                      textAnchor="middle"
+                      className="fill-slate-400 text-[8px] uppercase tracking-[0.12em]"
+                    >
+                      {node.name.slice(0, 15)}
+                    </text>
+                    <text
+                      x={node.x}
+                      y={node.y + radius + 15}
+                      textAnchor="middle"
+                      paintOrder="stroke"
+                      stroke="#07131c"
+                      strokeWidth="4"
+                      className="fill-slate-300 text-[9px]"
+                    >
+                      {(node.knowledgeBaseName || node.knowledgeBaseId || "").slice(0, 18)}
+                    </text>
+                  </g>
+                );
+              })}
+
+              {!aggregateMode && detailRender.nodes.map((node) => {
                 const selectedNode = node.id === selectedId;
                 const muted = Boolean(selectedId) && !connectedIds.has(node.id);
                 const recalled = recalledNodes.has(node.id);
@@ -521,8 +705,9 @@ export default function KnowledgeGraphPanel({
                 const showLabel =
                   selectedNode ||
                   recalled ||
-                  positioned.length <= 45 ||
-                  node.degree >= 3;
+                  detailRender.nodes.length <= 80 ||
+                  (viewport.scale >= 1.45 && node.degree >= 3) ||
+                  viewport.scale >= 1.85;
                 return (
                   <g
                     key={node.id}
@@ -620,6 +805,12 @@ export default function KnowledgeGraphPanel({
           </div>
         )}
 
+        {aggregateMode && (
+          <div className="pointer-events-none absolute right-3 top-3 z-10 rounded-full border border-cyan-800/70 bg-cyan-950/80 px-2.5 py-1 text-[9px] font-medium tracking-wide text-cyan-200 backdrop-blur">
+            聚合星团 · 放大查看实体
+          </div>
+        )}
+
         <div className="absolute bottom-3 right-3 z-10 flex items-center overflow-hidden rounded-xl border border-slate-700 bg-slate-950/85 shadow-lg backdrop-blur">
           <button
             type="button"
@@ -631,7 +822,11 @@ export default function KnowledgeGraphPanel({
           </button>
           <button
             type="button"
-            onClick={() => setViewport(INITIAL_VIEWPORT)}
+            onClick={() =>
+              setViewport(
+                initialViewport(view?.nodes.length || 0, kbId === "*"),
+              )
+            }
             title="重置画布"
             className="flex items-center gap-1 border-x border-slate-700 px-2 py-2 text-[10px] tabular-nums text-slate-400 hover:bg-slate-800 hover:text-white"
           >
@@ -650,7 +845,9 @@ export default function KnowledgeGraphPanel({
 
         {view?.truncated && (
           <span className="absolute bottom-3 left-3 max-w-[calc(100%-150px)] truncate rounded-full border border-amber-700/60 bg-amber-950/80 px-2 py-1 text-[10px] text-amber-300">
-            实体超过上限，已展示关联度最高的 {MAX_GRAPH_NODES} 个
+            {view.limitMode === "perType"
+              ? `部分类型超过上限：${Object.keys(view.truncatedByType || {}).join("、") || "上游图源"}；每类展示关联度最高的 ${MAX_GRAPH_NODES} 个`
+              : `实体超过上限，已展示关联度最高的 ${MAX_GRAPH_NODES} 个`}
           </span>
         )}
       </div>
@@ -681,6 +878,45 @@ export default function KnowledgeGraphPanel({
               <p className="mt-1 line-clamp-3 text-[11px] leading-4 text-slate-400">
                 {selected.description || "该实体暂无补充说明。"}
               </p>
+              {selectedEdges.some((edge) => edge.evidence) && (
+                <div className="mt-2 space-y-1.5">
+                  {selectedEdges
+                    .filter((edge) => edge.evidence)
+                    .map((edge) => {
+                      const neighbor = byId.get(
+                        edge.source === selected.id
+                          ? edge.target
+                          : edge.source,
+                      );
+                      return (
+                        <div
+                          key={edge.id}
+                          className="rounded border border-cyan-950 bg-slate-950/60 px-2 py-1.5"
+                        >
+                          <div className="flex items-center gap-1.5 text-[9px] text-cyan-300">
+                            <span>{edge.label || edge.type || "相关"}</span>
+                            {neighbor && (
+                              <span className="truncate text-slate-400">
+                                · {neighbor.name}
+                              </span>
+                            )}
+                            {edge.confidence != null && (
+                              <span className="ml-auto tabular-nums text-emerald-400">
+                                {Math.round(edge.confidence * 100)}%
+                              </span>
+                            )}
+                          </div>
+                          <p
+                            className="mt-1 line-clamp-2 text-[10px] leading-4 text-slate-500"
+                            title={edge.evidence}
+                          >
+                            证据：{edge.evidence}
+                          </p>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
             </div>
           </div>
         </div>

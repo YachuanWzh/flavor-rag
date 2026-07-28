@@ -109,6 +109,18 @@ class Settings(BaseSettings):
     lightrag_api_key: str = ""
     graph_enabled: bool = False
     graph_required: bool = False
+    # Evidence-grounded semantic graph extraction. The provider settings fall
+    # back to the regular LLM configuration when left blank.
+    graph_semantic_enabled: bool = True
+    graph_semantic_model: str = "qwen-plus-latest"
+    graph_semantic_base_url: str = ""
+    graph_semantic_api_key: str = ""
+    graph_semantic_max_tokens: int = 2048
+    graph_semantic_max_input_chars: int = 4000
+    graph_semantic_batch_chunks: int = 6
+    graph_semantic_timeout_sec: float = 45.0
+    graph_semantic_min_confidence: float = 0.70
+    graph_semantic_prompt_version: str = "v1"
 
     # Neo4j（可选）
     neo4j_uri: str = "neo4j://127.0.0.1:7687"

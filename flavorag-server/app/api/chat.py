@@ -203,46 +203,92 @@ def _validate_citations(answer: str, sources: list[dict]) -> tuple[str, dict]:
     auto_appended = False
     cited: list[int] = []
     output: list[str] = []
-    for segment in re.split(
-        r"(?<=[。！？.!?])(?!\[\d+\])|(?=\n)", answer
-    ):
-        claim_terms = terms(re.sub(r"\[\d+\]", "", segment))
-        if not claim_terms:
-            output.append(segment)
+    lines = answer.splitlines(keepends=True)
+    table_lines: set[int] = set()
+
+    def is_table_delimiter(line: str) -> bool:
+        cells = line.strip().strip("|").split("|")
+        return len(cells) >= 2 and all(
+            re.fullmatch(r"\s*:?-{3,}:?\s*", cell) for cell in cells
+        )
+
+    # Protect complete GFM table blocks from citation rewriting. Appending a
+    # marker after a closing pipe changes the column shape, so the finished
+    # answer is no longer parsed as a table.
+    for index, line in enumerate(lines):
+        if index == 0 or not is_table_delimiter(line):
             continue
-        factual += 1
-        supported_refs: list[int] = []
-        for raw in re.findall(r"\[(\d+)\](?!\()", segment):
-            ref = int(raw)
-            if not 1 <= ref <= len(sources):
-                invalid += 1
+        if "|" not in lines[index - 1]:
+            continue
+        table_lines.update((index - 1, index))
+        cursor = index + 1
+        while cursor < len(lines):
+            candidate = lines[cursor].strip()
+            if not candidate or "|" not in candidate:
+                break
+            table_lines.add(cursor)
+            cursor += 1
+
+    in_fence = False
+    for line_index, line in enumerate(lines):
+        stripped = line.lstrip()
+        is_fence = stripped.startswith("```") or stripped.startswith("~~~")
+        protected = in_fence or is_fence or line_index in table_lines
+        if protected:
+            output.append(line)
+            for raw in re.findall(r"\[(\d+)\](?!\()", line):
+                ref = int(raw)
+                if 1 <= ref <= len(sources):
+                    cited.append(ref)
+                else:
+                    invalid += 1
+            if is_fence:
+                in_fence = not in_fence
+            continue
+
+        body = line.rstrip("\r\n")
+        line_ending = line[len(body):]
+        for segment in re.split(
+            r"(?<=[。！？.!?])(?!\[\d+\])", body
+        ):
+            claim_terms = terms(re.sub(r"\[\d+\]", "", segment))
+            if not claim_terms:
+                output.append(segment)
                 continue
-            overlap = support_score(
-                claim_terms, evidence_terms[ref - 1]
-            )
-            if overlap >= 0.15:
-                supported_refs.append(ref)
-            else:
-                invalid += 1
-        cleaned = re.sub(r"\[(\d+)\](?!\()", "", segment).rstrip()
-        if not supported_refs:
-            overlaps = [
-                support_score(claim_terms, source_terms)
-                for source_terms in evidence_terms
-            ]
-            best = max(range(len(overlaps)), key=overlaps.__getitem__)
-            if overlaps[best] >= 0.15:
-                supported_refs = [best + 1]
-                auto_appended = True
-            else:
-                unsupported += 1
-        if supported_refs:
-            covered += 1
-            cited.extend(supported_refs)
-            cleaned += "".join(
-                f"[{ref}]" for ref in sorted(set(supported_refs))
-            )
-        output.append(cleaned)
+            factual += 1
+            supported_refs: list[int] = []
+            for raw in re.findall(r"\[(\d+)\](?!\()", segment):
+                ref = int(raw)
+                if not 1 <= ref <= len(sources):
+                    invalid += 1
+                    continue
+                overlap = support_score(
+                    claim_terms, evidence_terms[ref - 1]
+                )
+                if overlap >= 0.15:
+                    supported_refs.append(ref)
+                else:
+                    invalid += 1
+            cleaned = re.sub(r"\[(\d+)\](?!\()", "", segment).rstrip()
+            if not supported_refs:
+                overlaps = [
+                    support_score(claim_terms, source_terms)
+                    for source_terms in evidence_terms
+                ]
+                best = max(range(len(overlaps)), key=overlaps.__getitem__)
+                if overlaps[best] >= 0.15:
+                    supported_refs = [best + 1]
+                    auto_appended = True
+                else:
+                    unsupported += 1
+            if supported_refs:
+                covered += 1
+                cited.extend(supported_refs)
+                cleaned += "".join(
+                    f"[{ref}]" for ref in sorted(set(supported_refs))
+                )
+            output.append(cleaned)
+        output.append(line_ending)
     return "".join(output), {
         "cited": sorted(set(cited)),
         "total": len(sources),

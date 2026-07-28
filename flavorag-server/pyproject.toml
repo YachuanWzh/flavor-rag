@@ -8,7 +8,7 @@ include = ["app", "app.*"]
 
 [project]
 name = "flavorag-server"
-version = "0.0.6"
+version = "0.0.7"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115,<1",
@@ -22,7 +22,7 @@ dependencies = [
     "pymilvus>=2.4,<3",
     "elasticsearch[async]>=8.0,<9",
     "boto3>=1.34,<2",
-    "httpx>=0.27,<1",
+    "httpx[http2]>=0.27,<1",
     "python-jose[cryptography]>=3.3",
     "passlib[bcrypt]>=1.7",
     "apscheduler>=3.10",

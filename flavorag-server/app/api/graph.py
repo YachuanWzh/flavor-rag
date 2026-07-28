@@ -21,6 +21,62 @@ router = APIRouter(prefix="/api/rag/v3", tags=["graph-rag"])
 _log = get_logger("flavorag.api.graph")
 
 
+def _entity_type_key(node: dict) -> str:
+    value = str(node.get("type") or "").strip().casefold()
+    return value or "unclassified"
+
+
+def _limit_graph_nodes(
+    nodes: list[dict],
+    *,
+    limit: int,
+    per_type: bool,
+) -> dict:
+    """Apply the public total/per-type graph quota and describe the result."""
+    capped_limit = max(1, min(limit, 200))
+    if not per_type:
+        visible = nodes[:capped_limit]
+        return {
+            "nodes": visible,
+            "truncated": len(nodes) > capped_limit,
+            "truncatedByType": {},
+            "typeStats": [],
+            "limitMode": "total",
+            "limitPerType": None,
+        }
+
+    buckets: dict[str, list[dict]] = {}
+    totals: dict[str, int] = {}
+    for node in nodes:
+        type_key = _entity_type_key(node)
+        totals[type_key] = totals.get(type_key, 0) + 1
+        bucket = buckets.setdefault(type_key, [])
+        if len(bucket) < capped_limit:
+            bucket.append(node)
+
+    visible = [node for bucket in buckets.values() for node in bucket]
+    truncated_by_type = {
+        type_key: True
+        for type_key, total in totals.items()
+        if total > capped_limit
+    }
+    return {
+        "nodes": visible,
+        "truncated": bool(truncated_by_type),
+        "truncatedByType": truncated_by_type,
+        "typeStats": [
+            {
+                "type": type_key,
+                "count": len(buckets[type_key]),
+                "truncated": type_key in truncated_by_type,
+            }
+            for type_key in buckets
+        ],
+        "limitMode": "perType",
+        "limitPerType": capped_limit,
+    }
+
+
 @router.get("/capabilities")
 async def rag_capabilities(
     user: User = Depends(get_current_user),
@@ -83,6 +139,7 @@ async def graph_view(
             kb_ids=kb_ids,
             entity=entity,
             limit=limit,
+            per_type=kb_id == "*",
         )
     except Exception as exc:
         _log.warning(
@@ -98,7 +155,7 @@ async def graph_view(
                 graph = await LightRAGClient().fetch_graph(
                     entity=entity,
                     depth=depth,
-                    limit=limit,
+                    limit=500 if kb_id == "*" else limit,
                     scope_tokens=(
                         kb.id,
                         getattr(kb, "active_collection_name", None)
@@ -141,7 +198,12 @@ async def graph_view(
         if str(edge["source"]) in nodes_by_id
         and str(edge["target"]) in nodes_by_id
     }
-    visible_nodes = list(nodes_by_id.values())[:limit]
+    limit_result = _limit_graph_nodes(
+        list(nodes_by_id.values()),
+        limit=limit,
+        per_type=kb_id == "*",
+    )
+    visible_nodes = limit_result["nodes"]
     visible_node_ids = {str(node["id"]) for node in visible_nodes}
     visible_edges = [
         edge
@@ -149,13 +211,34 @@ async def graph_view(
         if str(edge["source"]) in visible_node_ids
         and str(edge["target"]) in visible_node_ids
     ]
+    upstream_truncated_by_type = native_graph.get("truncatedByType") or {}
+    truncated_by_type = {
+        **limit_result["truncatedByType"],
+        **upstream_truncated_by_type,
+    }
+    type_stats = [
+        {
+            **stat,
+            "truncated": (
+                stat["truncated"] or stat["type"] in truncated_by_type
+            ),
+        }
+        for stat in limit_result["typeStats"]
+    ]
+    source_truncated = bool(enriched_graph.get("truncated"))
     graph = {
         "nodes": visible_nodes,
         "edges": visible_edges,
         "truncated": bool(
-            native_graph.get("truncated") or enriched_graph.get("truncated")
-            or len(nodes_by_id) > limit
+            limit_result["truncated"]
+            or native_graph.get("truncated")
+            or source_truncated
         ),
+        "truncatedByType": truncated_by_type,
+        "typeStats": type_stats,
+        "limitMode": limit_result["limitMode"],
+        "limitPerType": limit_result["limitPerType"],
+        "sourceTruncated": source_truncated,
     }
     return {
         "code": "0",

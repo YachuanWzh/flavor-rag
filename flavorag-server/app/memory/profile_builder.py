@@ -12,9 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from collections import Counter
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select, func, desc
@@ -23,7 +22,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.logging_config import get_logger
 from app.config.settings import settings
 from app.models import (
-    User,
     Conversation,
     Message,
     MessageFeedback,

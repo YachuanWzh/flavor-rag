@@ -170,6 +170,7 @@ class TestRAGPipeline:
                         [],
                         {"section": "overview"},
                         "guide.md",
+                        "md",
                     )
                 ]
 

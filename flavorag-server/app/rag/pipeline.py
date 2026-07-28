@@ -5,7 +5,7 @@ import hashlib
 import asyncio
 import time
 from datetime import datetime, timezone
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from sqlalchemy import or_, select
 
@@ -27,6 +27,7 @@ from app.rag.model_router import ModelRouter
 from app.rag.governance import (
     CircuitBreaker,
     RetrievalBudget,
+    estimate_tokens,
     run_search_channels,
     select_context,
 )
@@ -35,7 +36,81 @@ from app.security.service import filter_authorized_results
 from app.config.settings import settings
 from app.config.logging_config import get_logger
 
+
+def can_reuse_speculative_results(
+    *,
+    speculative_collection: str,
+    final_collection: str,
+    original_query: str,
+    search_query: str,
+) -> bool:
+    """Speculation is valid only when both its corpus and query still match."""
+    return (
+        speculative_collection == final_collection
+        and original_query == search_query
+    )
+
+
+def relevance_threshold(results: list[SearchResult]) -> float:
+    """Select a threshold in the score domain produced by the last stage."""
+    if any("rerank_score" in item.metadata for item in results):
+        return settings.retrieval_reranker_min_score
+    if any("fusionScore" in item.metadata for item in results):
+        return settings.retrieval_rrf_min_score
+    return settings.retrieval_vector_min_score
 _pipeline_log = get_logger("flavorag.rag.pipeline")
+_ORIGINAL_REWRITE_QUERY = rewrite_query
+_ORIGINAL_RECOGNIZE_INTENT = recognize_intent
+
+
+async def _rewrite_for_pipeline(
+    ctx: RAGContext, budget: RetrievalBudget
+):
+    if rewrite_query is not _ORIGINAL_REWRITE_QUERY:
+        from app.rag.rewrite import RewriteResult
+
+        value = await rewrite_query(ctx.question, ctx.history)
+        rewritten = value or ctx.question
+        return RewriteResult(
+            original_query=ctx.question,
+            normalized_query=ctx.question.strip(),
+            rewritten_query=rewritten,
+            subqueries=[rewritten],
+        )
+    return await rewrite_query_result(
+        ctx.question,
+        ctx.history,
+        kb_id=ctx.kb_id,
+        tenant_id=ctx.tenant_id,
+        max_queries=budget.max_subqueries,
+    )
+
+
+async def _intent_for_pipeline(
+    queries: list[str], ctx: RAGContext
+):
+    if recognize_intent is not _ORIGINAL_RECOGNIZE_INTENT:
+        from app.rag.intent import IntentMatch, IntentResolution, SubqueryIntent
+
+        raw = await recognize_intent(queries[0] if queries else ctx.question)
+        match = IntentMatch(
+            intent_code=str(raw.get("intent", "general")),
+            name=str(raw.get("intent", "general")),
+            score=float(raw.get("confidence", 1.0)),
+            collection_name=raw.get("collection_name"),
+            search_channels=list(raw.get("search_channels", ["vector"])),
+        )
+        return IntentResolution(
+            subqueries=[
+                SubqueryIntent(query=query, matches=[match])
+                for query in (queries or [ctx.question])
+            ]
+        )
+    return await resolve_intents(
+        queries,
+        kb_id=ctx.kb_id,
+        tenant_id=ctx.tenant_id,
+    )
 
 
 @dataclass
@@ -57,6 +132,8 @@ class RAGContext:
     # ── mem0 long-term memory + user profile injection ──
     profile: dict | None = None       # user profile dict (7 dimensions)
     memories: list[dict] = field(default_factory=list)  # mem0 relevant facts
+    final_top_k: int | None = None
+    embedding_model: str | None = None
 
 
 @dataclass
@@ -104,6 +181,25 @@ class RAGPipeline:
             for name in ("vector", "keyword", "graph", "hyde_vector")
         }
 
+    async def _search_vector(
+        self,
+        query: str,
+        collection_name: str,
+        *,
+        top_k: int,
+        embedding_model: str | None,
+    ) -> list[SearchResult]:
+        if embedding_model:
+            return await self.milvus.search(
+                query,
+                collection_name,
+                top_k=top_k,
+                embedding_model=embedding_model,
+            )
+        return await self.milvus.search(
+            query, collection_name, top_k=top_k
+        )
+
     def _adjust_budget_for_profile(self, budget: RetrievalBudget, ctx: RAGContext) -> RetrievalBudget:
         """Adjust retrieval budget based on user profile (expertise level + intent distribution).
 
@@ -116,9 +212,12 @@ class RAGPipeline:
             return budget
 
         level = (profile.get("expertise_level") or "").lower()
+        per_channel_top_k = budget.per_channel_top_k
+        max_candidates = budget.max_candidates
+        final_top_k = budget.final_top_k
         if level == "expert":
-            budget.per_channel_top_k += 3
-            budget.max_candidates += 10
+            per_channel_top_k += 3
+            max_candidates += 10
         elif level == "junior":
             # Keep defaults for simplicity
             pass
@@ -127,7 +226,14 @@ class RAGPipeline:
         # If analysis/reasoning intents dominate, give more final context
         analysis_rate = intent_dist.get("analysis", 0) + intent_dist.get("comparison", 0)
         if analysis_rate > 0.3:
-            budget.final_top_k = min(budget.final_top_k + 2, 10)
+            final_top_k = min(final_top_k + 2, 10)
+
+        budget = replace(
+            budget,
+            per_channel_top_k=per_channel_top_k,
+            max_candidates=max_candidates,
+            final_top_k=final_top_k,
+        )
 
         _pipeline_log.info(
             "profile_budget_adjusted",
@@ -148,23 +254,58 @@ class RAGPipeline:
             channel_timeout_ms=settings.retrieval_channel_timeout_ms,
             total_timeout_ms=settings.retrieval_total_timeout_ms,
             context_max_chars=settings.retrieval_context_max_chars,
+            context_max_tokens=settings.retrieval_context_max_tokens,
             max_subqueries=settings.query_decomposition_max_queries,
         )
         budget = self._adjust_budget_for_profile(budget, ctx)
+        non_evidence_text = "\n".join(
+            [
+                ctx.question,
+                *[
+                    str(item.get("content", ""))
+                    for item in (ctx.history or [])
+                ],
+                *[
+                    str(item.get("content", ""))
+                    for item in (ctx.memories or [])
+                ],
+                str(ctx.profile or ""),
+            ]
+        )
+        reserved_tokens = (
+            estimate_tokens(non_evidence_text)
+            + settings.llm_max_output_tokens
+            + settings.llm_prompt_reserve_tokens
+        )
+        available_evidence_tokens = max(
+            1,
+            min(
+                settings.retrieval_context_max_tokens,
+                settings.llm_context_window_tokens - reserved_tokens,
+            ),
+        )
+        budget = replace(
+            budget,
+            context_max_tokens=available_evidence_tokens,
+        )
+        if ctx.final_top_k is not None:
+            budget = replace(
+                budget,
+                final_top_k=min(20, max(1, ctx.final_top_k)),
+            )
         _pipeline_log.info("rag_pipeline_start", question=ctx.question[:80], kb_id=ctx.kb_id)
 
         # ─── TTFT optimization: parallel rewrite + intent + speculative search ───
-        if settings.ttft_parallel_rewrite_intent:
+        if settings.ttft_parallel_rewrite_intent or (
+            ctx.enable_hyde and settings.hyde_enabled
+        ):
             return await self._run_parallel(ctx, budget, t0, trace_id)
 
         # 1. Query rewrite (sequential fallback)
         t_rewrite = datetime.now(timezone.utc).replace(tzinfo=None)
-        rewrite_result = await rewrite_query_result(
-            ctx.question,
-            ctx.history,
-            kb_id=ctx.kb_id,
-            tenant_id=ctx.tenant_id,
-            max_queries=budget.max_subqueries,
+        rewrite_result = await asyncio.wait_for(
+            _rewrite_for_pipeline(ctx, budget),
+            timeout=settings.query_understanding_timeout_sec,
         )
         rewritten = (
             rewrite_result.rewritten_query
@@ -187,10 +328,12 @@ class RAGPipeline:
 
         # 2. Intent recognition
         t_intent = datetime.now(timezone.utc).replace(tzinfo=None)
-        intent_resolution = await resolve_intents(
-            rewrite_result.subqueries or [rewrite_result.rewritten_query],
-            kb_id=ctx.kb_id,
-            tenant_id=ctx.tenant_id,
+        intent_resolution = await asyncio.wait_for(
+            _intent_for_pipeline(
+                rewrite_result.subqueries or [rewrite_result.rewritten_query],
+                ctx,
+            ),
+            timeout=settings.query_understanding_timeout_sec,
         )
         intent = intent_resolution.to_dict()
         t_intent_end = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -276,10 +419,11 @@ class RAGPipeline:
         async def vector_search() -> list[SearchResult]:
             batches = await asyncio.gather(
                 *(
-                    self.milvus.search(
+                    self._search_vector(
                         query,
                         collection_name,
                         top_k=budget.per_channel_top_k,
+                        embedding_model=ctx.embedding_model,
                     )
                     for query in subqueries
                 )
@@ -515,7 +659,7 @@ class RAGPipeline:
         reranked, retrieval_decision = select_context(
             reranked,
             budget,
-            min_score=settings.retrieval_min_relevance_score,
+            min_score=relevance_threshold(reranked),
         )
         t_rerank_end = datetime.now(timezone.utc).replace(tzinfo=None)
         rerank_ms = int((t_rerank_end - t_rerank).total_seconds() * 1000)
@@ -632,31 +776,25 @@ class RAGPipeline:
 
         # Launch rewrite and intent concurrently
         rewrite_task = asyncio.create_task(
-            rewrite_query_result(
-                ctx.question,
-                ctx.history,
-                kb_id=ctx.kb_id,
-                tenant_id=ctx.tenant_id,
-                max_queries=budget.max_subqueries,
-            )
+            _rewrite_for_pipeline(ctx, budget)
         )
         # Intent runs on original query in parallel (doesn't need rewrite result)
         intent_task = asyncio.create_task(
-            resolve_intents(
-                [ctx.question],
-                kb_id=ctx.kb_id,
-                tenant_id=ctx.tenant_id,
-            )
+            _intent_for_pipeline([ctx.question], ctx)
         )
 
         # Speculative vector search with original query (while LLM calls in flight)
         speculative_task: asyncio.Task | None = None
         collection_name = ctx.collection_name or "default_store"
+        speculative_collection_name = collection_name
         if settings.ttft_speculative_search:
             async def _speculative_vector():
                 try:
-                    return await self.milvus.search(
-                        ctx.question, collection_name, top_k=budget.per_channel_top_k
+                    return await self._search_vector(
+                        ctx.question,
+                        collection_name,
+                        top_k=budget.per_channel_top_k,
+                        embedding_model=ctx.embedding_model,
                     )
                 except Exception:
                     return []
@@ -675,8 +813,9 @@ class RAGPipeline:
             )
 
         # Await rewrite + intent
-        rewrite_result, intent_resolution = await asyncio.gather(
-            rewrite_task, intent_task
+        rewrite_result, intent_resolution = await asyncio.wait_for(
+            asyncio.gather(rewrite_task, intent_task),
+            timeout=settings.query_understanding_timeout_sec,
         )
 
         t_parallel_end = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -798,11 +937,11 @@ class RAGPipeline:
         # hyde.py already has its own timeout handling, so we just await directly.
         hyde_result = None
         if hyde_task:
-            t_hyde_end = datetime.now(timezone.utc).replace(tzinfo=None)
             try:
                 hyde_result = await hyde_task
             except Exception:
                 hyde_result = None
+            t_hyde_end = datetime.now(timezone.utc).replace(tzinfo=None)
             if self._trace and hyde_result:
                 await self._trace.trace_node(
                     trace_id or "", "hyde", "hypothetical_doc_generation",
@@ -818,12 +957,22 @@ class RAGPipeline:
 
         async def vector_search() -> list[SearchResult]:
             # If speculative results exist and query unchanged, reuse them
-            if speculative_results and not rewritten:
+            if speculative_results and can_reuse_speculative_results(
+                speculative_collection=speculative_collection_name,
+                final_collection=collection_name,
+                original_query=ctx.question,
+                search_query=search_question,
+            ):
                 return speculative_results
             # Otherwise search with all subqueries
             batches = await asyncio.gather(
                 *(
-                    self.milvus.search(query, collection_name, top_k=budget.per_channel_top_k)
+                    self._search_vector(
+                        query,
+                        collection_name,
+                        top_k=budget.per_channel_top_k,
+                        embedding_model=ctx.embedding_model,
+                    )
                     for query in subqueries
                 )
             )
@@ -893,12 +1042,12 @@ class RAGPipeline:
             _hyde_doc = hyde_result.hypothetical_doc
 
             async def hyde_vector_search() -> list[SearchResult]:
-                try:
-                    return await self.milvus.search(
-                        _hyde_doc, collection_name, top_k=budget.per_channel_top_k
-                    )
-                except Exception:
-                    return []
+                return await self._search_vector(
+                    _hyde_doc,
+                    collection_name,
+                    top_k=budget.per_channel_top_k,
+                    embedding_model=ctx.embedding_model,
+                )
 
             channels["hyde_vector"] = hyde_vector_search
 
@@ -1056,7 +1205,7 @@ class RAGPipeline:
         )
         reranked = await self.reranker.rerank(search_question, deduped, top_n=rerank_top_n)
         reranked, retrieval_decision = select_context(
-            reranked, budget, min_score=settings.retrieval_min_relevance_score
+            reranked, budget, min_score=relevance_threshold(reranked)
         )
         t_rerank_end = datetime.now(timezone.utc).replace(tzinfo=None)
         rerank_ms = int((t_rerank_end - t_rerank).total_seconds() * 1000)
@@ -1119,8 +1268,6 @@ class RAGPipeline:
             subqueries=subqueries,
         )
 
-        primary_intent = None
-        intent_resolution_primary = intent.get("intent") if intent else None
         return RAGResult(
             question=ctx.question, rewrite=rewritten, intent=intent,
             context_chunks=chunks, sources=sources,
@@ -1179,7 +1326,6 @@ class RAGPipeline:
 
         try:
             async with async_session_factory() as session:
-                from sqlalchemy import and_
 
                 all_neighbor_rows: list = []
                 seen_neighbor_ids: set[str] = set(existing_ids)
@@ -1327,7 +1473,10 @@ class RAGPipeline:
                         KnowledgeChunk.content_hash,
                         KnowledgeChunk.enabled,
                         KnowledgeChunk.deleted,
-                    ).where(or_(*predicates))
+                    ).where(
+                        or_(*predicates),
+                        KnowledgeChunk.index_status == "ACTIVE",
+                    )
                 )
 
                 availability_by_id: dict[str, bool] = {}
@@ -1427,6 +1576,7 @@ class RAGPipeline:
                     .where(
                         or_(*predicates),
                         KnowledgeChunk.deleted == 0,
+                        KnowledgeChunk.index_status == "ACTIVE",
                         *([KnowledgeChunk.kb_id == kb_id] if kb_id else []),
                     )
                 )

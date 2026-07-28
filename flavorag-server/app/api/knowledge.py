@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import mimetypes
 import os
-import shutil
 import traceback
+import asyncio
+from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -31,6 +33,7 @@ from app.ingestion.chunker import ChunkConfig, ChunkStrategy
 from app.ingestion.pipeline_engine import IngestionEngine
 from app.ingestion.url_fetcher import SafeURLFetcher, URLSecurityError
 from app.ingestion.dedup import DuplicateDetector, compute_content_hash
+from app.ingestion.upload_validation import UploadValidationError
 from app.rag.search.vector import MilvusSearchChannel
 from app.services.ingestion_executor import execute_ingestion
 from app.services.ingestion_jobs import enqueue_ingestion_job
@@ -45,7 +48,10 @@ from app.security.service import (
     require_kb,
 )
 
-_SUPPORTED_FILE_TYPES = {"txt", "md", "pdf", "docx", "xlsx", "csv", "pptx", "html", "htm"}
+_SUPPORTED_FILE_TYPES = {
+    "txt", "md", "pdf", "docx", "xlsx", "csv", "pptx", "html", "htm",
+    "png", "jpg", "jpeg", "webp",
+}
 
 router = APIRouter(prefix="/api/knowledge-base", tags=["knowledge-base"])
 _log = get_logger("flavorag.api.knowledge")
@@ -111,6 +117,8 @@ async def create_knowledge_base(
         name=name,
         embedding_model=embedding_model,
         collection_name=collection_name,
+        active_collection_name=collection_name,
+        active_index_generation="v1",
         pipeline_id=pipeline_id or None,
         tenant_id=user.tenant_id or "default",
         department_id=user.department_id,
@@ -119,10 +127,34 @@ async def create_knowledge_base(
     db.add(kb)
     await db.flush()
 
-    # Create Milvus collection
+    # Resolve the actual model dimension before creating the first immutable
+    # index generation; configuration guesses must not define the schema.
     try:
+        from app.llm.embedding import get_embedding_client
+        from app.models import KnowledgeIndexGeneration
+
+        probe = await get_embedding_client(
+            model=embedding_model
+        ).embed_query("dimension probe")
+        embedding_dim = len(probe)
         milvus = MilvusSearchChannel()
-        milvus.create_collection(collection_name)
+        milvus.create_collection(collection_name, dim=embedding_dim)
+        db.add(
+            KnowledgeIndexGeneration(
+                kb_id=kb.id,
+                generation="v1",
+                collection_name=collection_name,
+                embedding_model=embedding_model,
+                embedding_dim=embedding_dim,
+                parser_version="v0.0.5",
+                chunker_version="v0.0.5",
+                status="ACTIVE",
+                expected_chunks=0,
+                indexed_chunks=0,
+                activated_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                created_by=user.id,
+            )
+        )
     except Exception as e:
         # Rollback PG if Milvus creation fails
         raise HTTPException(status_code=500, detail=f"Failed to create Milvus collection: {e}")
@@ -210,12 +242,13 @@ async def delete_knowledge_base(
             doc_id=document.id,
             chunks=chunks,
             assets=assets,
+            source_location=document.file_url,
         )
 
     # Drop Milvus collection
     try:
         milvus = MilvusSearchChannel()
-        milvus.drop_collection(kb.collection_name)
+        milvus.drop_collection(kb.active_collection_name or kb.collection_name)
     except Exception as exc:
         _log.warning(
             "kb_collection_drop_failed",
@@ -315,8 +348,19 @@ async def upload_document(
     file_path = os.path.join(_UPLOAD_DIR, f"{doc_id}.{ext}")
     doc = None
     try:
-        with open(file_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+        from app.ingestion.upload_validation import save_upload_bounded
+
+        await asyncio.to_thread(
+            save_upload_bounded,
+            file,
+            file_path,
+            max_bytes=settings.upload_max_bytes,
+            max_pdf_pages=settings.upload_max_pdf_pages,
+            max_uncompressed_bytes=settings.archive_max_uncompressed_bytes,
+            max_archive_entries=settings.archive_max_entries,
+            max_compression_ratio=settings.archive_max_compression_ratio,
+            max_image_pixels=settings.upload_max_image_pixels,
+        )
 
         # Content hash for dedup and incremental indexing
         content_hash = compute_content_hash(file_path)
@@ -412,6 +456,8 @@ async def upload_document(
                 "status": "success",
             },
         }
+    except UploadValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         traceback.print_exc()
         if doc is not None:
@@ -469,8 +515,7 @@ async def upload_url_document(
 
         doc_id = gen_id()
         file_path = os.path.join(_UPLOAD_DIR, f"{doc_id}.{ext}")
-        with open(file_path, "wb") as f:
-            f.write(content)
+        await asyncio.to_thread(Path(file_path).write_bytes, content)
 
         try:
             # Create document record
@@ -573,17 +618,31 @@ async def _run_ingestion(
     user: User,
     db: AsyncSession,
     chunk_config: ChunkConfig,
+    pipeline_id: str | None = None,
 ) -> int:
     """Run ingestion synchronously via the shared executor."""
+    from app.ingestion.source_storage import persist_source
+
+    durable_path = await persist_source(
+        file_path,
+        kb_id=kb.id,
+        doc_id=doc.id,
+        filename=doc.doc_name,
+    )
+    doc.file_url = durable_path
+    generation = doc.pending_generation or f"g_{gen_id()}"
+    doc.pending_generation = generation
     return await execute_ingestion(
         db,
         kb=kb,
         doc=doc,
-        file_path=file_path,
+        file_path=durable_path,
         source_type=source_type,
         user_id=user.id,
         tenant_id=user.tenant_id or "default",
         chunk_config=chunk_config,
+        pipeline_id=pipeline_id,
+        generation=generation,
     )
 
 
@@ -651,35 +710,6 @@ async def reprocess_document(
         else:
             raise HTTPException(status_code=400, detail=f"源文件不存在: {doc.file_url}")
 
-    # Soft-delete old chunks
-    from app.rag.search.vector import MilvusSearchChannel
-    chunk_result = await db.execute(
-        select(KnowledgeChunk).where(KnowledgeChunk.doc_id == doc_id, KnowledgeChunk.deleted == 0)
-    )
-    old_chunks = list(chunk_result.scalars().all())
-    for c in old_chunks:
-        c.deleted = 1
-    from app.models import KnowledgeAsset
-    old_assets_result = await db.execute(
-        select(KnowledgeAsset).where(
-            KnowledgeAsset.doc_id == doc_id,
-            KnowledgeAsset.deleted == 0,
-        )
-    )
-    old_assets = list(old_assets_result.scalars().all())
-    for asset in old_assets:
-        asset.deleted = 1
-    if old_chunks or old_assets:
-        from app.services.index_sync import IndexSyncService
-
-        await IndexSyncService().delete_document(
-            db,
-            kb=kb,
-            doc_id=doc_id,
-            chunks=old_chunks,
-            assets=old_assets,
-        )
-
     # Use pipeline_id from param, then from KB, then fallback
     effective_pipeline_id = pipeline_id or kb.pipeline_id
 
@@ -743,6 +773,8 @@ async def reprocess_document(
     try:
         if pipeline_id:
             # Explicit pipeline specified: use it directly
+            generation = f"g_{gen_id()}"
+            doc.pending_generation = generation
             engine = IngestionEngine()
             result = await engine.execute_pipeline(
                 pipeline_id=pipeline_id,
@@ -753,6 +785,7 @@ async def reprocess_document(
                 doc_id=doc.id,
                 user_id=user.id,
                 tenant_id=user.tenant_id or "default",
+                generation=generation,
                 db=db,
             )
             if result.status == "error":
@@ -769,6 +802,7 @@ async def reprocess_document(
                 source_type=doc.source_type or "file",
                 user=user, db=db,
                 chunk_config=chunk_config,
+                pipeline_id=effective_pipeline_id,
             )
 
         return {
@@ -873,6 +907,7 @@ async def delete_document(
         doc_id=doc_id,
         chunks=chunks,
         assets=assets,
+        source_location=doc.file_url,
     )
 
     return {
@@ -1004,8 +1039,19 @@ async def check_duplicate(
     tmp_id = gen_id()
     tmp_path = os.path.join(_UPLOAD_DIR, f"dedup_{tmp_id}.{ext}")
     try:
-        with open(tmp_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+        from app.ingestion.upload_validation import save_upload_bounded
+
+        await asyncio.to_thread(
+            save_upload_bounded,
+            file,
+            tmp_path,
+            max_bytes=settings.upload_max_bytes,
+            max_pdf_pages=settings.upload_max_pdf_pages,
+            max_uncompressed_bytes=settings.archive_max_uncompressed_bytes,
+            max_archive_entries=settings.archive_max_entries,
+            max_compression_ratio=settings.archive_max_compression_ratio,
+            max_image_pixels=settings.upload_max_image_pixels,
+        )
 
         dedup = DuplicateDetector()
         result = await dedup.check_file(
@@ -1023,6 +1069,8 @@ async def check_duplicate(
             response["data"]["existingDocId"] = result.existing_doc_id
             response["data"]["existingDocName"] = result.existing_doc_name
         return response
+    except UploadValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         try:
             os.remove(tmp_path)
@@ -1065,6 +1113,14 @@ async def batch_upload_documents(
     from app.services.batch_import import BatchImportHandler, BatchFileSpec
 
     handler = BatchImportHandler(_UPLOAD_DIR)
+    if len(files) > settings.upload_batch_max_files:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"batch contains {len(files)} files; maximum is "
+                f"{settings.upload_batch_max_files}"
+            ),
+        )
 
     # Save files and build specs first (no DB involved yet)
     file_specs: list[BatchFileSpec] = []
@@ -1079,23 +1135,46 @@ async def batch_upload_documents(
 
         doc_id = gen_id()
         file_path = os.path.join(_UPLOAD_DIR, f"{doc_id}.{ext}")
-        with open(file_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+        from app.ingestion.upload_validation import save_upload_bounded
+
+        try:
+            written = await asyncio.to_thread(
+                save_upload_bounded,
+                file,
+                file_path,
+                max_bytes=settings.upload_max_bytes,
+                max_pdf_pages=settings.upload_max_pdf_pages,
+                max_uncompressed_bytes=settings.archive_max_uncompressed_bytes,
+                max_archive_entries=settings.archive_max_entries,
+                max_compression_ratio=settings.archive_max_compression_ratio,
+                max_image_pixels=settings.upload_max_image_pixels,
+            )
+        except UploadValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        from app.ingestion.source_storage import persist_source
+
+        durable_path = await persist_source(
+            file_path,
+            kb_id=kb_id,
+            doc_id=doc_id,
+            filename=file.filename,
+        )
 
         file_specs.append(BatchFileSpec(
             filename=file.filename,
-            file_path=file_path,
-            file_size=os.path.getsize(file_path),
+            file_path=durable_path,
+            file_size=written,
         ))
 
     if not file_specs:
         raise HTTPException(status_code=400, detail="无有效文件（不支持的格式）")
 
     # Run batch — handler manages its own sessions internally
-    result = await handler.run_batch(
-        kb_id=kb_id,
-        file_specs=file_specs,
-        user=user,
+    job_id = await handler.create_job(
+        kb_id,
+        file_specs,
+        user,
         chunk_strategy=canonical_strategy,
         chunk_size=chunk_size,
         overlap=overlap,
@@ -1105,13 +1184,13 @@ async def batch_upload_documents(
         "code": "0",
         "message": "success",
         "data": {
-            "jobId": result.job_id,
-            "status": result.status,
-            "total": result.total,
-            "success": result.success,
-            "failed": result.failed,
-            "skippedDuplicates": result.skipped_duplicates,
-            "perFile": result.per_file,
+            "jobId": job_id,
+            "status": "queued",
+            "total": len(file_specs),
+            "success": 0,
+            "failed": 0,
+            "skippedDuplicates": 0,
+            "perFile": [],
         },
     }
 
@@ -1189,7 +1268,7 @@ async def reindex_if_changed(
         raise HTTPException(status_code=404, detail="文档不存在")
 
     from app.ingestion.incremental import IncrementalIndexer
-    from app.ingestion.chunker import ChunkConfig, ChunkStrategy
+    from app.ingestion.chunker import ChunkConfig
 
     if not os.path.exists(doc.file_url):
         raise HTTPException(status_code=400, detail=f"源文件不存在: {doc.file_url}")
@@ -1221,29 +1300,7 @@ async def reindex_if_changed(
     if not kb:
         raise HTTPException(status_code=404, detail="知识库不存在")
 
-    # Soft-delete old chunks and remove from Milvus
-    from app.rag.search.vector import MilvusSearchChannel
-
-    chunk_result = await db.execute(
-        select(KnowledgeChunk).where(
-            KnowledgeChunk.doc_id == doc_id,
-            KnowledgeChunk.deleted == 0,
-        )
-    )
-    old_chunks = list(chunk_result.scalars().all())
-    old_chunk_ids = [c.id for c in old_chunks]
-
-    for c in old_chunks:
-        c.deleted = 1
-
-    if old_chunk_ids:
-        try:
-            MilvusSearchChannel().delete_by_ids(kb.collection_name, old_chunk_ids)
-        except Exception as exc:
-            _log.warning("milvus_delete_failed", doc_id=doc_id, error=str(exc))
-
     # Re-run ingestion
-    ext = os.path.splitext(doc.file_url)[1].lower().lstrip(".") or doc.file_type
     strategy = doc.chunk_strategy or "FIXED_WINDOW"
     cfg = doc.chunk_config or {}
     chunk_config = ChunkConfig(
@@ -1289,6 +1346,74 @@ _CONTENT_TYPE_MAP = {
 }
 
 
+@router.post("/{kb_id}/index-generations")
+async def rebuild_index_generation(
+    kb_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Build a new physical vector index and promote it after validation."""
+    kb = await require_kb(
+        db, principal_from_user(user), kb_id, Permission.WRITE
+    )
+    if not kb:
+        raise HTTPException(status_code=404, detail="knowledge base not found")
+    from app.services.index_lifecycle import IndexLifecycleService
+
+    service = IndexLifecycleService()
+    generation_id = await service.plan(db, kb=kb, user_id=user.id)
+    await db.commit()
+    return {
+        "code": "0",
+        "message": "queued",
+        "data": {"generationId": generation_id, "status": "BUILDING"},
+    }
+
+
+@router.get("/{kb_id}/index-generations")
+async def list_index_generations(
+    kb_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    kb = await require_kb(
+        db, principal_from_user(user), kb_id, Permission.READ
+    )
+    if not kb:
+        raise HTTPException(status_code=404, detail="knowledge base not found")
+    from app.models import KnowledgeIndexGeneration
+
+    records = list(
+        (
+            await db.execute(
+                select(KnowledgeIndexGeneration)
+                .where(
+                    KnowledgeIndexGeneration.kb_id == kb_id,
+                    KnowledgeIndexGeneration.deleted == 0,
+                )
+                .order_by(KnowledgeIndexGeneration.create_time.desc())
+            )
+        ).scalars().all()
+    )
+    return {
+        "code": "0",
+        "data": [
+            {
+                "id": item.id,
+                "generation": item.generation,
+                "collectionName": item.collection_name,
+                "embeddingModel": item.embedding_model,
+                "embeddingDim": item.embedding_dim,
+                "status": item.status,
+                "expectedChunks": item.expected_chunks,
+                "indexedChunks": item.indexed_chunks,
+                "error": item.error_message,
+            }
+            for item in records
+        ],
+    }
+
+
 @router.get("/docs/{doc_id}/preview")
 async def preview_document(
     doc_id: str,
@@ -1329,6 +1454,13 @@ async def preview_document(
     )
 
     file_path = doc.file_url
+    from app.ingestion.source_storage import is_object_source, presign_source
+
+    if is_object_source(file_path or ""):
+        return RedirectResponse(
+            await presign_source(file_path),
+            status_code=307,
+        )
     if not file_path or not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="源文件不存在或已被移除")
 

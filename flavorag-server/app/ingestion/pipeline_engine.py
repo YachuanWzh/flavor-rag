@@ -104,6 +104,7 @@ class IngestionEngine:
         idempotency_key: str | None = None,
         parent_task_id: str | None = None,
         attempt: int = 1,
+        generation: str = "v1",
         sla_ms: int = 300_000,
         db: AsyncSession | None = None,
     ) -> PipelineResult:
@@ -125,6 +126,7 @@ class IngestionEngine:
             heartbeat_at=_utcnow(),
             started_at=_utcnow(),
             created_by=user_id,
+            logs_json={"generation": generation},
         )
 
         if db is not None:
@@ -212,12 +214,28 @@ class IngestionEngine:
                 incoming[node.next_node_id] += 1
         queue = [node_id for node_id, count in incoming.items() if count == 0]
 
+        from app.models import KnowledgeBase
+
+        kb_config = (
+            await session.execute(
+                select(
+                    KnowledgeBase.embedding_model,
+                    KnowledgeBase.active_collection_name,
+                ).where(KnowledgeBase.id == (task.kb_id or ""))
+            )
+        ).first()
         context = IngestionContext(
             source_type=task.source_type,
             source_location=task.source_location,
             source_file_name=task.source_file_name or "",
             kb_id=task.kb_id or "",
             doc_id=task.doc_id or "",
+            db=session,
+            generation=(task.logs_json or {}).get("generation", "v1"),
+            settings={
+                "embedding_model": kb_config[0] if kb_config else "",
+                "collection_name": kb_config[1] if kb_config else "",
+            },
             metadata={
                 "task_id": task.id,
                 "trace_id": task.trace_id,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import time
 from typing import AsyncIterator
 
@@ -11,6 +12,7 @@ from app.observability.metrics import (
     LLM_FIRST_TOKEN,
     LLM_STREAM_DURATION,
     LLM_STREAM_FAILURES,
+    LLM_TOKENS,
 )
 from app.rag.governance import CircuitBreaker
 
@@ -66,6 +68,7 @@ class LLMClient:
         self,
         messages: list[dict],
         temperature: float = 0.7,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         """Stream chat completions, yielding tokens one at a time.
 
@@ -82,6 +85,8 @@ class LLMClient:
             "messages": messages,
             "temperature": temperature,
             "stream": True,
+            "max_tokens": max_tokens or settings.llm_max_output_tokens,
+            "stream_options": {"include_usage": True},
         }
         breaker = _model_breaker(self.base_url, self.model)
         breaker.before_call()
@@ -103,6 +108,18 @@ class LLMClient:
                             break
                         try:
                             data = json.loads(data_str)
+                            usage = data.get("usage") or {}
+                            if usage:
+                                for token_type, field in (
+                                    ("input", "prompt_tokens"),
+                                    ("output", "completion_tokens"),
+                                ):
+                                    value = int(usage.get(field) or 0)
+                                    if value:
+                                        LLM_TOKENS.labels(
+                                            model=self.model,
+                                            type=token_type,
+                                        ).inc(value)
                             delta = data["choices"][0]["delta"]
                             if "content" in delta and delta["content"]:
                                 if first_token_at is None:
@@ -136,6 +153,7 @@ class MockLLMClient:
         self,
         messages: list[dict],
         temperature: float = 0.7,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         """Return a canned response token by token."""
         question = ""
@@ -152,7 +170,7 @@ class MockLLMClient:
         )
         for char in canned:
             yield char
-            time.sleep(0.015)  # simulate streaming delay
+            await asyncio.sleep(0.015)  # simulate streaming delay
 
 
 def get_llm_client(

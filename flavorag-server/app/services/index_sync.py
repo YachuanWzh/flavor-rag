@@ -4,7 +4,6 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 from app.config.logging_config import get_logger
-from app.config.settings import settings
 from app.ingestion.pdf.asset_storage import S3PdfAssetStorage
 from sqlalchemy import or_, select
 
@@ -28,6 +27,7 @@ class IndexSyncService:
         doc_id: str,
         chunks: list[KnowledgeChunk],
         assets: list[KnowledgeAsset],
+        source_location: str | None = None,
     ) -> IndexSyncJob:
         chunk_ids = sorted({chunk.id for chunk in chunks})
         storage_keys = sorted({asset.storage_key for asset in assets if asset.storage_key})
@@ -40,6 +40,7 @@ class IndexSyncService:
             payload_json={
                 "chunk_ids": chunk_ids,
                 "storage_keys": storage_keys,
+                "source_location": source_location,
             },
             channel_status_json={},
             status="RUNNING",
@@ -69,7 +70,7 @@ class IndexSyncService:
         async def delete_milvus():
             await asyncio.to_thread(
                 MilvusSearchChannel().delete_by_ids,
-                kb.collection_name,
+                kb.active_collection_name or kb.collection_name,
                 chunk_ids,
             )
 
@@ -94,6 +95,15 @@ class IndexSyncService:
                 execute(
                     "object_storage",
                     lambda: S3PdfAssetStorage().delete_keys(storage_keys),
+                )
+            )
+        if source_location:
+            from app.ingestion.source_storage import delete_source
+
+            operations.append(
+                execute(
+                    "source_storage",
+                    lambda: delete_source(source_location),
                 )
             )
         await asyncio.gather(*operations)
@@ -128,6 +138,7 @@ class IndexSyncService:
                     )
                     .order_by(IndexSyncJob.create_time)
                     .limit(limit)
+                    .with_for_update(skip_locked=True)
                 )
             ).scalars().all()
         )
@@ -154,6 +165,7 @@ class IndexSyncService:
         payload = job.payload_json or {}
         chunk_ids = list(payload.get("chunk_ids", []))
         storage_keys = list(payload.get("storage_keys", []))
+        source_location = payload.get("source_location")
         statuses: dict[str, dict] = {}
         job.status = "RUNNING"
         job.attempts = (job.attempts or 0) + 1
@@ -171,7 +183,7 @@ class IndexSyncService:
         async def delete_milvus():
             await asyncio.to_thread(
                 MilvusSearchChannel().delete_by_ids,
-                kb.collection_name,
+                kb.active_collection_name or kb.collection_name,
                 chunk_ids,
             )
 
@@ -205,6 +217,15 @@ class IndexSyncService:
                 execute(
                     "object_storage",
                     lambda: S3PdfAssetStorage().delete_keys(storage_keys),
+                )
+            )
+        if source_location:
+            from app.ingestion.source_storage import delete_source
+
+            operations.append(
+                execute(
+                    "source_storage",
+                    lambda: delete_source(source_location),
                 )
             )
         await asyncio.gather(*operations)

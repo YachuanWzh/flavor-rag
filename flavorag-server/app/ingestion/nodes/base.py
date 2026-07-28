@@ -25,6 +25,8 @@ class IngestionContext:
     chunks: list[dict] = field(default_factory=list)
     vectors: list[list[float]] = field(default_factory=list)
     chunk_records: list = field(default_factory=list)
+    db: Any | None = None
+    generation: str = "v1"
 
     # Configuration
     settings: dict[str, Any] = field(default_factory=dict)

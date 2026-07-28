@@ -28,6 +28,7 @@ from app.config.logging_config import get_logger
 from app.config.settings import settings
 from app.llm.embedding import get_embedding_client
 from app.llm.client import MockLLMClient, get_llm_client
+from app.rag.search.vector import EmbeddingDimensionMismatch
 
 _log = get_logger("flavorag.memory.mem0")
 
@@ -604,10 +605,7 @@ class Mem0Manager:
             return 0
 
         # Step 5: Delete superseded memories (UPDATE targets)
-        for old_id in to_delete_ids:
-            await self._delete_by_memory_id(old_id)
-
-        # Step 6: Embed and insert new memories
+        # Replacements are inserted before superseded facts are retired.
         try:
             vectors = await self.embedder.embed_documents(to_add)
         except Exception as exc:
@@ -628,8 +626,9 @@ class Mem0Manager:
                     schema_dim=schema_dim,
                     actual_dim=actual_dim,
                 )
-                col = _recreate_collection(actual_dim)
-                self._collection = col
+                raise EmbeddingDimensionMismatch(
+                    settings.mem0_collection_name, schema_dim, actual_dim
+                )
 
         now = int(time.time())
         records = []
@@ -655,6 +654,9 @@ class Mem0Manager:
             # Also index into ES for keyword search
             for mid, fact, metadata in zip(memory_ids, to_add, [r["metadata"] for r in records]):
                 await _index_to_es(user_id, tenant_id, mid, fact, metadata)
+
+            for old_id in to_delete_ids:
+                await self._delete_by_memory_id(old_id)
 
             _log.info(
                 "mem0_facts_stored",
@@ -701,8 +703,9 @@ class Mem0Manager:
                     schema_dim=schema_dim,
                     actual_dim=actual_dim,
                 )
-                col = _recreate_collection(actual_dim)
-                self._collection = col
+                raise EmbeddingDimensionMismatch(
+                    settings.mem0_collection_name, schema_dim, actual_dim
+                )
 
             results = col.search(
                 data=[query_vec],
@@ -740,7 +743,12 @@ class Mem0Manager:
             keyword_hits=len(keyword_results),
             fused=len(memories),
         )
-        return memories
+        return [
+            memory
+            for memory in memories
+            if float(memory.get("score", 0.0))
+            >= settings.mem0_min_relevance_score
+        ]
 
     async def get_all(self, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
         """Get all memory facts for a user (for admin detail view)."""

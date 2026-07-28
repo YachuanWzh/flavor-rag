@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuthStore } from "@/stores/authStore";
 import { useChatStore } from "@/stores/chatStore";
@@ -11,8 +11,11 @@ import SessionList from "@/components/session/SessionList";
 import ChatInput from "@/components/chat/ChatInput";
 import MessageList from "@/components/chat/MessageList";
 import SourcesDrawer from "@/components/chat/SourcesDrawer";
-import DocumentPreviewModal from "@/components/chat/DocumentPreviewModal";
 import KnowledgeGraphPanel from "@/components/chat/KnowledgeGraphPanel";
+
+const DocumentPreviewModal = lazy(
+  () => import("@/components/chat/DocumentPreviewModal"),
+);
 
 export default function ChatPage() {
   const navigate = useNavigate();
@@ -257,16 +260,18 @@ export default function ChatPage() {
 
       {/* Direct citation PDF preview */}
       {previewSource && (
-        <DocumentPreviewModal
-          open={!!previewSource}
-          documentId={previewSource.documentId}
-          docName={previewSource.docName}
-          fileType={previewSource.fileType}
-          pageStart={previewSource.pageStart}
-          bboxes={previewSource.bboxes}
-          sourceContent={previewSource.content}
-          onClose={() => setPreviewSource(null)}
-        />
+        <Suspense fallback={null}>
+          <DocumentPreviewModal
+            open={!!previewSource}
+            documentId={previewSource.documentId}
+            docName={previewSource.docName}
+            fileType={previewSource.fileType}
+            pageStart={previewSource.pageStart}
+            bboxes={previewSource.bboxes}
+            sourceContent={previewSource.content}
+            onClose={() => setPreviewSource(null)}
+          />
+        </Suspense>
       )}
     </div>
   );

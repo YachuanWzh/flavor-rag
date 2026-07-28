@@ -7,12 +7,10 @@ for due jobs and processes them with distributed locking.
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import datetime, timezone, timedelta
 
 from sqlalchemy import select
 
-from app.config.settings import settings
 from app.config.logging_config import get_logger
 from app.database.session import async_session_factory
 from app.models import KnowledgeDocumentSchedule
@@ -142,5 +140,15 @@ class DocumentScheduleScheduler:
         except (ValueError, TypeError):
             pass
 
-        # Standard cron: fall back to hourly default
-        sched.next_run_time = now + timedelta(hours=1)
+        from apscheduler.triggers.cron import CronTrigger
+
+        if not cron:
+            raise ValueError("cron expression is required")
+        trigger = CronTrigger.from_crontab(cron, timezone=timezone.utc)
+        aware_now = datetime.now(timezone.utc)
+        next_fire = trigger.get_next_fire_time(None, aware_now)
+        if next_fire is None:
+            raise ValueError(f"cron expression has no next fire time: {cron}")
+        sched.next_run_time = next_fire.astimezone(timezone.utc).replace(
+            tzinfo=None
+        )

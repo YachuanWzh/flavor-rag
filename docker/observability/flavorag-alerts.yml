@@ -1,0 +1,48 @@
+groups:
+  - name: flavorag-rag
+    rules:
+      - alert: FlavorRagHighErrorRate
+        expr: |
+          sum(rate(flavorag_http_requests_total{status=~"5.."}[10m]))
+          /
+          clamp_min(sum(rate(flavorag_http_requests_total[10m])), 0.001)
+          > 0.02
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: flavor-rag HTTP 5xx rate exceeds 2%
+      - alert: FlavorRagRetrievalEmptySpike
+        expr: rate(flavorag_rag_empty_retrieval_total[15m]) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Empty retrievals are increasing
+      - alert: FlavorRagIndexDrift
+        expr: sum(flavorag_index_missing_chunks) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: Active PostgreSQL chunks are missing from Milvus
+      - alert: FlavorRagIngestionBacklog
+        expr: sum(flavorag_ingestion_queue_depth{status=~"QUEUED|RETRY"}) > 100
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Ingestion queue backlog exceeds 100 jobs
+      - alert: FlavorRagP95LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(flavorag_rag_end_to_end_duration_seconds_bucket[10m])
+            )
+          ) > 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: End-to-end RAG p95 exceeds 10 seconds

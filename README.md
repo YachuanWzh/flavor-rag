@@ -1,255 +1,183 @@
-﻿# flavor-rag — 企业级 RAG 智能问答系统
+# flavor-rag
 
-> 版本：v0.0.4 | 状态：生产就绪（144/144 测试全绿）
+> 版本：v0.0.5 · 企业级 RAG 数据面加固版 · 2026-07-28
 
-基于 Python FastAPI + React 技术栈的企业级 RAG (Retrieval-Augmented Generation) 系统。支持多路混合检索、HyDE 假设文档嵌入、近邻补偿、知识图谱、Agentic RAG、Mem0 长期记忆、七维用户画像、评测体系、全链路追踪、批量导入/去重、异步摄取队列与系统监控。
+flavor-rag 是一个面向企业知识库的全链路 RAG 系统，覆盖多格式摄取、版本化索引、混合检索、证据约束生成、引用、长期记忆、离线评测和生产可观测性。本版本不把登录与权限作为企业级结论的一部分；重点是 RAG 数据面的正确性、可恢复性和可运维性。
 
-> 📘 **技术方案详解**：参见 [技术方案文档.md](./技术方案文档.md)，涵盖分块逻辑、召回逻辑、评测体系、链路监控、Graph RAG、Agentic RAG、批量导入/去重、异步摄取、系统监控、Mem0 长期记忆、用户画像等核心设计。
+## v0.0.5 关键变化
 
-## 项目结构
+- 非破坏性索引：embedding 模型或维度不匹配会显式失败，不再自动删除 collection。全量重建写入新的物理 generation，校验完成后原子切换 active collection。
+- 一致性摄取：摄取使用稳定 idempotency key；新 chunk 和 PDF asset 先进入 `PENDING`，Milvus 及 required channel 成功后才激活。失败时旧 generation 继续服务。
+- 持久化后台任务：单文档摄取、批量导入、评测和索引重建均由 PostgreSQL 队列驱动，可在进程崩溃后恢复；多副本通过 `SKIP LOCKED` 或 advisory lock 协调。
+- 自动对账修复：定时对比 PostgreSQL active chunk 与 Milvus，缺失文档进入 repair queue，孤儿向量被清理；optional channel 失败可见且指数退避。
+- 检索正确性：修复推测检索跨 query/collection 误复用、HyDE 丢失、冻结预算对象修改、通道异常伪装为空结果和不同分数域共用阈值等问题。
+- Prompt 与引用安全：检索证据、记忆和画像均按不可信数据注入；最终引用会校验索引和证据重叠，流式内容、finish 事件和持久化答案保持一致。
+- 有界文档处理：限制文件大小、批量数、PDF 页数、压缩包展开大小/文件数/压缩比、图片像素和 OCR/VLM 并发；阻塞 PDF 解析与同步 SDK 调用移出事件循环。
+- 企业评测：评测绑定 corpus snapshot、document/index generation、embedding 模型和 prompt 版本，同时计算 Retrieval 与 Answer 指标、95% 置信区间、最小样本门禁和生成阶段 prompt-injection canary。
+- 生产部署：空 PostgreSQL 可直接 `alembic upgrade head`；容器使用锁定依赖、自动迁移、无 reload 多 worker、liveness/readiness、Prometheus 告警和 Grafana 面板。
 
-```
-flavor-rag/
-├── README.md
-├── 技术方案文档.md                       # 核心架构详解
-├── .env.example
-├── .gitignore
-│
-├── docker/                             # Docker Compose 编排
-│   └── observability/                  # Prometheus + Grafana + Jaeger 配置
-│       ├── prometheus.yml              # Prometheus 抓取规则
-│       └── grafana/                    # Grafana 预置大盘 + 数据源
-│   ├── infra-stack.compose.yaml        # PG + Redis + RustFS
-│   ├── milvus-stack.compose.yaml       # Milvus 向量数据库
-│   ├── es-stack.compose.yaml           # Elasticsearch (可选)
-│   ├── rocketmq-stack.compose.yaml     # RocketMQ (可选)
-│   ├── lightrag-neo4j-stack.compose.yaml  # LightRAG + Neo4j (可选)
-│   └── app.compose.yaml                # 应用镜像
-│
-├── database/
-│   └── schema_pg.sql                   # PostgreSQL 建表脚本
-│
-├── docs/
-│   ├── evaluation/                     # 评测分析报告
-│   └── specs/                          # 设计规格说明
-│
-├── flavorag-server/                    # 服务端 (Python FastAPI)
-│   ├── pyproject.toml
-│   ├── alembic.ini                     # 数据库迁移
-│   ├── run.py / run_dev.py
-│   ├── alembic/versions/               # 13 个迁移版本
-│   ├── tests/                          # 144 个测试用例
-│   └── app/
-│       ├── main.py                     # FastAPI 入口
-│       ├── config/                     # 配置 + 日志
-│       ├── database/                   # 数据库连接 + SQLite Schema
-│       ├── models/__init__.py          # SQLAlchemy 模型 (含 IngestionJob/BatchImport)
-│       ├── auth/                       # JWT 认证 + 依赖注入
-│       ├── api/                        # 18 个 API 模块 (含 user_profile/monitoring/health)
-│       ├── rag/                        # RAG 核心引擎
-│       │   ├── pipeline.py             # 检索主流水线 (重写→意图→HyDE→多路检索→融合→Rerank)
-│       │   ├── hyde.py                 # HyDE 假设文档生成 (轻量 LLM → 假设文档 → 向量检索)
-│       │   ├── search/                 # vector (Milvus) + keyword (ES BM25)
-│       │   ├── postprocess/            # fusion (RRF) + reranker (Cross-Encoder/LLM)
-│       │   ├── graph/                  # neo4j_store + lightrag_client
-│       │   ├── rewrite.py              # 查询改写 (术语映射 + LLM) + 命中统计
-│       │   ├── intent.py               # 意图识别 (词法 + LLM)
-│       │   ├── governance.py           # 检索治理 (预算/熔断/超时)
-│       │   ├── trace.py                # 链路追踪
-│       │   ├── model_router.py         # 意图→模型路由
-│       │   ├── rate_limiter.py         # Redis 滑动窗口限流
-│       │   ├── decompose.py            # 查询分解
-│       │   └── recommendations.py      # 推荐问题生成
-│       ├── ingestion/                  # 文档入库流水线
-│       │   ├── pipeline.py             # 单文档快速入库
-│       │   ├── pipeline_engine.py      # DAG 流水线引擎 (6 种节点)
-│       │   ├── nodes/                  # fetcher/parser/chunker/enricher/enhancer/indexer
-│       │   ├── chunker.py              # 三种分块策略 (Fixed/Semantic/BlockAware) + 块类型元数据
-│       │   ├── parser.py               # 文档解析 (Markdown/PDF/DOCX/XLSX/PPTX/HTML)
-│       │   ├── structured.py           # 结构化文档分块
-│       │   ├── url_fetcher.py          # URL 安全抓取
-│       │   ├── dedup.py                # 文档去重 (SHA-256 + 语义相似度)
-│       │   ├── incremental.py          # 增量索引 (变更检测 + 选择性重建)
-│       │   └── pdf/                    # 复杂 PDF 多模态处理 (OCR/VLM/表格)
-│       ├── llm/                        # LLM 客户端
-│       │   ├── client.py               # 流式 LLM (支持 Bailian/SiliconFlow/AIhubmix + 推理分离)
-│       │   └── embedding.py            # Embedding 客户端 (自动维度检测)
-│       ├── memory/                     # Mem0 长期记忆 + 用户画像 (v0.0.4)
-│       │   ├── mem0_client.py          # Mem0 记忆层：提取→去重→存储→双通道检索
-│       │   ├── profile_builder.py      # 七维用户画像构建器
-│       │   └── profile_scheduler.py    # 每日定时全量画像重建
-│       ├── agent/                      # Agentic RAG
-│       │   ├── controlled.py           # 受控 Agent 循环
-│       │   ├── planner.py              # LLM 决策下一步行动
-│       │   └── rag_agent.py            # 编排检索+工具
-│       ├── tools/                      # Agent 可用工具 (SQL / MCP)
-│       ├── evaluation/                 # 评测框架 (指标计算 + 质量门禁 + 投资决策)
-│       ├── audit/                      # 操作审计 (中间件 + 日志)
-│       ├── observability/              # Prometheus 指标 + OpenTelemetry 追踪
-│       │   ├── metrics.py              # 15 个业务指标 (含 TTFT/LLM流式/摄取队列)
-│       │   └── otel.py                 # OTLP 导出 + 回溯 Span 创建
-│       ├── security/                   # 细粒度 ACL (租户/部门/角色)
-│       └── services/                   # 对话管理 / 批量导入 / 异步摄取 / 索引同步 / 定时刷新 / 看门狗
-│           ├── batch_import.py         # 批量导入 (进度追踪 + 逐文件隔离)
-│           ├── ingestion_jobs.py       # 异步摄取 Worker (Outbox + 指数退避重试)
-│           ├── ingestion_executor.py   # 摄取执行器 (DAG/传统双模式)
-│           └── ingestion_watchdog.py   # 任务看门狗 (僵尸任务超时检测)
-│
-└── flavorag-frontend/                  # 前端 (React + Vite + TypeScript)
-    ├── Dockerfile / nginx.conf
-    ├── package.json / vite.config.ts
-    ├── tailwind.config.cjs
-    └── src/
-        ├── pages/                      # 17 个页面 (问答/知识库/管理后台)
-        │   ├── ChatPage.tsx            # 流式问答 + 引用溯源 + 图片/表格来源展示
-        │   ├── LoginPage.tsx           # 登录注册
-        │   └── admin/                  # 管理后台 (Dashboard/评测/追踪/流水线/图谱/权限/画像/监控/健康...)
-        ├── components/                 # 可复用组件
-        │   ├── chat/                   # 消息列表/输入框/来源面板/知识图谱/思考指示器/来源媒体
-        │   │   └── SourceMedia.tsx     # 图片/表格来源内联展示 + Lightbox
-        │   └── common/                 # 公共组件
-        │       └── ForbiddenToast.tsx  # 全局 403 权限不足提示
-        ├── services/                   # API 客户端 (auth/chat/knowledge/graph/evaluation...)
-        ├── stores/                     # Zustand 状态管理
-        ├── hooks/                      # SSE 流式响应 Hook
-        └── types/                      # TypeScript 类型定义
+详细设计见 [0.0.5 SDD](docs/0.0.5-enterprise-rag-sdd.md)，部署与故障处理见 [运维手册](docs/operations-runbook.md)，完整实现说明见 [技术方案文档](技术方案文档.md)。
+
+## 架构
+
+```mermaid
+flowchart LR
+    U["文件 / URL"] --> V["有界校验与共享源存储"]
+    V --> Q["PostgreSQL 持久化任务"]
+    Q --> P["Parse / OCR / VLM / Semantic Chunk"]
+    P --> G["Pending document generation"]
+    G --> M["Milvus required"]
+    G --> E["Elasticsearch optional/required"]
+    G --> N["Neo4j / LightRAG optional/required"]
+    M --> A["原子激活 generation"]
+    E --> A
+    N --> A
+    A --> R["Vector + BM25 + Graph + HyDE"]
+    R --> F["RRF / Dedup / Rerank / Budget"]
+    F --> L["不可信证据约束生成"]
+    L --> C["引用校验 + SSE + 持久化"]
+    C --> EV["离线评测与质量门禁"]
+    A --> RC["对账 / Repair / Retention"]
 ```
 
-## 核心能力
-
-| 模块 | 能力 | 状态 |
-|------|------|------|
-| **分块** | 三种策略：固定窗口 / 语义切分 / 块感知切分 + 块类型元数据 (TABLE/CODE/LIST/IMAGE/PARA) + 表格双文本 (Markdown + key:value 嵌入) | ✅ |
-| **检索** | 多路并行：Milvus 向量 + ES BM25 关键词 + Neo4j/LightRAG 图谱 + HyDE 假设文档向量 → RRF 融合 → 去重 → 近邻补偿（上下文窗口扩展）→ Cross-Encoder Rerank | ✅ |
-| **HyDE** | 轻量 LLM 生成假设文档 → 向量化 → 额外检索通道，桥接 query-document 语义鸿沟；前端可折叠展示 + 超时降级 | ✅ |
-| **查询理解** | 术语映射（DB驱动 + 命中统计） + LLM 改写（消解指代） + 意图分类（层级意图树→知识库路由→模型路由） | ✅ |
-| **Graph RAG** | 双层图谱：Neo4j 确定性实体（零 LLM 依赖）+ LightRAG 语义增强 | ✅ |
-| **Agentic RAG** | 受控 Agent 循环：检索 → 评估 → 再检索/SQL/MCP 工具 → 最多 4 步 | ✅ |
-| **批量导入与去重** | 批量文件上传 + 进度追踪 + SHA-256 内容去重 + 语义相似度去重 (PG vector) | ✅ |
-| **异步摄取** | Outbox 模式 + Worker 池 + 指数退避重试 + 死信队列 + 看门狗超时检测 | ✅ |
-| **增量索引** | 文件内容 hash 变更检测 → 仅重建变化文档（跳过未变文件） + 旧块软删除 | ✅ |
-| **评测** | 8 项检索指标 + 拒绝能力 + ACL 防泄露 + 8 道硬门禁 + 投资决策框架 | ✅ |
-| **可观测性** | 15 个 Prometheus 指标 (QPS/延迟/TTFT/LLM流式/摄取队列/熔断器) + OpenTelemetry + Jaeger 分布式链路追踪 + PG 业务追踪 | ✅ |
-| **系统监控** | 内置监控面板：RAG 请求量/成功率/P95耗时/时序图 + 摄取队列深度 + 任务列表 + 手动重试 | ✅ |
-| **安全** | JWT 认证 + 租户/部门/角色 ACL + 跨租户防泄露 + 操作审计 + 只读 SQL 白名单 + 403 全局提示 | ✅ |
-| **治理** | 检索预算控制 + Circuit Breaker 熔断 + 通道超时 + Redis 滑动窗口限流 | ✅ |
-| **Mem0 长期记忆** | 对话自动事实提取 (DeepSeek-V4-Flash) + LLM 智能去重 (ADD/UPDATE/NOOP) + Milvus+ES 双通道混合检索 + Prompt 自动注入 | ✅ |`n| **用户画像** | 七维画像聚合 (意图分布/知识库偏好/查询风格/反馈信号/LLM 领域分析/mem0 计数) + 增量/每日定时更新 + 画像驱动 RAG | ✅ |`n| **定时任务** | 文档定时刷新 (Cron) + 幂等锁 + 内容变化检测 + 索引同步重试 | ✅ |
-| **前端** | 流式 SSE 问答 + 来源标亮 + 图片/表格内联展示 + 知识图谱可视化 + 管理后台 16 个页面 | ✅ |
-
-## 快速开始
-
-### 1. 启动基础设施
-
-```bash
-# 核心组件 (PG + Redis + RustFS)
-docker compose -f docker/infra-stack.compose.yaml up -d
-
-# 向量数据库
-docker compose -f docker/milvus-stack.compose.yaml up -d
-
-# 可选组件:
-# docker compose -f docker/es-stack.compose.yaml up -d            # Elasticsearch
-# docker compose -f docker/lightrag-neo4j-stack.compose.yaml up -d # 知识图谱
-# docker compose -f docker/observability-stack.compose.yaml up -d  # Prometheus + Grafana + Jaeger
-```
-
-### 2. 初始化数据库
-
-```bash
-# 使用 Alembic 迁移 (推荐)
-cd flavorag-server
-alembic upgrade head
-
-# 或直接执行建表脚本
-docker exec -i flavorag-postgres psql -U postgres -d flavorag < database/schema_pg.sql
-```
-
-### 3. 配置环境变量
-
-```bash
-cp .env.example .env
-# 编辑 .env，至少填写:
-#   SILICONFLOW_API_KEY=<your-key>   (或 BAILIAN_API_KEY)
-```
-
-### 4. 启动服务端
-
-```bash
-cd flavorag-server
-pip install -e ".[dev]"
-python run.py
-# API 文档: http://localhost:9090/docs
-```
-
-### 5. 启动前端
-
-```bash
-cd flavorag-frontend
-npm install
-npm run dev
-# 访问: http://localhost:5173
-```
-
-## 运行测试
-
-```bash
-cd flavorag-server
-pytest tests/ -v
-# 144/144 全绿
-```
-
-## 检索链路速览
-
-```
-用户问题
-  → 查询改写 (术语映射 + LLM消解指代)
-  → 意图识别 (层级意图树 → 路由知识库)
-  → HyDE 假设文档生成 (轻量 LLM → 额外向量检索通道，可选)
-  → 四路并行检索 (Milvus向量 + ES BM25 + Neo4j/LightRAG图谱 + HyDE 假设文档向量)
-  → RRF 融合 (多路结果加权合并)
-  → 内容去重 (Jaccard 3-gram)
-  → 近邻补偿 (召回命中块前后各2块，补全上下文)
-  → Rerank 重排序 (Cross-Encoder 精排)
-  → 上下文组装 (多样性优先 + 上下文窗口控制)
-  → ACL 权限过滤 → LLM 生成 → 回答 + 来源引用 (含图片/表格)
-```
-
-## v0.0.2 新特性
-
-- **批量导入与去重**：支持一次上传多个文档，自动 SHA-256 哈希去重，可选语义相似度深度去重
-- **异步摄取队列**：基于 Outbox 模式的异步任务队列，支持指数退避重试、死信队列、手动重新入队
-- **增量索引**：文档内容变更检测（hash 对比），仅重建变化文档，跳过未变文件
-- **系统监控面板**：内置 RAG 请求量/成功率/P95 耗时/摄取队列深度图表，支持时间窗口切换
-- **分块增强**：Block Aware 分块新增块类型元数据（TABLE/CODE/LIST/IMAGE/PARA），表格生成双文本（Markdown + key:value 嵌入）
-- **来源媒体展示**：回答中图片、表格来源内联渲染，图片支持 Lightbox 放大查看
-- **可观测性升级**：新增 15 个 Prometheus 业务指标，含 TTFT（首字节时间）、LLM 流式延迟、摄取任务队列深度
-- **403 全局提示**：权限不足时前端自动弹出 Toast 提示
-- **术语映射命中统计**：查询词映射命中次数写入数据库，支持分析高频映射
-
-## v0.0.3 新特性
-
-- **HyDE 假设文档嵌入**：用轻量 LLM（默认 qwen-turbo-latest）为用户问题生成"假设性答案文档"，将假设文档嵌入后作为额外的向量检索通道（`hyde_vector`），在 RRF 融合中以权重 0.8 参与排序，桥接 short-query 与 long-document 之间的语义鸿沟
-- **HyDE 并行执行**：在 TTFT 优化路径中与改写、意图识别并行执行，15s 独立超时，不阻塞主检索链路
-- **HyDE 前端交互**：问答输入框 HyDE 开关按钮（rose 色调）、假设文档可折叠面板（展示生成模型、耗时、全文）、超时/降级状态提示、检索通道归因标签
-- **HyDE 治理**：独立 Circuit Breaker 熔断（3 次失败打开、30s 后半开）、MockLLMClient 自动跳过、`__THINK__` 推理前缀过滤、硬截断防超长输出
-- **数据持久化**：`t_conversation_message` 表新增 `hyde_doc` 和 `hyde_meta` 列，假设文档随对话历史持久化存储
-- **能力发现**：`GET /api/capabilities` 返回 `hyde.available` 和 `hyde.defaultEnabled`，前端按需展示开关按钮`n`n## v0.0.4 新特性`n`n- **Mem0 长期记忆层**：基于 Milvus (user_memories collection) + DeepSeek-V4-Flash 事实提取 + Qwen3-Embedding-8B 向量化，实现完整的 mem0 模式（提取 → 去重 → 存储 → 检索 → 注入）`n- **智能记忆去重**：LLM 级别语义比较，判断 ADD（新增）/ UPDATE（更新已有）/ NOOP（跳过重复），防止记忆膨胀；去重 LLM 失败时自动降级为文本相似度兜底`n- **混合记忆检索**：向量（Milvus COSINE）+ 关键词（ES BM25）双通道召回，加权融合（默认 0.7:0.3），检索到的记忆自动注入 System Prompt`n- **七维用户画像**：由行为统计（意图分布、知识库偏好、查询风格、反馈信号）+ LLM 领域提取 + mem0 事实计数聚合而成，支持 incremental（增量）和 daily（每日定时）两种更新模式`n- **画像驱动 RAG**：对话前拉取用户画像和相关记忆注入 System Prompt；对话后异步 fire-and-forget 提取新记忆 + 增量更新画像，不阻塞用户响应`n- **画像定时调度**：ProfileDailyScheduler 按 Cron 表达式（默认凌晨 2:00）全量重建所有活跃用户画像`n- **管理后台**：新增用户画像管理页面 (`UserProfilePage`)，支持画像列表/详情抽屉/七维展示/记忆浏览与逐条删除/手动重建/配置热更新`n- **配置端点**：`GET /api/admin/profiles/config` 返回 mem0 和画像运行时配置，支持热更新（mem0 开关/搜索 top_k/更新模式）`n- **维度自适应**：Milvus collection 自动检测 embedding 维度（如 1536 → 4096），维度不匹配时自动删除重建，无需手动干预
+PostgreSQL 是业务事实源。Milvus、Elasticsearch 和图索引是可重建投影；任何外部索引失败都不能提前激活 PostgreSQL generation。
 
 ## 技术栈
 
-- **后端**: Python 3.11+ / FastAPI / SQLAlchemy / Alembic
-- **前端**: React 18 / Vite / TypeScript / Tailwind CSS / Zustand
-- **向量库**: Milvus (IVF_FLAT + Cosine)
-- **关键词检索引擎**: Elasticsearch (BM25)
-- **图数据库**: Neo4j + LightRAG HTTP API
-- **嵌入模型**: Qwen3-Embedding-8B (4096维)
-- **Reranker**: Qwen3-Reranker-8B (Cross-Encoder)
-- **LLM**: Qwen-Plus / DeepSeek-V3 (支持 Bailian / SiliconFlow / AIhubmix)
-- **对象存储**: RustFS (S3 兼容)
-- **消息队列**: RocketMQ (可选)
-- **缓存**: Redis
-- **可观测性**: Prometheus + Grafana (指标) / OpenTelemetry + Jaeger (链路追踪)
+- 后端：Python 3.11+、FastAPI、SQLAlchemy Async、Alembic
+- 数据：PostgreSQL/pgvector、Redis
+- 检索：Milvus 2.x、Elasticsearch 8.x、Neo4j/LightRAG
+- 文件：RustFS/MinIO S3、pdfplumber、pypdf、OCR/VLM
+- 模型：OpenAI-compatible LLM、Embedding、Reranker
+- 前端：React 18、TypeScript、Vite、Zustand
+- 可观测性：Prometheus、Grafana、OpenTelemetry/Jaeger
 
-## 与 flavor-code 融合
+Python 依赖由 `flavorag-server/uv.lock` 锁定，前端依赖由 `package-lock.json` 锁定。
 
-flavor-rag 可作为 flavor-code 的 RAG 后端服务，提供语义代码检索能力。详见 `rag融合.md`。
+## 快速启动
+
+### Docker Compose
+
+```bash
+copy .env.example .env
+# 填写模型 API Key；生产环境务必替换示例密码
+docker compose -f docker/app.compose.yaml up -d --build
+```
+
+服务：
+
+- 前端：`http://localhost`
+- API/OpenAPI：`http://localhost:9090/docs`
+- liveness：`http://localhost:9090/api/health/live`
+- readiness：`http://localhost:9090/api/health/ready`
+- Prometheus metrics：`http://localhost:9090/metrics`
+
+Compose 中 `SOURCE_STORAGE_BACKEND=s3`，源文件保存在 RustFS。仅本地开发可使用默认的 `local`。
+
+### 本地开发
+
+```bash
+cd flavorag-server
+uv sync --locked --extra dev
+uv run alembic upgrade head
+uv run uvicorn app.main:app --host 0.0.0.0 --port 9090
+
+cd ../flavorag-frontend
+npm ci
+npm run dev
+```
+
+## 配置要点
+
+复制 `.env.example` 后至少确认：
+
+```dotenv
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/flavorag
+REDIS_URL=redis://:password@127.0.0.1:6379/0
+MILVUS_URI=http://127.0.0.1:19530
+ES_URIS=http://127.0.0.1:9200
+S3_ENDPOINT=http://127.0.0.1:9000
+SOURCE_STORAGE_BACKEND=s3
+
+EMBEDDING_MODEL=Qwen/Qwen3-Embedding-8B
+EMBEDDING_DIM=4096
+LLM_MODEL=qwen-plus-latest
+LLM_CONTEXT_WINDOW_TOKENS=8192
+LLM_MAX_OUTPUT_TOKENS=2048
+```
+
+`EMBEDDING_DIM` 只是默认值。创建知识库时会实际探测模型输出维度并写入 index generation；已有 collection 不会因配置变化被删除。
+
+## RAG 数据面
+
+### 摄取
+
+支持 PDF、DOCX、XLSX、PPTX、Markdown、文本、HTML、JSON、CSV 和常见图片。PDF 支持布局块、表格、跨页表格、图片 asset、OCR 和可选 VLM 描述；语义分块使用实际 embedding 相邻相似度。
+
+状态流：
+
+```text
+QUEUED → RUNNING → SUCCESS
+                 ↘ RETRY → DEAD
+
+PENDING generation → required indexes success → ACTIVE
+                   ↘ failure → old ACTIVE remains available
+```
+
+### 检索
+
+- Query rewrite、intent、推测向量检索和可选 HyDE 并行执行。
+- Vector、BM25、Graph 多通道有独立超时、熔断、状态和指标。
+- RRF、vector、reranker 使用独立阈值。
+- 最终上下文预算按 token 计算，并为 system、history、memory、profile 和输出保留空间。
+- PostgreSQL 会再次过滤非 `ACTIVE` chunk，避免外部索引短暂不一致造成脏读。
+
+### 生成与引用
+
+- system prompt 明确把 evidence、memory、profile 视为不可信数据。
+- 输入、history、evidence 和输出都有 token/长度边界与总超时。
+- 引用只允许 `[N]` 指向本次实际 sources；错误或无支持的引用不会被当作有效引用。
+- 服务端 finish 事件包含 `fullAnswer`，前端用它覆盖增量流，保证 UI 与数据库一致。
+- 对话后记忆只抽取用户明确表达的事实，不把 assistant 推测写成用户事实。
+
+## 评测与门禁
+
+`POST /api/admin/evaluation/run` 只创建持久化任务；前端轮询运行状态，不占用长 HTTP 请求。指标包括：
+
+- Precision、Recall、Hit Rate、MRR、MAP、NDCG、document recall；
+- answerability、refusal precision/recall/F1、ACL leakage、stability；
+- groundedness、completeness、answer relevance、correctness；
+- citation precision、claim coverage；
+- prompt-injection canary safety；
+- P50/P95/P99 latency 和关键指标 95% CI。
+
+门禁要求至少 30 个启用案例，并要求 reference answer 覆盖率。当前示例数据集绑定固定示例文档；选择其他 corpus 时 API 会明确拒绝运行，而不是用失效 chunk ID 静默打分。生产使用前应维护组织自己的版本化 golden set。
+
+## 验证
+
+```bash
+cd flavorag-server
+uv run ruff check app tests
+uv run python -m compileall -q app
+uv run pytest -q
+
+cd ../flavorag-frontend
+npm run build
+
+docker compose -f ../docker/app.compose.yaml config --quiet
+```
+
+CI 还会在空 PostgreSQL 上执行完整 Alembic migration，并构建前后端容器。
+
+## 生产注意事项
+
+- 生产必须设置真实模型凭据，否则 readiness 为 503。
+- 不要手工删除 active Milvus collection；通过 index generation API 重建。
+- 不要把本地 `uploads` 当作多副本共享源存储。
+- 对 PostgreSQL 和对象存储执行备份；外部索引应视为可重建投影。
+- `TRACE_STORE_CONTENT=false` 为推荐默认值，按保留策略清理 trace 和评测明细。
+- 示例 Compose 是单机拓扑；跨可用区高可用需要使用托管或集群化 PostgreSQL、Redis、Milvus、Elasticsearch 和 S3。
+
+## 许可证
+
+项目未声明开源许可证；在补充 LICENSE 前，请按内部项目管理。

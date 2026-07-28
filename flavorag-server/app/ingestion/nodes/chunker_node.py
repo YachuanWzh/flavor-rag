@@ -71,7 +71,18 @@ class ChunkerNode:
                 )
 
             config = self._build_config(ctx.settings)
-            chunks = self._chunker.chunk(ctx.parsed_text, config)
+            if config.resolve_strategy() == ChunkStrategy.SEMANTIC:
+                from app.llm.embedding import get_embedding_client
+
+                chunks = await self._chunker.chunk_semantic(
+                    ctx.parsed_text,
+                    config,
+                    embedder=get_embedding_client(
+                        model=ctx.settings.get("embedding_model") or None
+                    ),
+                )
+            else:
+                chunks = self._chunker.chunk(ctx.parsed_text, config)
             chunks = inject_cross_references(chunks)
             ctx.chunks = chunks
 

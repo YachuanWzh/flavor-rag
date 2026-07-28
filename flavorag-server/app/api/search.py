@@ -12,7 +12,6 @@ from app.models import User, KnowledgeBase
 from app.rag.search.vector import MilvusSearchChannel
 from app.rag.search.keyword import ESKeywordSearchChannel
 from app.rag.postprocess.fusion import rrf_fusion, deduplicate
-from app.rag.search.base import SearchResult
 from app.config.settings import settings
 from app.rag.governance import RetrievalBudget, run_search_channels, select_context
 from app.rag.pipeline import RAGPipeline

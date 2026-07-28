@@ -6,6 +6,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import RagTraceRun, RagTraceNode, gen_id
 from app.observability import otel
 from app.observability.metrics import RAG_RUNS
+from app.config.settings import settings
+
+
+def _redacted_text(value: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    return f"[redacted sha256:{digest} chars:{len(value)}]"
+
+
+def _trace_payload(value):
+    if settings.trace_store_content:
+        return value
+    if isinstance(value, dict):
+        return {
+            key: (
+                _redacted_text(str(item))
+                if key.lower() in {
+                    "query",
+                    "question",
+                    "content",
+                    "input",
+                    "output",
+                    "hypothetical_doc",
+                }
+                else _trace_payload(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_trace_payload(item) for item in value]
+    return value
 
 
 class TraceLogger:
@@ -52,8 +84,12 @@ class TraceLogger:
             user_id=user_id,
             tenant_id=tenant_id,
             kb_id=kb_id,
-            query=query,
-            rewrite_query=rewrite_query,
+            query=query if settings.trace_store_content else _redacted_text(query),
+            rewrite_query=(
+                rewrite_query
+                if settings.trace_store_content or not rewrite_query
+                else _redacted_text(rewrite_query)
+            ),
             intent=intent,
             create_time=datetime.now(timezone.utc).replace(tzinfo=None),
         )
@@ -98,8 +134,8 @@ class TraceLogger:
             start_time=start_time,
             end_time=end_time,
             duration_ms=int((end_time - start_time).total_seconds() * 1000) if start_time and end_time else 0,
-            input_data=input_data,
-            output_data=output_data,
+            input_data=_trace_payload(input_data),
+            output_data=_trace_payload(output_data),
             status=status,
             error_message=error_message,
             create_time=datetime.now(timezone.utc).replace(tzinfo=None),

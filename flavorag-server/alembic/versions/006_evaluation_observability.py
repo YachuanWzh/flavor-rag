@@ -38,11 +38,13 @@ def upgrade() -> None:
         sa.Column("completed_at", sa.DateTime()),
         sa.Column("created_by", sa.String(20), nullable=False),
         sa.Column("create_time", sa.DateTime()),
+        if_not_exists=True,
     )
     op.create_index(
         "idx_evaluation_run_trend",
         "t_evaluation_run",
         ["tenant_id", "kb_id", "status", "create_time"],
+        if_not_exists=True,
     )
 
 

@@ -8,10 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
 
 from app.database.session import get_db
-from app.auth.dependencies import get_current_user, get_admin_user
+from app.auth.dependencies import get_current_user
 from app.models import (
     User, Conversation, Message, KnowledgeBase, KnowledgeDocument,
-    KnowledgeChunk, RagTraceRun, RagTraceNode,
+    KnowledgeChunk, RagTraceRun,
 )
 from app.rag.trace import TraceLogger
 from app.config.settings import settings

@@ -1,6 +1,5 @@
 ﻿"""Comprehensive tests for Phases 4-7: ES, Reranker, Trace, RateLimit, Router, Graph."""
 import pytest
-from dataclasses import dataclass
 from app.rag.search.base import SearchResult
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc
 from app.models import Conversation, Message, gen_id
 from app.config.settings import settings
 
@@ -11,9 +11,16 @@ from app.config.settings import settings
 class ChatService:
     """Handles message persistence and conversation history."""
 
-    def __init__(self, db: AsyncSession, *, user_id: str = "system"):
+    def __init__(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: str = "system",
+        tenant_id: str = "default",
+    ):
         self.db = db
         self.user_id = user_id
+        self.tenant_id = tenant_id
 
     async def get_recent_messages(
         self, conversation_id: str, turns: int = 8
@@ -23,6 +30,7 @@ class ChatService:
             select(Message)
             .where(
                 Message.conversation_id == conversation_id,
+                Message.tenant_id == self.tenant_id,
                 Message.deleted == 0,
             )
             .order_by(desc(Message.create_time))
@@ -72,6 +80,7 @@ class ChatService:
                     select(Message)
                     .where(
                         Message.conversation_id == conversation_id,
+                        Message.tenant_id == self.tenant_id,
                         Message.deleted == 0,
                     )
                     .order_by(Message.create_time)
@@ -119,6 +128,7 @@ class ChatService:
             id=gen_id(),
             conversation_id=conversation_id or "",
             user_id=self.user_id,
+            tenant_id=self.tenant_id,
             role=role,
             content=content,
             thinking_content=thinking_content,

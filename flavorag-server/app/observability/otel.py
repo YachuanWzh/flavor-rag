@@ -15,6 +15,7 @@ from app.config.settings import settings
 _log = get_logger("flavorag.otel")
 _tracer = None
 _initialized = False
+_provider = None
 
 
 def _to_ns(moment: datetime) -> int:
@@ -25,7 +26,7 @@ def _to_ns(moment: datetime) -> int:
 
 def setup_otel(app=None) -> bool:
     """Initialize the OTLP tracer provider and FastAPI instrumentation."""
-    global _tracer, _initialized
+    global _tracer, _initialized, _provider
     if _initialized:
         return _tracer is not None
     _initialized = True
@@ -57,6 +58,7 @@ def setup_otel(app=None) -> bool:
         )
     )
     trace.set_tracer_provider(provider)
+    _provider = provider
     _tracer = trace.get_tracer("flavorag")
 
     if app is not None:
@@ -72,6 +74,15 @@ def setup_otel(app=None) -> bool:
         service=settings.otel_service_name,
     )
     return True
+
+
+def shutdown_otel() -> None:
+    """Flush and close the batch exporter during application shutdown."""
+    global _provider
+    if _provider is not None:
+        _provider.force_flush(timeout_millis=5000)
+        _provider.shutdown()
+        _provider = None
 
 
 def otel_active() -> bool:

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.session import get_db
-from app.auth.dependencies import get_current_user, get_admin_user
+from app.auth.dependencies import get_admin_user
 from app.models import User
 from app.audit.service import query_audit_logs
 

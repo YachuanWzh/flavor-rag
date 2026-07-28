@@ -106,6 +106,8 @@ CREATE TABLE t_knowledge_base (
     name            VARCHAR(128) NOT NULL,
     embedding_model VARCHAR(64)  NOT NULL,          -- 嵌入模型标识
     collection_name VARCHAR(64)  NOT NULL UNIQUE,    -- Milvus Collection 名
+    active_collection_name VARCHAR(128),
+    active_index_generation VARCHAR(32) NOT NULL DEFAULT 'v1',
     pipeline_id     VARCHAR(20),
     tenant_id       VARCHAR(64) NOT NULL DEFAULT 'default',
     department_id   VARCHAR(64),
@@ -139,6 +141,8 @@ CREATE TABLE t_knowledge_document (
     schedule_cron    VARCHAR(64),                     -- Cron 表达式
     chunk_strategy   VARCHAR(32),                     -- FIXED_WINDOW (固定窗口) / SEMANTIC (语义切分)
     chunk_config     JSONB,                           -- 分块配置 JSON
+    active_generation VARCHAR(32) NOT NULL DEFAULT 'v1',
+    pending_generation VARCHAR(32),
     created_by       VARCHAR(20)  NOT NULL,
     updated_by       VARCHAR(20),
     create_time      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -165,6 +169,8 @@ CREATE TABLE t_knowledge_chunk (
     page_end     INTEGER,
     bbox_json    JSONB,
     metadata_json JSONB,
+    generation   VARCHAR(32) NOT NULL DEFAULT 'v1',
+    index_status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
     enabled      SMALLINT    DEFAULT 1,
     created_by   VARCHAR(20) NOT NULL,
     updated_by   VARCHAR(20),
@@ -175,7 +181,6 @@ CREATE TABLE t_knowledge_chunk (
 CREATE INDEX idx_doc_id ON t_knowledge_chunk (doc_id);
 
 -- PDF 图片等多模态资产
-CREATE TABLE t_knowledge_asset (
 CREATE TABLE t_knowledge_asset (
     id            VARCHAR(32) PRIMARY KEY,
     kb_id         VARCHAR(20)  NOT NULL,
@@ -193,6 +198,8 @@ CREATE TABLE t_knowledge_asset (
     bbox_json     JSONB,
     description   TEXT,
     metadata_json JSONB,
+    generation    VARCHAR(32) NOT NULL DEFAULT 'v1',
+    index_status  VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
     created_by    VARCHAR(20) NOT NULL,
     updated_by    VARCHAR(20),
     create_time   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -529,6 +536,11 @@ CREATE TABLE t_batch_import_job (
     status             VARCHAR(16) NOT NULL DEFAULT 'pending',
     file_results       JSONB,
     error_message      TEXT,
+    config_json        JSONB,
+    attempts           INTEGER NOT NULL DEFAULT 0,
+    claimed_by         VARCHAR(64),
+    claimed_at         TIMESTAMP,
+    next_retry_time    TIMESTAMP,
     created_by         VARCHAR(20) NOT NULL,
     create_time        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     update_time        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -547,6 +559,108 @@ CREATE TABLE t_batch_import_file (
     doc_id        VARCHAR(20),
     chunk_count   INTEGER DEFAULT 0,
     error_message TEXT,
+    source_location VARCHAR(1024),
     create_time   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX idx_batch_import_file_job ON t_batch_import_file (job_id);
+
+-- v0.0.5 durable ingestion and immutable vector-index generations.
+CREATE TABLE IF NOT EXISTS t_ingestion_job (
+    id VARCHAR(20) PRIMARY KEY,
+    idempotency_key VARCHAR(64) NOT NULL UNIQUE,
+    tenant_id VARCHAR(64) NOT NULL DEFAULT 'default',
+    kb_id VARCHAR(20) NOT NULL,
+    doc_id VARCHAR(20) NOT NULL,
+    pipeline_id VARCHAR(20),
+    source_type VARCHAR(32) NOT NULL DEFAULT 'file',
+    file_path VARCHAR(1024) NOT NULL,
+    chunk_strategy VARCHAR(32) NOT NULL DEFAULT 'FIXED_WINDOW',
+    chunk_config_json JSONB,
+    operation VARCHAR(24) NOT NULL DEFAULT 'INGEST',
+    generation VARCHAR(32) NOT NULL DEFAULT 'v1',
+    status VARCHAR(16) NOT NULL DEFAULT 'QUEUED',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    next_retry_time TIMESTAMP,
+    claimed_by VARCHAR(64),
+    claimed_at TIMESTAMP,
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    duration_ms BIGINT,
+    chunk_count INTEGER DEFAULT 0,
+    error_message TEXT,
+    created_by VARCHAR(20) NOT NULL,
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted SMALLINT DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS t_knowledge_index_generation (
+    id VARCHAR(20) PRIMARY KEY,
+    kb_id VARCHAR(20) NOT NULL,
+    generation VARCHAR(32) NOT NULL,
+    collection_name VARCHAR(128) NOT NULL,
+    embedding_model VARCHAR(128) NOT NULL,
+    embedding_dim INTEGER NOT NULL,
+    parser_version VARCHAR(64),
+    chunker_version VARCHAR(64),
+    status VARCHAR(16) NOT NULL DEFAULT 'BUILDING',
+    expected_chunks INTEGER DEFAULT 0,
+    indexed_chunks INTEGER DEFAULT 0,
+    activated_at TIMESTAMP,
+    error_message TEXT,
+    created_by VARCHAR(20) NOT NULL DEFAULT 'system',
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted SMALLINT DEFAULT 0,
+    UNIQUE (kb_id, generation)
+);
+
+CREATE TABLE IF NOT EXISTS t_index_repair_job (
+    id VARCHAR(20) PRIMARY KEY,
+    kb_id VARCHAR(20) NOT NULL,
+    doc_id VARCHAR(20) NOT NULL,
+    generation VARCHAR(32) NOT NULL,
+    channel VARCHAR(24) NOT NULL,
+    operation VARCHAR(24) NOT NULL DEFAULT 'UPSERT',
+    status VARCHAR(16) NOT NULL DEFAULT 'QUEUED',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    next_retry_time TIMESTAMP,
+    last_error TEXT,
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted SMALLINT DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunk_active_generation
+  ON t_knowledge_chunk (doc_id, generation, index_status, deleted);
+CREATE INDEX IF NOT EXISTS idx_asset_active_generation
+  ON t_knowledge_asset (doc_id, generation, index_status, deleted);
+
+CREATE TABLE IF NOT EXISTS t_evaluation_run (
+    id VARCHAR(20) PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL DEFAULT 'default',
+    kb_id VARCHAR(20) NOT NULL,
+    kb_name VARCHAR(128) NOT NULL,
+    dataset_version VARCHAR(64) NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'queued',
+    gate_status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    config_json JSONB NOT NULL,
+    metrics_json JSONB,
+    slices_json JSONB,
+    gates_json JSONB,
+    baseline_run_id VARCHAR(20),
+    deltas_json JSONB,
+    results_json JSONB,
+    duration_ms BIGINT,
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    claimed_by VARCHAR(64),
+    claimed_at TIMESTAMP,
+    next_retry_time TIMESTAMP,
+    error_message TEXT,
+    created_by VARCHAR(20) NOT NULL,
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

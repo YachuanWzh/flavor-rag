@@ -277,8 +277,8 @@ class FakeImageDescriber:
 
 
 def _build_two_page_pdf_with_table_and_image() -> bytes:
-    reportlab = pytest.importorskip("reportlab")
-    pillow = pytest.importorskip("PIL")
+    pytest.importorskip("reportlab")
+    pytest.importorskip("PIL")
 
     from PIL import Image
     from reportlab.lib import colors

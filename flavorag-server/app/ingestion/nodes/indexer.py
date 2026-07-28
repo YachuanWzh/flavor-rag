@@ -22,13 +22,22 @@ class IndexerNode:
     NODE_TYPE = "indexer"
 
     async def __call__(self, ctx: IngestionContext) -> NodeResult:
+        import asyncio
         import time
-        from sqlalchemy.ext.asyncio import AsyncSession
+        from contextlib import asynccontextmanager
         from app.database.session import async_session_factory
 
         t0 = time.time()
 
         try:
+            @asynccontextmanager
+            async def session_scope():
+                if ctx.db is not None:
+                    yield ctx.db
+                else:
+                    async with async_session_factory() as fallback_session:
+                        yield fallback_session
+
             if not ctx.chunks:
                 return NodeResult(
                     node_type=self.NODE_TYPE,
@@ -39,7 +48,9 @@ class IndexerNode:
             # 1. Embed
             t_embed = time.time()
             from app.llm.embedding import get_embedding_client
-            embedder = get_embedding_client()
+            embedder = get_embedding_client(
+                model=ctx.settings.get("embedding_model") or None
+            )
             texts = [c.get("embedding_content") or c["content"] for c in ctx.chunks]
             vectors = await embedder.embed_documents(texts)
             ctx.vectors = vectors
@@ -48,7 +59,7 @@ class IndexerNode:
 
             # 2. Persist chunk metadata to PG
             t_pg = time.time()
-            async with async_session_factory() as session:
+            async with session_scope() as session:
                 from app.models import KnowledgeChunk, KnowledgeDocument, gen_id
                 from sqlalchemy import select
 
@@ -75,6 +86,7 @@ class IndexerNode:
                             doc_id=ctx.doc_id,
                             created_by="pipeline",
                             session=session,
+                            generation=ctx.generation,
                         )
                         materialize_asset_urls(ctx.chunks, asset_urls)
                     except Exception:
@@ -107,12 +119,14 @@ class IndexerNode:
                             **(c.get("metadata_json") or {}),
                             "asset_ids": c.get("asset_ids", []),
                         },
+                        generation=ctx.generation,
+                        index_status="PENDING",
                         created_by="pipeline",
                     )
                     session.add(record)
                     chunk_records.append(record)
 
-                await session.commit()
+                await session.flush()
 
                 # Refresh IDs after commit
                 chunk_ids = [r.id for r in chunk_records]
@@ -128,40 +142,47 @@ class IndexerNode:
 
             # Derive collection from KB if possible
             if not ctx.settings.get("collection_name"):
-                async with async_session_factory() as session:
+                async with session_scope() as session:
                     from sqlalchemy import select
                     from app.models import KnowledgeBase
                     result = await session.execute(
-                        select(KnowledgeBase.collection_name).where(
+                        select(
+                            KnowledgeBase.collection_name,
+                            KnowledgeBase.active_collection_name,
+                        ).where(
                             KnowledgeBase.id == ctx.kb_id,
                             KnowledgeBase.deleted == 0,
                         )
                     )
                     kb_row = result.first()
                     if kb_row:
-                        collection_name = kb_row[0]
+                        collection_name = kb_row[1] or kb_row[0]
 
             doc_ids = [ctx.doc_id] * len(chunk_records)
             contents = [r.content for r in chunk_records]
-            milvus.insert(
-                collection_name=collection_name,
-                chunk_ids=chunk_ids,
-                doc_ids=doc_ids,
-                contents=contents,
-                vectors=vectors,
+            await asyncio.to_thread(
+                milvus.insert,
+                collection_name,
+                chunk_ids,
+                doc_ids,
+                contents,
+                vectors,
             )
             milvus_ms = int((time.time() - t_milvus) * 1000)
             _log.info("indexer_milvus", doc_id=ctx.doc_id, collection=collection_name, took_ms=milvus_ms)
 
             # 4. ES keyword index (optional)
+            es_ok = True
             if ctx.settings.get("enable_es", True):
                 try:
                     from app.config.settings import settings
                     if settings.es_enabled:
                         await self._index_to_es(ctx.kb_id, chunk_records)
                 except Exception as exc:
+                    es_ok = False
                     _log.warning("indexer_es_failed", doc_id=ctx.doc_id, error=str(exc))
 
+            graph_ok = True
             if ctx.settings.get("enable_graph", False):
                 try:
                     from app.config.settings import settings
@@ -196,11 +217,91 @@ class IndexerNode:
                                 error=str(exc),
                             )
                 except Exception as exc:
+                    graph_ok = False
                     _log.warning(
                         "indexer_graph_failed",
                         doc_id=ctx.doc_id,
                         error=str(exc),
                     )
+
+            from app.config.settings import settings
+            if not es_ok and settings.es_required:
+                raise RuntimeError("required Elasticsearch indexing failed")
+            if not graph_ok and settings.graph_required:
+                raise RuntimeError("required graph indexing failed")
+
+            # A single database transaction activates the new generation and
+            # retires the old one only after required external indexes succeed.
+            async with session_scope() as session:
+                from app.models import IndexRepairJob, KnowledgeAsset
+
+                old_chunks = list(
+                    (
+                        await session.execute(
+                            select(KnowledgeChunk).where(
+                                KnowledgeChunk.doc_id == ctx.doc_id,
+                                KnowledgeChunk.generation != ctx.generation,
+                                KnowledgeChunk.index_status == "ACTIVE",
+                                KnowledgeChunk.deleted == 0,
+                            )
+                        )
+                    ).scalars().all()
+                )
+                for old in old_chunks:
+                    old.index_status = "SUPERSEDED"
+                    old.deleted = 1
+                for current in chunk_records:
+                    current.index_status = "ACTIVE"
+                old_assets = list(
+                    (
+                        await session.execute(
+                            select(KnowledgeAsset).where(
+                                KnowledgeAsset.doc_id == ctx.doc_id,
+                                KnowledgeAsset.generation != ctx.generation,
+                                KnowledgeAsset.index_status == "ACTIVE",
+                                KnowledgeAsset.deleted == 0,
+                            )
+                        )
+                    ).scalars().all()
+                )
+                for old_asset in old_assets:
+                    old_asset.index_status = "SUPERSEDED"
+                    old_asset.deleted = 1
+                current_assets = list(
+                    (
+                        await session.execute(
+                            select(KnowledgeAsset).where(
+                                KnowledgeAsset.doc_id == ctx.doc_id,
+                                KnowledgeAsset.generation == ctx.generation,
+                                KnowledgeAsset.index_status == "PENDING",
+                                KnowledgeAsset.deleted == 0,
+                            )
+                        )
+                    ).scalars().all()
+                )
+                for current_asset in current_assets:
+                    current_asset.index_status = "ACTIVE"
+                document = (
+                    await session.execute(
+                        select(KnowledgeDocument).where(
+                            KnowledgeDocument.id == ctx.doc_id
+                        )
+                    )
+                ).scalar_one_or_none()
+                if document is not None:
+                    document.active_generation = ctx.generation
+                    document.pending_generation = None
+                for channel, ok in (("elasticsearch", es_ok), ("graph", graph_ok)):
+                    if not ok:
+                        session.add(
+                            IndexRepairJob(
+                                kb_id=ctx.kb_id,
+                                doc_id=ctx.doc_id,
+                                generation=ctx.generation,
+                                channel=channel,
+                            )
+                        )
+                await session.flush()
 
             duration_ms = int((time.time() - t0) * 1000)
             return NodeResult(

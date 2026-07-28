@@ -15,8 +15,6 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
 
 _LATENCY_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0)
 _INGESTION_BUCKETS = (0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0)
@@ -76,6 +74,49 @@ LLM_STREAM_FAILURES = Counter(
     "Failed LLM stream calls by model.",
     ["model"],
 )
+RAG_E2E_LATENCY = Histogram(
+    "flavorag_rag_end_to_end_duration_seconds",
+    "End-to-end duration through final persisted streamed answer.",
+    buckets=_LATENCY_BUCKETS,
+)
+LLM_TOKENS = Counter(
+    "flavorag_llm_tokens_total",
+    "LLM tokens reported by providers.",
+    ["model", "type"],
+)
+RAG_EMPTY_RETRIEVALS = Counter(
+    "flavorag_rag_empty_retrieval_total",
+    "RAG requests rejected because no sufficiently relevant evidence exists.",
+)
+RAG_REFUSALS = Counter(
+    "flavorag_rag_refusals_total",
+    "RAG refusals by reason.",
+    ["reason"],
+)
+CITATION_COVERAGE = Histogram(
+    "flavorag_citation_coverage_ratio",
+    "Fraction of retrieved sources cited by the final answer.",
+    buckets=(0.0, 0.25, 0.5, 0.75, 1.0),
+)
+INDEX_LAST_SUCCESS_TIMESTAMP = Gauge(
+    "flavorag_index_last_success_timestamp_seconds",
+    "Unix timestamp of the latest successful ingestion index activation.",
+)
+INDEX_REPAIR_JOBS = Counter(
+    "flavorag_index_repair_jobs_total",
+    "External index repair attempts by channel and result.",
+    ["channel", "result"],
+)
+INDEX_DRIFT = Gauge(
+    "flavorag_index_missing_chunks",
+    "Active PostgreSQL chunks missing from the vector index.",
+    ["kb_id"],
+)
+INDEX_ORPHANS = Gauge(
+    "flavorag_index_orphan_chunks",
+    "Vector chunks not referenced by an active PostgreSQL generation.",
+    ["kb_id"],
+)
 
 CIRCUIT_BREAKER_OPEN = Gauge(
     "flavorag_circuit_breaker_open",
@@ -105,21 +146,32 @@ def render_metrics() -> tuple[bytes, str]:
     return generate_latest(), CONTENT_TYPE_LATEST
 
 
-class MetricsMiddleware(BaseHTTPMiddleware):
-    """Record request count and latency using the matched route template."""
+class MetricsMiddleware:
+    """Pure ASGI metrics middleware that includes the full streaming body."""
 
-    async def dispatch(self, request: Request, call_next):
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
         started = time.monotonic()
         status = "500"
+
+        async def send_wrapper(message):
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = str(message["status"])
+            await send(message)
+
         try:
-            response = await call_next(request)
-            status = str(response.status_code)
-            return response
+            await self.app(scope, receive, send_wrapper)
         finally:
-            route = request.scope.get("route")
+            route = scope.get("route")
             path = getattr(route, "path", None)
             if path:  # skip unmatched paths to avoid label cardinality explosion
-                method = request.method
+                method = scope.get("method", "UNKNOWN")
                 HTTP_REQUESTS.labels(method=method, path=path, status=status).inc()
                 HTTP_LATENCY.labels(method=method, path=path).observe(
                     time.monotonic() - started

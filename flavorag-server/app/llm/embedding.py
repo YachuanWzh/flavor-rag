@@ -101,20 +101,25 @@ class EmbeddingClient:
 
 
 class MockEmbeddingClient:
-    """Local mock that returns random normalised vectors when no API key is set."""
+    """Local deterministic vectors for repeatable development and tests."""
 
     def __init__(self, dim: int | None = None):
         self.dim = dim or settings.embedding_dim
 
     async def embed_query(self, text: str) -> list[float]:
-        _ = text
-        return self._random_vector()
+        return self._vector_for(text)
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [self._random_vector() for _ in texts]
+        return [self._vector_for(text) for text in texts]
 
-    def _random_vector(self) -> list[float]:
-        raw = [random.gauss(0, 1) for _ in range(self.dim)]
+    def _vector_for(self, text: str) -> list[float]:
+        import hashlib
+
+        seed = int.from_bytes(
+            hashlib.sha256(text.encode("utf-8")).digest()[:8], "big"
+        )
+        rng = random.Random(seed)
+        raw = [rng.gauss(0, 1) for _ in range(self.dim)]
         norm = math.sqrt(sum(v * v for v in raw))
         if norm == 0:
             return [0.0] * self.dim

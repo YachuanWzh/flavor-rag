@@ -190,7 +190,7 @@ export default function EvaluationPage() {
     if (!kbId || running) return;
     setRunning(true);
     try {
-      const data = await api.post("/api/admin/evaluation/run", {
+      const queued = await api.post("/api/admin/evaluation/run", {
         kb_id: kbId,
         top_k: topK,
         concurrency,
@@ -200,9 +200,22 @@ export default function EvaluationPage() {
         graph_rag: false,
         label: `手动评测 · Top ${topK}`,
       }) as unknown as RunResult;
-      setSelectedRun(data);
+      setSelectedRun(queued);
+      toast.success("评测任务已进入后台队列");
+      let data = queued;
+      for (let attempt = 0; attempt < 600; attempt += 1) {
+        if (["completed", "failed"].includes(data.status)) break;
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        data = await api.get(
+          `/api/admin/evaluation/runs/${queued.id}`,
+        ) as RunResult;
+        setSelectedRun(data);
+      }
+      if (!["completed", "failed"].includes(data.status)) {
+        throw new Error("评测仍在后台运行，请稍后在历史记录中查看");
+      }
       toast.success(
-        data.gateStatus === "passed"
+        data.status === "completed" && data.gateStatus === "passed"
           ? "评测完成，质量门禁通过"
           : "评测完成，发现质量门禁未通过",
       );

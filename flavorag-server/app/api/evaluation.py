@@ -1,4 +1,4 @@
-"""Retrieval evaluation APIs: replay, quality gates, history and trend analysis."""
+"""Durable retrieval-and-generation evaluation APIs."""
 
 from __future__ import annotations
 
@@ -14,15 +14,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user
 from app.database.session import get_db
-from app.evaluation.runner import (
-    assess_quality_gates,
-    calculate_case_metrics,
-    calculate_metrics,
-    load_dataset,
-    run_evaluation,
+from app.evaluation.runner import load_dataset
+from app.models import (
+    EvaluationRun,
+    KnowledgeBase,
+    KnowledgeDocument,
+    Message,
+    MessageFeedback,
+    User,
 )
-from app.models import EvaluationRun, KnowledgeBase, Message, MessageFeedback, User
-from app.rag.pipeline import RAGContext, RAGPipeline
 from app.security.access import Permission
 from app.security.service import kb_access_predicate, principal_from_user
 
@@ -63,7 +63,11 @@ def _run_payload(item: EvaluationRun, *, include_results: bool = False) -> dict:
         "baselineRunId": item.baseline_run_id,
         "deltas": item.deltas_json or {},
         "durationMs": item.duration_ms or 0,
-        "createdAt": item.create_time.isoformat() if item.create_time else None,
+        "attempts": item.attempts or 0,
+        "errorMessage": item.error_message,
+        "createdAt": (
+            item.create_time.isoformat() if item.create_time else None
+        ),
     }
     if include_results:
         payload["results"] = item.results_json or []
@@ -77,21 +81,19 @@ async def overview(
 ):
     cases = load_dataset(_DATASET)
     active = [case for case in cases if case.active]
-    categories = Counter(case.category for case in active)
-    difficulties = Counter(case.difficulty for case in active)
-    negative_count = (
-        await db.execute(
-            select(MessageFeedback.id)
-            .join(Message, Message.id == MessageFeedback.message_id)
-            .where(
-                MessageFeedback.deleted == 0,
-                MessageFeedback.vote == -1,
-                Message.user_id == user.id
-                if user.role not in {"admin", "tenant_admin", "system_admin"}
-                else True,
-            )
+    negative_statement = (
+        select(MessageFeedback.id)
+        .join(Message, Message.id == MessageFeedback.message_id)
+        .where(
+            MessageFeedback.deleted == 0,
+            MessageFeedback.vote == -1,
         )
-    ).all()
+    )
+    if user.role not in {"admin", "tenant_admin", "system_admin"}:
+        negative_statement = negative_statement.where(
+            Message.user_id == user.id
+        )
+    negative_count = len((await db.execute(negative_statement)).all())
     latest = (
         await db.execute(
             select(EvaluationRun)
@@ -111,9 +113,9 @@ async def overview(
             "activeCaseCount": len(active),
             "answerableCount": sum(case.answerable for case in active),
             "negativeCaseCount": sum(not case.answerable for case in active),
-            "categories": dict(categories),
-            "difficulties": dict(difficulties),
-            "negativeFeedbackCandidates": len(negative_count),
+            "categories": dict(Counter(case.category for case in active)),
+            "difficulties": dict(Counter(case.difficulty for case in active)),
+            "negativeFeedbackCandidates": negative_count,
             "latestRun": _run_payload(latest) if latest else None,
             "cases": [
                 {
@@ -188,64 +190,63 @@ async def trend(
     )
     if kb_id:
         statement = statement.where(EvaluationRun.kb_id == kb_id)
-    rows = (
-        await db.execute(
-            statement.order_by(desc(EvaluationRun.create_time)).limit(
-                min(90, max(2, limit))
-            )
+    rows = list(
+        reversed(
+            (
+                await db.execute(
+                    statement.order_by(desc(EvaluationRun.create_time)).limit(
+                        min(90, max(2, limit))
+                    )
+                )
+            ).scalars().all()
         )
-    ).scalars().all()
-    rows = list(reversed(rows))
-    points = [
-        {
-            "id": item.id,
-            "timestamp": item.create_time.isoformat() if item.create_time else None,
-            "kbName": item.kb_name,
-            "gateStatus": item.gate_status,
-            "metrics": item.metrics_json or {},
-        }
-        for item in rows
-    ]
+    )
     alerts = []
     if len(rows) >= 2:
         previous, current = rows[-2], rows[-1]
-        ranked_metrics = []
-        for prefix in ("recall@", "ndcg@", "mrr@"):
-            current_name = next(
-                (
-                    name
-                    for name in (current.metrics_json or {})
-                    if name.startswith(prefix)
-                ),
-                None,
-            )
-            if current_name and current_name in (previous.metrics_json or {}):
-                ranked_metrics.append(current_name)
-        for metric in ("quality_score", *ranked_metrics):
+        common = set(previous.metrics_json or {}) & set(
+            current.metrics_json or {}
+        )
+        for metric in sorted(common):
+            if not metric.startswith(
+                ("quality_score", "recall@", "ndcg@", "mrr@")
+            ):
+                continue
             before = float((previous.metrics_json or {}).get(metric, 0))
             after = float((current.metrics_json or {}).get(metric, 0))
             if after - before <= -0.05:
                 alerts.append(
                     {
-                        "severity": "critical" if after - before <= -0.10 else "warning",
+                        "severity": (
+                            "critical"
+                            if after - before <= -0.10
+                            else "warning"
+                        ),
                         "metric": metric,
                         "delta": after - before,
                         "message": f"{metric} 较上次下降 {abs(after - before):.1%}",
                     }
                 )
-        latency_delta = float((current.metrics_json or {}).get("latency_p95_ms", 0)) - float(
-            (previous.metrics_json or {}).get("latency_p95_ms", 0)
-        )
-        if latency_delta >= 500:
-            alerts.append(
+    return {
+        "code": "0",
+        "data": {
+            "points": [
                 {
-                    "severity": "warning",
-                    "metric": "latency_p95_ms",
-                    "delta": latency_delta,
-                    "message": f"P95 时延较上次增加 {latency_delta:.0f}ms",
+                    "id": item.id,
+                    "timestamp": (
+                        item.create_time.isoformat()
+                        if item.create_time
+                        else None
+                    ),
+                    "kbName": item.kb_name,
+                    "gateStatus": item.gate_status,
+                    "metrics": item.metrics_json or {},
                 }
-            )
-    return {"code": "0", "data": {"points": points, "alerts": alerts}}
+                for item in rows
+            ],
+            "alerts": alerts,
+        },
+    }
 
 
 @router.get("/feedback-candidates")
@@ -266,7 +267,7 @@ async def feedback_candidates(
     rows = (await db.execute(statement)).all()
     candidates = []
     for feedback, answer in rows:
-        previous = (
+        question = (
             await db.execute(
                 select(Message)
                 .where(
@@ -279,27 +280,32 @@ async def feedback_candidates(
                 .limit(1)
             )
         ).scalar_one_or_none()
-        if not previous:
+        if not question:
             continue
+        sources = answer.sources or []
         candidates.append(
             {
                 "id": f"feedback-{feedback.id}",
-                "question": previous.content,
+                "question": question.content,
                 "answer": answer.content,
                 "reason": feedback.reason,
                 "comment": feedback.comment,
-                "sources": answer.sources or [],
+                "sources": sources,
                 "suggestedCase": {
                     "id": f"feedback-{feedback.id}",
-                    "question": previous.content,
-                    "expected_chunk_ids": [
+                    "question": question.content,
+                    # Negative production retrieval is review material, not
+                    # ground truth. A human must label expected positives.
+                    "expected_chunk_ids": [],
+                    "expected_doc_ids": [],
+                    "retrieved_chunk_ids_for_review": [
                         source.get("chunkId")
-                        for source in (answer.sources or [])
+                        for source in sources
                         if source.get("chunkId")
                     ],
-                    "expected_doc_ids": [
+                    "retrieved_doc_ids_for_review": [
                         source.get("documentId")
-                        for source in (answer.sources or [])
+                        for source in sources
                         if source.get("documentId")
                     ],
                     "category": "feedback_review",
@@ -337,150 +343,104 @@ async def run(
     if not any(case.active for case in cases):
         raise HTTPException(status_code=400, detail="所选范围没有启用的评测案例")
 
-    config = request.model_dump()
+    expected_doc_ids = {
+        doc_id
+        for case in cases
+        if case.active
+        for doc_id in case.expected_doc_ids
+    }
+    corpus_rows = (
+        await db.execute(
+            select(
+                KnowledgeDocument.id,
+                KnowledgeDocument.content_hash,
+                KnowledgeDocument.active_generation,
+            ).where(
+                KnowledgeDocument.kb_id == kb.id,
+                KnowledgeDocument.deleted == 0,
+                KnowledgeDocument.enabled != 0,
+            )
+        )
+    ).all()
+    bound_doc_ids = {row.id for row in corpus_rows}
+    missing = expected_doc_ids - bound_doc_ids
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "evaluation dataset is not bound to the selected corpus; "
+                f"{len(missing)} expected document(s) are missing"
+            ),
+        )
+
+    corpus_snapshot = hashlib.sha256(
+        "\n".join(
+            f"{row.id}:{row.content_hash or ''}:{row.active_generation or ''}"
+            for row in sorted(corpus_rows, key=lambda item: item.id)
+        ).encode()
+    ).hexdigest()[:16]
+    generation_by_doc = {
+        row.id: row.active_generation or "" for row in corpus_rows
+    }
+    for case in cases:
+        if (
+            case.active
+            and case.corpus_snapshot
+            and case.corpus_snapshot != corpus_snapshot
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"case {case.id} targets corpus snapshot "
+                    f"{case.corpus_snapshot}, selected corpus is "
+                    f"{corpus_snapshot}"
+                ),
+            )
+        if (
+            case.active
+            and case.document_generation
+            and any(
+                generation_by_doc.get(doc_id) != case.document_generation
+                for doc_id in case.expected_doc_ids
+            )
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"case {case.id} targets document generation "
+                    f"{case.document_generation}, but the selected corpus "
+                    "contains a different active generation"
+                ),
+            )
+
+    config = {
+        **request.model_dump(),
+        "corpus_snapshot": corpus_snapshot,
+        "index_generation": kb.active_index_generation,
+        "embedding_model": kb.embedding_model,
+        "prompt_version": "rag-safe-evidence-v0.0.5",
+        "_runtime": {
+            "user_id": user.id,
+            "tenant_id": user.tenant_id or "default",
+            "department_id": user.department_id or "",
+            "role": user.role,
+        },
+    }
     record = EvaluationRun(
         tenant_id=user.tenant_id or "default",
         kb_id=kb.id,
         kb_name=kb.name,
         dataset_version=_dataset_version(),
-        status="running",
+        status="queued",
         gate_status="pending",
         config_json=config,
         created_by=user.id,
-        started_at=_utcnow(),
+        started_at=None,
     )
     db.add(record)
     await db.flush()
-
-    pipeline = RAGPipeline()
-    cases_by_question = {case.question: case for case in cases}
-
-    async def retrieve(question: str, *, top_k: int):
-        result = await pipeline.run(
-            RAGContext(
-                question=question,
-                kb_id=kb.id,
-                collection_name=kb.collection_name,
-                user_id=user.id,
-                tenant_id=user.tenant_id or "default",
-                department_id=user.department_id or "",
-                role=user.role,
-                graph_rag=request.graph_rag,
-            )
-        )
-        chunk_ids = [source["chunkId"] for source in result.sources][:top_k]
-        case = cases_by_question[question]
-        return {
-            "chunk_ids": chunk_ids,
-            "doc_ids": [
-                source.get("documentId", "") for source in result.sources[:top_k]
-            ],
-            "scores": [source.get("score", 0) for source in result.sources[:top_k]],
-            "answerable": result.answerable,
-            "leaked_chunk_ids": (
-                chunk_ids if case.category == "acl_denied" else []
-            ),
-        }
-
-    started = datetime.now(timezone.utc)
-    try:
-        results, metrics = await run_evaluation(
-            cases,
-            retrieve,
-            top_k=request.top_k,
-            concurrency=request.concurrency,
-            timeout_seconds=request.timeout_seconds,
-            repetitions=request.repetitions,
-        )
-        by_id = {result.case_id: result for result in results}
-        slices: dict[str, dict[str, dict]] = {"category": {}, "difficulty": {}}
-        for dimension in slices:
-            values = sorted(
-                {
-                    getattr(case, dimension)
-                    for case in cases
-                    if case.active and case.id in by_id
-                }
-            )
-            for value in values:
-                slice_cases = [
-                    case
-                    for case in cases
-                    if getattr(case, dimension) == value and case.id in by_id
-                ]
-                slices[dimension][value] = calculate_metrics(
-                    slice_cases,
-                    [by_id[case.id] for case in slice_cases],
-                    top_k=request.top_k,
-                )
-        gates = assess_quality_gates(metrics, top_k=request.top_k)
-        baseline_candidates = (
-            await db.execute(
-                select(EvaluationRun)
-                .where(
-                    EvaluationRun.tenant_id == (user.tenant_id or "default"),
-                    EvaluationRun.kb_id == kb.id,
-                    EvaluationRun.status == "completed",
-                    EvaluationRun.id != record.id,
-                )
-                .order_by(desc(EvaluationRun.create_time))
-                .limit(30)
-            )
-        ).scalars().all()
-        baseline = next(
-            (
-                item
-                for item in baseline_candidates
-                if (item.config_json or {}).get("top_k") == request.top_k
-                and (item.config_json or {}).get("graph_rag") == request.graph_rag
-                and sorted((item.config_json or {}).get("categories") or [])
-                == sorted(request.categories)
-            ),
-            None,
-        )
-        deltas = {
-            name: float(value) - float((baseline.metrics_json or {}).get(name, 0))
-            for name, value in metrics.items()
-            if isinstance(value, (int, float))
-        } if baseline else {}
-        detailed_results = []
-        for result in results:
-            case = next(case for case in cases if case.id == result.case_id)
-            detailed_results.append(
-                {
-                    **result.to_dict(),
-                    "question": case.question,
-                    "category": case.category,
-                    "difficulty": case.difficulty,
-                    "expected_chunk_ids": case.expected_chunk_ids,
-                    "case_metrics": calculate_case_metrics(
-                        case, result, top_k=request.top_k
-                    ),
-                }
-            )
-        record.status = "completed"
-        record.gate_status = gates["status"]
-        record.metrics_json = metrics
-        record.slices_json = slices
-        record.gates_json = gates
-        record.baseline_run_id = baseline.id if baseline else None
-        record.deltas_json = deltas
-        record.results_json = detailed_results
-        record.duration_ms = int(
-            (datetime.now(timezone.utc) - started).total_seconds() * 1000
-        )
-        record.completed_at = _utcnow()
-        await db.flush()
-        return {
-            "code": "0",
-            "data": _run_payload(record, include_results=True),
-        }
-    except Exception:
-        record.status = "failed"
-        record.gate_status = "failed"
-        record.duration_ms = int(
-            (datetime.now(timezone.utc) - started).total_seconds() * 1000
-        )
-        record.completed_at = _utcnow()
-        await db.flush()
-        raise
+    return {
+        "code": "0",
+        "message": "queued",
+        "data": _run_payload(record),
+    }

@@ -2,6 +2,9 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+rule_files:
+  - /etc/prometheus/flavorag-alerts.yml
+
 scrape_configs:
   # flavorag-server running on the host (settings.server_port = 9090)
   - job_name: flavorag-server

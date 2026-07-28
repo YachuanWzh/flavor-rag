@@ -7,10 +7,8 @@ Direct Python translation of ragent Java chunking subsystem:
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
 
 
 # ============================================================================
@@ -221,6 +219,75 @@ class DocumentChunker:
             records = _StructureAwareChunker().chunk(text, options)
 
         return [r.to_dict() for r in records]
+
+    async def chunk_semantic(
+        self,
+        text: str,
+        config: ChunkConfig,
+        *,
+        embedder=None,
+        similarity_threshold: float = 0.55,
+    ) -> list[dict]:
+        """Embedding-based semantic boundary detection for plain text."""
+        import math
+        import re
+
+        if not text.strip():
+            return []
+        paragraphs = [
+            part.strip()
+            for part in re.split(r"\n\s*\n+", text)
+            if part.strip()
+        ]
+        if len(paragraphs) <= 1:
+            return self.chunk(text, config)
+        if embedder is None:
+            from app.llm.embedding import get_embedding_client
+
+            embedder = get_embedding_client()
+        vectors = await embedder.embed_documents(paragraphs)
+
+        def cosine(left: list[float], right: list[float]) -> float:
+            numerator = sum(a * b for a, b in zip(left, right))
+            left_norm = math.sqrt(sum(value * value for value in left))
+            right_norm = math.sqrt(sum(value * value for value in right))
+            if not left_norm or not right_norm:
+                return 0.0
+            return numerator / (left_norm * right_norm)
+
+        groups: list[list[str]] = []
+        current = [paragraphs[0]]
+        current_chars = len(paragraphs[0])
+        target = max(128, config.chunk_size)
+        maximum = max(target, int(target * 1.5))
+        for index in range(1, len(paragraphs)):
+            paragraph = paragraphs[index]
+            similarity = cosine(vectors[index - 1], vectors[index])
+            boundary = (
+                current_chars >= target and similarity < similarity_threshold
+            ) or current_chars + len(paragraph) > maximum
+            if boundary:
+                groups.append(current)
+                current = []
+                current_chars = 0
+            current.append(paragraph)
+            current_chars += len(paragraph) + 2
+        if current:
+            groups.append(current)
+        return [
+            {
+                "content": "\n\n".join(group),
+                "embedding_content": "\n\n".join(group),
+                "chunk_index": index,
+                "char_count": len("\n\n".join(group)),
+                "block_type": "SEMANTIC",
+                "metadata_json": {
+                    "semantic_split": True,
+                    "similarity_threshold": similarity_threshold,
+                },
+            }
+            for index, group in enumerate(groups)
+        ]
 
 
 # ============================================================================
@@ -1055,7 +1122,7 @@ class _BlockAwareChunker:
     def _chunk_list(self, text: str, options: BlockAwareOptions) -> list[ChunkRecord]:
         """Chunk a list by item count. Small lists are kept whole."""
         lines = text.split('\n')
-        items = [l for l in lines if self._is_list_item(self._trim_right(l))]
+        items = [line for line in lines if self._is_list_item(self._trim_right(line))]
 
         if len(items) <= options.list_max_items:
             return [ChunkRecord(content=text, chunk_index=0)]
@@ -1063,7 +1130,6 @@ class _BlockAwareChunker:
         # Split large lists
         records: list[ChunkRecord] = []
         idx = 0
-        item_idx = 0
         for i in range(0, len(items), options.list_max_items):
             batch = items[i:i + options.list_max_items]
             records.append(ChunkRecord(content='\n'.join(batch), chunk_index=idx))
@@ -1089,8 +1155,6 @@ class _BlockAwareChunker:
 
         target = options.target_chars
         max_chars = options.max_chars
-        min_chars = options.min_chars
-
         if len(text) <= max_chars:
             return [ChunkRecord(content=text, chunk_index=0)]
 

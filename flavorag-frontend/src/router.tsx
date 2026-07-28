@@ -1,25 +1,33 @@
 import { createBrowserRouter, Navigate } from "react-router-dom";
+import { lazy, Suspense, type ReactNode } from "react";
 import App from "./App";
-import LoginPage from "./pages/LoginPage";
-import ChatPage from "./pages/ChatPage";
-import AdminLayout from "./pages/admin/AdminLayout";
-import DashboardPage from "./pages/admin/DashboardPage";
-import IntentTreePage from "./pages/admin/IntentTreePage";
-import SampleQuestionsPage from "./pages/admin/SampleQuestionsPage";
-import QueryTermMappingPage from "./pages/admin/QueryTermMappingPage";
-import TracesPage from "./pages/admin/TracesPage";
-import HealthPage from "./pages/admin/HealthPage";
-import MonitoringPage from "./pages/admin/MonitoringPage";
-import AuditLogPage from "./pages/admin/AuditLogPage";
-import SchedulePage from "./pages/admin/SchedulePage";
-import IngestionPipelinePage from "./pages/admin/IngestionPipelinePage";
-import EvaluationPage from "./pages/admin/EvaluationPage";
-import AccessControlPage from "./pages/admin/AccessControlPage";
-import UserProfilePage from "./pages/admin/UserProfilePage";
-import KnowledgeBasePage from "./pages/knowledge/KnowledgeBasePage";
-import KnowledgeBaseDetailPage from "./pages/knowledge/KnowledgeBaseDetailPage";
-import KnowledgeChunksPage from "./pages/knowledge/KnowledgeChunksPage";
-import NotFoundPage from "./pages/NotFoundPage";
+
+const LoginPage = lazy(() => import("./pages/LoginPage"));
+const ChatPage = lazy(() => import("./pages/ChatPage"));
+const AdminLayout = lazy(() => import("./pages/admin/AdminLayout"));
+const DashboardPage = lazy(() => import("./pages/admin/DashboardPage"));
+const IntentTreePage = lazy(() => import("./pages/admin/IntentTreePage"));
+const SampleQuestionsPage = lazy(() => import("./pages/admin/SampleQuestionsPage"));
+const QueryTermMappingPage = lazy(() => import("./pages/admin/QueryTermMappingPage"));
+const TracesPage = lazy(() => import("./pages/admin/TracesPage"));
+const HealthPage = lazy(() => import("./pages/admin/HealthPage"));
+const MonitoringPage = lazy(() => import("./pages/admin/MonitoringPage"));
+const AuditLogPage = lazy(() => import("./pages/admin/AuditLogPage"));
+const SchedulePage = lazy(() => import("./pages/admin/SchedulePage"));
+const IngestionPipelinePage = lazy(() => import("./pages/admin/IngestionPipelinePage"));
+const EvaluationPage = lazy(() => import("./pages/admin/EvaluationPage"));
+const AccessControlPage = lazy(() => import("./pages/admin/AccessControlPage"));
+const UserProfilePage = lazy(() => import("./pages/admin/UserProfilePage"));
+const KnowledgeBasePage = lazy(() => import("./pages/knowledge/KnowledgeBasePage"));
+const KnowledgeBaseDetailPage = lazy(() => import("./pages/knowledge/KnowledgeBaseDetailPage"));
+const KnowledgeChunksPage = lazy(() => import("./pages/knowledge/KnowledgeChunksPage"));
+const NotFoundPage = lazy(() => import("./pages/NotFoundPage"));
+
+const page = (content: ReactNode) => (
+  <Suspense fallback={<div className="p-8 text-sm text-slate-500">加载中…</div>}>
+    {content}
+  </Suspense>
+);
 
 export const router = createBrowserRouter([
   {
@@ -27,32 +35,32 @@ export const router = createBrowserRouter([
     element: <App />,
     children: [
       { index: true, element: <Navigate to="/chat" replace /> },
-      { path: "login", element: <LoginPage /> },
-      { path: "chat", element: <ChatPage /> },
-      { path: "chat/:sessionId", element: <ChatPage /> },
+      { path: "login", element: page(<LoginPage />) },
+      { path: "chat", element: page(<ChatPage />) },
+      { path: "chat/:sessionId", element: page(<ChatPage />) },
       {
         path: "admin",
-        element: <AdminLayout />,
+        element: page(<AdminLayout />),
         children: [
-          { index: true, element: <DashboardPage /> },
-          { path: "intent-tree", element: <IntentTreePage /> },
-          { path: "sample-questions", element: <SampleQuestionsPage /> },
-          { path: "query-mapping", element: <QueryTermMappingPage /> },
-          { path: "traces", element: <TracesPage /> },
-          { path: "health", element: <HealthPage /> },
-          { path: "monitoring", element: <MonitoringPage /> },
-          { path: "audit", element: <AuditLogPage /> },
-          { path: "schedule", element: <SchedulePage /> },
-          { path: "ingestion", element: <IngestionPipelinePage /> },
-          { path: "evaluation", element: <EvaluationPage /> },
-          { path: "access", element: <AccessControlPage /> },
-          { path: "profiles", element: <UserProfilePage /> },
+          { index: true, element: page(<DashboardPage />) },
+          { path: "intent-tree", element: page(<IntentTreePage />) },
+          { path: "sample-questions", element: page(<SampleQuestionsPage />) },
+          { path: "query-mapping", element: page(<QueryTermMappingPage />) },
+          { path: "traces", element: page(<TracesPage />) },
+          { path: "health", element: page(<HealthPage />) },
+          { path: "monitoring", element: page(<MonitoringPage />) },
+          { path: "audit", element: page(<AuditLogPage />) },
+          { path: "schedule", element: page(<SchedulePage />) },
+          { path: "ingestion", element: page(<IngestionPipelinePage />) },
+          { path: "evaluation", element: page(<EvaluationPage />) },
+          { path: "access", element: page(<AccessControlPage />) },
+          { path: "profiles", element: page(<UserProfilePage />) },
         ],
       },
-      { path: "knowledge", element: <KnowledgeBasePage /> },
-      { path: "knowledge/:kbId", element: <KnowledgeBaseDetailPage /> },
-      { path: "knowledge/:kbId/docs/:docId", element: <KnowledgeChunksPage /> },
-      { path: "*", element: <NotFoundPage /> },
+      { path: "knowledge", element: page(<KnowledgeBasePage />) },
+      { path: "knowledge/:kbId", element: page(<KnowledgeBaseDetailPage />) },
+      { path: "knowledge/:kbId/docs/:docId", element: page(<KnowledgeChunksPage />) },
+      { path: "*", element: page(<NotFoundPage />) },
     ],
   },
 ]);

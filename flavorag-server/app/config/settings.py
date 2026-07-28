@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     s3_access_key: str = "rustfsadmin"
     s3_secret_key: str = "rustfsadmin"
     s3_bucket: str = "flavorag-sources"
+    source_storage_backend: str = "local"
+    source_storage_prefix: str = "sources"
 
     # JWT
     jwt_secret_key: str = "change-me-in-production"
@@ -43,6 +45,10 @@ class Settings(BaseSettings):
     # LLM
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_model: str = "qwen-plus-latest"
+    llm_max_output_tokens: int = 2048
+    llm_generation_timeout_sec: float = 90.0
+    llm_context_window_tokens: int = 8192
+    llm_prompt_reserve_tokens: int = 800
     code_model: str = "deepseek-v3"
     doc_model: str = "qwen-plus-latest"
 
@@ -80,7 +86,11 @@ class Settings(BaseSettings):
     retrieval_channel_timeout_ms: int = 30000
     retrieval_total_timeout_ms: int = 35000
     retrieval_context_max_chars: int = 12000
-    retrieval_min_relevance_score: float = 0.01
+    retrieval_context_max_tokens: int = 3000
+    retrieval_min_relevance_score: float = 0.0
+    retrieval_rrf_min_score: float = 0.012
+    retrieval_vector_min_score: float = 0.35
+    retrieval_reranker_min_score: float = 0.0
     query_decomposition_enabled: bool = True
     query_decomposition_max_queries: int = 3
     retrieval_channel_weights: str = "vector:1.0,keyword:1.0,graph:0.65"
@@ -90,6 +100,7 @@ class Settings(BaseSettings):
     # Elasticsearch（可选）
     es_uris: str = "http://127.0.0.1:9200"
     es_enabled: bool = True
+    es_required: bool = False
     # 中文分词器（需安装 IK 插件；未安装时自动降级 standard）
     es_analyzer: str = "ik_max_word"
     es_search_analyzer: str = "ik_smart"
@@ -98,6 +109,7 @@ class Settings(BaseSettings):
     lightrag_base_url: str = "http://127.0.0.1:9621"
     lightrag_api_key: str = ""
     graph_enabled: bool = False
+    graph_required: bool = False
 
     # Neo4j（可选）
     neo4j_uri: str = "neo4j://127.0.0.1:7687"
@@ -116,6 +128,7 @@ class Settings(BaseSettings):
     intent_max_matches: int = 5
     intent_guidance_min_score: float = 0.55
     intent_guidance_score_gap: float = 0.08
+    query_understanding_timeout_sec: float = 20.0
 
     # TTFT 优化
     ttft_parallel_rewrite_intent: bool = True  # 并行执行 rewrite + intent
@@ -137,6 +150,9 @@ class Settings(BaseSettings):
     otel_enabled: bool = False
     otel_exporter_otlp_endpoint: str = "http://localhost:4318"
     otel_service_name: str = "flavorag-server"
+    trace_store_content: bool = False
+    trace_retention_days: int = 30
+    index_retired_retention_days: int = 7
 
     # 异步摄取（Outbox 任务表 + Worker）
     ingestion_async_enabled: bool = True
@@ -155,10 +171,20 @@ class Settings(BaseSettings):
     url_ingestion_timeout_sec: int = 120
     url_ingestion_max_redirects: int = 5
     url_allow_private_networks: bool = False
+    upload_max_bytes: int = 52428800
+    upload_batch_max_files: int = 20
+    upload_max_pdf_pages: int = 500
+    archive_max_uncompressed_bytes: int = 209715200
+    archive_max_entries: int = 10000
+    archive_max_compression_ratio: float = 200.0
+    upload_max_image_pixels: int = 100_000_000
+    pdf_ocr_max_concurrency: int = 4
 
     # Conversation and controlled agent
     conversation_summary_trigger_messages: int = 16
     conversation_summary_keep_recent_messages: int = 8
+    conversation_context_max_tokens: int = 2000
+    chat_max_input_tokens: int = 3000
     recommended_questions_enabled: bool = True
     recommended_questions_count: int = 3
     agentic_rag_enabled: bool = False
@@ -181,6 +207,7 @@ class Settings(BaseSettings):
     mem0_search_top_k: int = 5                         # 检索时拉取的记忆条数
 
     # 用户画像更新策略：incremental（每次对话后增量）| daily（每日定时全量）
+    mem0_min_relevance_score: float = 0.35
     profile_update_mode: str = "incremental"
     profile_daily_cron: str = "0 2 * * *"              # 每日凌晨 2 点执行
     profile_llm_model: str = "deepseek-v4-flash"        # 画像聚合 LLM

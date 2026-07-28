@@ -109,20 +109,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       streamingMessageId: assistantMsg.id,
     });
 
-    const params = new URLSearchParams({
+    const requestBody = {
       question: content.trim(),
-      deep_thinking: String(state.deepThinkingEnabled),
-      agentic_rag: String(state.agenticRagEnabled),
-      graph_rag: String(state.graphRagEnabled),
-      neighbor_expansion: String(state.neighborExpansionEnabled),
-      hyde: String(state.hydeEnabled),
-    });
-    if (state.currentSessionId) {
-      params.set("conversation_id", state.currentSessionId);
-    }
-    if (state.selectedKbId) {
-      params.set("kb_id", state.selectedKbId);
-    }
+      conversation_id: state.currentSessionId,
+      kb_id: state.selectedKbId,
+      deep_thinking: state.deepThinkingEnabled,
+      agentic_rag: state.agenticRagEnabled,
+      graph_rag: state.graphRagEnabled,
+      neighbor_expansion: state.neighborExpansionEnabled,
+      hyde: state.hydeEnabled,
+    };
 
     const handlers: StreamHandlers = {
       onProgress: (payload) => {
@@ -183,6 +179,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ? {
                   ...m,
                   id: payload.messageId || m.id,
+                  content: payload.fullAnswer ?? m.content,
                   sources: payload.sources,
                   recommendedQuestions: payload.recommendedQuestions,
                   ragModes: payload.modes || m.ragModes,
@@ -219,8 +216,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     };
 
     const { start, cancel } = createStreamResponse(
-      `/api/rag/v3/chat?${params.toString()}`,
-      handlers
+      "/api/rag/v3/chat",
+      handlers,
+      undefined,
+      requestBody
     );
     cancelFn = cancel;
     try {

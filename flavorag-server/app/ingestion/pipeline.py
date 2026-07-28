@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import os
 import time
 
@@ -25,10 +26,10 @@ class IngestionPipeline:
     Flow: Parse → Chunk → Embed → Index(Milvus) → Save(PG)
     """
 
-    def __init__(self):
+    def __init__(self, *, embedder=None):
         self.parser = DocumentParser()
         self.chunker = DocumentChunker()
-        self.embedder = get_embedding_client()
+        self.embedder = embedder or get_embedding_client()
         self.milvus = MilvusSearchChannel()
 
     async def run(
@@ -39,12 +40,13 @@ class IngestionPipeline:
         collection_name: str,
         db: AsyncSession,
         chunk_config: ChunkConfig | None = None,
+        generation: str = "v1",
     ) -> int:
         """Run the full ingestion pipeline.
 
         Returns the number of chunks created.
         """
-        from app.models import KnowledgeChunk, KnowledgeDocument
+        from app.models import KnowledgeAsset, KnowledgeChunk, KnowledgeDocument
 
         t0 = time.time()
         _ingest_log.info("ingestion_start", doc_id=doc_id, kb_id=kb_id, file_path=file_path)
@@ -80,7 +82,14 @@ class IngestionPipeline:
         else:
             if chunk_config is None:
                 chunk_config = ChunkConfig()
-            chunks = self.chunker.chunk(parsed_text, chunk_config)
+            if chunk_config.resolve_strategy().name == "SEMANTIC":
+                chunks = await self.chunker.chunk_semantic(
+                    parsed_text,
+                    chunk_config,
+                    embedder=self.embedder,
+                )
+            else:
+                chunks = self.chunker.chunk(parsed_text, chunk_config)
         chunk_ms = int((time.time() - t_chunk) * 1000)
         _ingest_log.info(
             "chunk",
@@ -129,6 +138,7 @@ class IngestionPipeline:
                     doc_id=doc_id,
                     created_by="system",
                     session=db,
+                    generation=generation,
                 )
                 materialize_asset_urls(chunks, asset_urls)
             except Exception:
@@ -157,6 +167,8 @@ class IngestionPipeline:
                     **(c.get("metadata_json") or {}),
                     "asset_ids": c.get("asset_ids", []),
                 },
+                generation=generation,
+                index_status="PENDING",
                 created_by="system",
             ))
 
@@ -169,12 +181,13 @@ class IngestionPipeline:
         doc_ids = [doc_id] * len(chunk_records)
         contents = [cr.content for cr in chunk_records]
 
-        self.milvus.insert(
-            collection_name=collection_name,
-            chunk_ids=chunk_ids,
-            doc_ids=doc_ids,
-            contents=contents,
-            vectors=vectors,
+        await asyncio.to_thread(
+            self.milvus.insert,
+            collection_name,
+            chunk_ids,
+            doc_ids,
+            contents,
+            vectors,
         )
 
         # 6. Update document status
@@ -187,12 +200,86 @@ class IngestionPipeline:
             doc.status = "success"
 
         # 7. Optional: ES keyword index
+        es_ok = True
         if settings.es_enabled:
-            await self._index_to_es(kb_id, chunk_records)
+            es_ok = await self._index_to_es(kb_id, chunk_records)
+            if not es_ok and settings.es_required:
+                raise RuntimeError("required Elasticsearch indexing failed")
 
         # 8. Optional: LightRAG graph sync
+        graph_ok = True
         if settings.graph_enabled:
-            await self._sync_to_lightrag(kb_id, chunk_records)
+            graph_ok = await self._sync_to_lightrag(kb_id, chunk_records)
+            if not graph_ok and settings.graph_required:
+                raise RuntimeError("required graph indexing failed")
+
+        # 8.5 Activate the new generation only after required indexes succeed.
+        previous = list(
+            (
+                await db.execute(
+                    select(KnowledgeChunk).where(
+                        KnowledgeChunk.doc_id == doc_id,
+                        KnowledgeChunk.generation != generation,
+                        KnowledgeChunk.index_status == "ACTIVE",
+                        KnowledgeChunk.deleted == 0,
+                    )
+                )
+            ).scalars().all()
+        )
+        for old in previous:
+            old.index_status = "SUPERSEDED"
+            old.deleted = 1
+        for current in chunk_records:
+            current.index_status = "ACTIVE"
+        previous_assets = list(
+            (
+                await db.execute(
+                    select(KnowledgeAsset).where(
+                        KnowledgeAsset.doc_id == doc_id,
+                        KnowledgeAsset.generation != generation,
+                        KnowledgeAsset.index_status == "ACTIVE",
+                        KnowledgeAsset.deleted == 0,
+                    )
+                )
+            ).scalars().all()
+        )
+        for old_asset in previous_assets:
+            old_asset.index_status = "SUPERSEDED"
+            old_asset.deleted = 1
+        current_assets = list(
+            (
+                await db.execute(
+                    select(KnowledgeAsset).where(
+                        KnowledgeAsset.doc_id == doc_id,
+                        KnowledgeAsset.generation == generation,
+                        KnowledgeAsset.index_status == "PENDING",
+                        KnowledgeAsset.deleted == 0,
+                    )
+                )
+            ).scalars().all()
+        )
+        for current_asset in current_assets:
+            current_asset.index_status = "ACTIVE"
+        if doc:
+            doc.active_generation = generation
+            doc.pending_generation = None
+
+        if not es_ok or not graph_ok:
+            from app.models import IndexRepairJob
+
+            for channel, ok in (("elasticsearch", es_ok), ("graph", graph_ok)):
+                if not ok:
+                    db.add(
+                        IndexRepairJob(
+                            kb_id=kb_id,
+                            doc_id=doc_id,
+                            generation=generation,
+                            channel=channel,
+                            operation="UPSERT",
+                            status="QUEUED",
+                        )
+                    )
+        await db.flush()
 
         total_ms = int((time.time() - t0) * 1000)
         _ingest_log.info(
@@ -228,7 +315,7 @@ class IngestionPipeline:
 
         return len(chunks)
 
-    async def _index_to_es(self, kb_id: str, chunks: list):
+    async def _index_to_es(self, kb_id: str, chunks: list) -> bool:
         """Index chunk content to Elasticsearch for BM25 keyword search.
 
         Best-effort: failures are logged (never silently swallowed) and do
@@ -253,6 +340,7 @@ class IngestionPipeline:
                 for c in chunks
             ]
             await ESKeywordSearchChannel().insert(payload, kb_id)
+            return True
         except Exception as exc:
             _ingest_log.warning(
                 "es_index_failed",
@@ -260,8 +348,9 @@ class IngestionPipeline:
                 chunk_count=len(chunks),
                 error=str(exc),
             )
+            return False
 
-    async def _sync_to_lightrag(self, kb_id: str, chunks: list):
+    async def _sync_to_lightrag(self, kb_id: str, chunks: list) -> bool:
         """Sync the reliable Neo4j graph, then enqueue LightRAG enrichment."""
         try:
             from app.models import KnowledgeBase
@@ -311,12 +400,14 @@ class IngestionPipeline:
                     kb_id=kb_id,
                     error=str(exc),
                 )
+            return True
         except Exception as exc:
             _ingest_log.warning(
                 "graph_sync_failed",
                 kb_id=kb_id,
                 error=str(exc),
             )
+            return False
 
 
 async def _log_chunk_processing(

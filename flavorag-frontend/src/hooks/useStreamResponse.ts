@@ -22,6 +22,7 @@ export interface StreamHandlers {
   onProgress?: (payload: { stage: string; message: string }) => void;
   onFinish?: (payload: {
     messageId: string;
+    fullAnswer?: string;
     sources?: SourceRef[];
     recommendedQuestions?: string[];
     modes?: RagModes;
@@ -36,7 +37,8 @@ export interface StreamHandlers {
 export function createStreamResponse(
   url: string,
   handlers: StreamHandlers,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  body?: Record<string, unknown>
 ) {
   const controller = new AbortController();
   const mergedSignal = signal ?? controller.signal;
@@ -45,10 +47,13 @@ export function createStreamResponse(
     try {
       const token = localStorage.getItem("token") || "";
       const response = await fetch(url, {
+        method: body ? "POST" : "GET",
         headers: {
           Accept: "text/event-stream",
           Authorization: token ? `Bearer ${token}` : "",
+          "Content-Type": "application/json",
         },
+        body: body ? JSON.stringify(body) : undefined,
         signal: mergedSignal,
       });
 

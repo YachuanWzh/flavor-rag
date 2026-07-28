@@ -1,6 +1,7 @@
 ﻿from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.auth import router as auth_router
 from app.api.knowledge import router as knowledge_router
@@ -33,6 +34,12 @@ _index_sync_scheduler = None
 _ingestion_watchdog = None
 _ingestion_job_worker = None
 _profile_scheduler = None
+_index_repair_worker = None
+_evaluation_job_worker = None
+_retention_worker = None
+_index_reconciliation_worker = None
+_index_build_worker = None
+_batch_import_worker = None
 
 
 async def _seed_admin_user():
@@ -122,6 +129,16 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         _log.warning("index_sync_retry_scheduler_failed", error=str(exc))
 
+    global _index_repair_worker
+    try:
+        from app.services.index_repair import IndexRepairWorker
+
+        _index_repair_worker = IndexRepairWorker()
+        await _index_repair_worker.start()
+        _log.info("index_repair_worker_started")
+    except Exception as exc:
+        _log.warning("index_repair_worker_failed", error=str(exc))
+
     global _ingestion_watchdog
     try:
         from app.services.ingestion_watchdog import IngestionWatchdog
@@ -131,6 +148,58 @@ async def lifespan(app: FastAPI):
         _log.info("ingestion_watchdog_started")
     except Exception as exc:
         _log.warning("ingestion_watchdog_failed", error=str(exc))
+
+    global _evaluation_job_worker
+    try:
+        from app.services.evaluation_jobs import EvaluationJobWorker
+
+        _evaluation_job_worker = EvaluationJobWorker()
+        await _evaluation_job_worker.start()
+        _log.info("evaluation_job_worker_started")
+    except Exception as exc:
+        _log.warning("evaluation_job_worker_failed", error=str(exc))
+
+    global _retention_worker
+    try:
+        from app.services.retention import RetentionWorker
+
+        _retention_worker = RetentionWorker()
+        await _retention_worker.start()
+        _log.info("retention_worker_started")
+    except Exception as exc:
+        _log.warning("retention_worker_failed", error=str(exc))
+
+    global _index_reconciliation_worker
+    try:
+        from app.services.index_reconciliation import (
+            IndexReconciliationWorker,
+        )
+
+        _index_reconciliation_worker = IndexReconciliationWorker()
+        await _index_reconciliation_worker.start()
+        _log.info("index_reconciliation_worker_started")
+    except Exception as exc:
+        _log.warning("index_reconciliation_worker_failed", error=str(exc))
+
+    global _index_build_worker
+    try:
+        from app.services.index_lifecycle import IndexBuildWorker
+
+        _index_build_worker = IndexBuildWorker()
+        await _index_build_worker.start()
+        _log.info("index_build_worker_started")
+    except Exception as exc:
+        _log.warning("index_build_worker_failed", error=str(exc))
+
+    global _batch_import_worker
+    try:
+        from app.services.batch_import import BatchImportWorker
+
+        _batch_import_worker = BatchImportWorker()
+        await _batch_import_worker.start()
+        _log.info("batch_import_worker_started")
+    except Exception as exc:
+        _log.warning("batch_import_worker_failed", error=str(exc))
 
     # Start async ingestion outbox worker
     global _ingestion_job_worker
@@ -180,12 +249,50 @@ async def lifespan(app: FastAPI):
             _log.info("index_sync_retry_scheduler_stopped")
         except Exception as exc:
             _log.warning("index_sync_retry_scheduler_stop_failed", error=str(exc))
+    if _index_repair_worker:
+        try:
+            await _index_repair_worker.stop()
+            _log.info("index_repair_worker_stopped")
+        except Exception as exc:
+            _log.warning("index_repair_worker_stop_failed", error=str(exc))
     if _ingestion_watchdog:
         try:
             await _ingestion_watchdog.stop()
             _log.info("ingestion_watchdog_stopped")
         except Exception as exc:
             _log.warning("ingestion_watchdog_stop_failed", error=str(exc))
+    if _evaluation_job_worker:
+        try:
+            await _evaluation_job_worker.stop()
+            _log.info("evaluation_job_worker_stopped")
+        except Exception as exc:
+            _log.warning("evaluation_job_worker_stop_failed", error=str(exc))
+    if _retention_worker:
+        try:
+            await _retention_worker.stop()
+            _log.info("retention_worker_stopped")
+        except Exception as exc:
+            _log.warning("retention_worker_stop_failed", error=str(exc))
+    if _index_reconciliation_worker:
+        try:
+            await _index_reconciliation_worker.stop()
+            _log.info("index_reconciliation_worker_stopped")
+        except Exception as exc:
+            _log.warning(
+                "index_reconciliation_worker_stop_failed", error=str(exc)
+            )
+    if _index_build_worker:
+        try:
+            await _index_build_worker.stop()
+            _log.info("index_build_worker_stopped")
+        except Exception as exc:
+            _log.warning("index_build_worker_stop_failed", error=str(exc))
+    if _batch_import_worker:
+        try:
+            await _batch_import_worker.stop()
+            _log.info("batch_import_worker_stopped")
+        except Exception as exc:
+            _log.warning("batch_import_worker_stop_failed", error=str(exc))
     if _ingestion_job_worker:
         try:
             await _ingestion_job_worker.stop()
@@ -198,6 +305,18 @@ async def lifespan(app: FastAPI):
             _log.info("profile_scheduler_stopped")
         except Exception as exc:
             _log.warning("profile_scheduler_stop_failed", error=str(exc))
+    try:
+        from app.rag.graph.neo4j_store import close_neo4j_driver
+
+        await close_neo4j_driver()
+    except Exception as exc:
+        _log.warning("neo4j_driver_close_failed", error=str(exc))
+    try:
+        from app.observability.otel import shutdown_otel
+
+        shutdown_otel()
+    except Exception as exc:
+        _log.warning("otel_shutdown_failed", error=str(exc))
     # Close shared ES client
     try:
         from app.rag.search.keyword import close_es_client
@@ -217,7 +336,7 @@ async def lifespan(app: FastAPI):
     _log.info("server_shutting_down")
 
 
-app = FastAPI(title="flavor-rag API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="flavor-rag API", version="0.0.5", lifespan=lifespan)
 
 app.add_middleware(AuditMiddleware)
 if settings.metrics_enabled:
@@ -252,7 +371,28 @@ app.include_router(user_profile_router)
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok"}
+    return {"status": "ok", "version": "0.0.5"}
+
+
+@app.get("/api/health/live")
+async def liveness_check():
+    return {"status": "ok", "version": "0.0.5"}
+
+
+@app.get("/api/health/ready")
+async def readiness_check():
+    from app.health import is_ready, readiness_checks
+
+    checks = await readiness_checks()
+    ready = is_ready(checks)
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={
+            "status": "ready" if ready else "not_ready",
+            "version": "0.0.5",
+            "checks": checks,
+        },
+    )
 
 
 @app.get("/metrics", include_in_schema=False)

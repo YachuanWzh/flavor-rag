@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.session import get_db, async_session_factory
 from app.auth.dependencies import get_admin_user
 from app.config.settings import settings
-from app.models import User, UserProfile, Message
+from app.models import User, UserProfile
 from app.memory.mem0_client import Mem0Manager
 from app.memory.profile_builder import build_or_update_profile
 

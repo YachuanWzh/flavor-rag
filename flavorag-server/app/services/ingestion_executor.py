@@ -25,8 +25,39 @@ async def execute_ingestion(
     tenant_id: str,
     chunk_config: ChunkConfig,
     pipeline_id: str | None = None,
+    generation: str = "v1",
 ) -> int:
     """Run ingestion for one document and update its status; returns chunk count."""
+    from app.ingestion.source_storage import materialize_source
+
+    async with materialize_source(file_path) as parser_path:
+        return await _execute_local_ingestion(
+            db,
+            kb=kb,
+            doc=doc,
+            file_path=parser_path,
+            source_type=source_type,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            chunk_config=chunk_config,
+            pipeline_id=pipeline_id,
+            generation=generation,
+        )
+
+
+async def _execute_local_ingestion(
+    db: AsyncSession,
+    *,
+    kb: KnowledgeBase,
+    doc: KnowledgeDocument,
+    file_path: str,
+    source_type: str,
+    user_id: str,
+    tenant_id: str,
+    chunk_config: ChunkConfig,
+    pipeline_id: str | None,
+    generation: str,
+) -> int:
     effective_pipeline_id = pipeline_id or kb.pipeline_id
     if effective_pipeline_id:
         engine = IngestionEngine()
@@ -39,6 +70,7 @@ async def execute_ingestion(
             doc_id=doc.id,
             user_id=user_id,
             tenant_id=tenant_id,
+            generation=generation,
             db=db,
         )
         if result.status == "error":
@@ -50,14 +82,19 @@ async def execute_ingestion(
         return result.chunk_count
 
     # Legacy: use old IngestionPipeline
-    pipeline = IngestionPipeline()
+    from app.llm.embedding import get_embedding_client
+
+    pipeline = IngestionPipeline(
+        embedder=get_embedding_client(model=kb.embedding_model)
+    )
     chunk_count = await pipeline.run(
         doc_id=doc.id,
         kb_id=kb.id,
         file_path=file_path,
-        collection_name=kb.collection_name,
+        collection_name=kb.active_collection_name or kb.collection_name,
         db=db,
         chunk_config=chunk_config,
+        generation=generation,
     )
     doc.status = "success"
     doc.chunk_count = chunk_count

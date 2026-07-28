@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from functools import partial
 from pymilvus import (
     Collection,
     connections,
@@ -14,6 +16,20 @@ from pymilvus import (
 from app.config.settings import settings
 from app.llm.embedding import get_embedding_client
 from app.rag.search.base import SearchChannel, SearchResult
+
+
+class EmbeddingDimensionMismatch(RuntimeError):
+    """Active index generation is incompatible with supplied vectors."""
+
+    def __init__(self, collection_name: str, expected: int, actual: int):
+        super().__init__(
+            f"embedding dimension mismatch for {collection_name}: "
+            f"active generation expects {expected}, received {actual}; "
+            "build and promote a new index generation"
+        )
+        self.collection_name = collection_name
+        self.expected = expected
+        self.actual = actual
 
 
 class MilvusSearchChannel(SearchChannel):
@@ -45,7 +61,7 @@ class MilvusSearchChannel(SearchChannel):
         full_name = f"rag_{collection_name}"
 
         if utility.has_collection(full_name):
-            self.drop_collection(collection_name)
+            return Collection(full_name)
 
         schema = CollectionSchema(
             fields=[
@@ -109,20 +125,26 @@ class MilvusSearchChannel(SearchChannel):
         query: str,
         collection_name: str,
         top_k: int = 10,
+        embedding_model: str | None = None,
     ) -> list[SearchResult]:
-        collection = self.get_collection(collection_name)
+        collection = await asyncio.to_thread(
+            self.get_collection, collection_name
+        )
         if collection is None:
             return []
 
-        embedder = get_embedding_client()
+        embedder = get_embedding_client(model=embedding_model)
         query_vector = await embedder.embed_query(query)
 
-        results = collection.search(
-            data=[query_vector],
-            anns_field="embedding",
-            param={"metric_type": "COSINE", "params": {"nprobe": 16}},
-            limit=top_k,
-            output_fields=["chunk_id", "content", "doc_id"],
+        results = await asyncio.to_thread(
+            partial(
+                collection.search,
+                data=[query_vector],
+                anns_field="embedding",
+                param={"metric_type": "COSINE", "params": {"nprobe": 16}},
+                limit=top_k,
+                output_fields=["chunk_id", "content", "doc_id"],
+            )
         )
 
         return [
@@ -157,7 +179,9 @@ class MilvusSearchChannel(SearchChannel):
             actual_dim = len(vectors[0])
             schema_dim = self._collection_dim(collection)
             if schema_dim is not None and schema_dim != actual_dim:
-                collection = self.create_collection(collection_name, dim=actual_dim)
+                raise EmbeddingDimensionMismatch(
+                    collection_name, schema_dim, actual_dim
+                )
 
         collection.insert([
             {
@@ -181,3 +205,55 @@ class MilvusSearchChannel(SearchChannel):
         encoded = ", ".join(json.dumps(cid) for cid in chunk_ids)
         collection.delete(expr=f"chunk_id in [{encoded}]")
         collection.flush()
+
+    def existing_chunk_ids(
+        self, collection_name: str, chunk_ids: list[str]
+    ) -> set[str]:
+        """Return the subset physically present in an active collection."""
+        if not chunk_ids:
+            return set()
+        collection = self.get_collection(collection_name)
+        if collection is None:
+            return set()
+        import json
+
+        found: set[str] = set()
+        for start in range(0, len(chunk_ids), 500):
+            batch = chunk_ids[start:start + 500]
+            encoded = ", ".join(json.dumps(value) for value in batch)
+            rows = collection.query(
+                expr=f"chunk_id in [{encoded}]",
+                output_fields=["chunk_id"],
+                limit=len(batch),
+            )
+            found.update(
+                str(row["chunk_id"])
+                for row in rows
+                if row.get("chunk_id")
+            )
+        return found
+
+    def all_chunk_ids(self, collection_name: str) -> set[str]:
+        """Stream all physical chunk IDs for orphan reconciliation."""
+        collection = self.get_collection(collection_name)
+        if collection is None:
+            return set()
+        iterator = collection.query_iterator(
+            batch_size=500,
+            expr="chunk_id != ''",
+            output_fields=["chunk_id"],
+        )
+        found: set[str] = set()
+        try:
+            while True:
+                rows = iterator.next()
+                if not rows:
+                    break
+                found.update(
+                    str(row["chunk_id"])
+                    for row in rows
+                    if row.get("chunk_id")
+                )
+        finally:
+            iterator.close()
+        return found

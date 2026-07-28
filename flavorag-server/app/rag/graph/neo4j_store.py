@@ -11,6 +11,15 @@ from neo4j import AsyncGraphDatabase
 from app.config.settings import settings
 from app.rag.search.base import SearchResult
 
+_driver_instance = None
+
+
+async def close_neo4j_driver() -> None:
+    global _driver_instance
+    if _driver_instance is not None:
+        await _driver_instance.close()
+        _driver_instance = None
+
 
 class Neo4jGraphStore:
     """Build and query a lightweight entity/co-occurrence graph.
@@ -21,10 +30,13 @@ class Neo4jGraphStore:
     """
 
     def _driver(self):
-        return AsyncGraphDatabase.driver(
-            settings.neo4j_uri,
-            auth=(settings.neo4j_user, settings.neo4j_password),
-        )
+        global _driver_instance
+        if _driver_instance is None:
+            _driver_instance = AsyncGraphDatabase.driver(
+                settings.neo4j_uri,
+                auth=(settings.neo4j_user, settings.neo4j_password),
+            )
+        return _driver_instance
 
     async def upsert_chunks(
         self,
@@ -137,7 +149,7 @@ class Neo4jGraphStore:
                     )
             return {"nodes": len(entity_rows), "edges": len(relation_rows)}
         finally:
-            await driver.close()
+            pass
 
     async def delete_document(self, *, kb_id: str, doc_id: str) -> None:
         driver = self._driver()
@@ -150,7 +162,7 @@ class Neo4jGraphStore:
                     doc_id=doc_id,
                 )
         finally:
-            await driver.close()
+            pass
 
     async def search(
         self,
@@ -192,7 +204,7 @@ class Neo4jGraphStore:
                 )
                 rows = await result.data()
         finally:
-            await driver.close()
+            pass
 
         output: list[SearchResult] = []
         seen_chunks: set[str] = set()
@@ -259,7 +271,7 @@ class Neo4jGraphStore:
                 )
                 raw_edges = await edge_result.data()
         finally:
-            await driver.close()
+            pass
 
         return {
             "nodes": [

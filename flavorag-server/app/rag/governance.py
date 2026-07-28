@@ -13,6 +13,18 @@ from app.observability.metrics import (
 from app.rag.search.base import SearchResult
 
 
+def estimate_tokens(text: str) -> int:
+    """Conservatively estimate mixed CJK/Latin tokens without model coupling."""
+    if not text:
+        return 0
+    import re
+
+    cjk = len(re.findall(r"[\u3400-\u9fff\uf900-\ufaff]", text))
+    non_cjk = re.sub(r"[\u3400-\u9fff\uf900-\ufaff]", " ", text)
+    groups = re.findall(r"\w+|[^\w\s]", non_cjk, flags=re.UNICODE)
+    return cjk + sum(max(1, (len(group) + 3) // 4) for group in groups)
+
+
 @dataclass(frozen=True)
 class RetrievalBudget:
     per_channel_top_k: int = 12
@@ -21,6 +33,7 @@ class RetrievalBudget:
     channel_timeout_ms: int = 30000
     total_timeout_ms: int = 35000
     context_max_chars: int = 12000
+    context_max_tokens: int = 0
     max_subqueries: int = 3
 
     def __post_init__(self):
@@ -206,6 +219,7 @@ def select_context(
     below = len(candidates) - len(eligible)
     selected: list[SearchResult] = []
     used_chars = 0
+    used_tokens = 0
     # Prefer evidence diversity before taking a second chunk from the same doc.
     grouped: dict[str, list[SearchResult]] = {}
     order: list[str] = []
@@ -228,10 +242,15 @@ def select_context(
         if len(selected) >= budget.final_top_k:
             break
         length = len(item.content)
-        if used_chars + length > budget.context_max_chars:
+        token_length = estimate_tokens(item.content)
+        if budget.context_max_tokens > 0:
+            if used_tokens + token_length > budget.context_max_tokens:
+                continue
+        elif used_chars + length > budget.context_max_chars:
             continue
         selected.append(item)
         used_chars += length
+        used_tokens += token_length
     dropped_budget = len(eligible) - len(selected)
     if not selected:
         return [], RetrievalDecision(

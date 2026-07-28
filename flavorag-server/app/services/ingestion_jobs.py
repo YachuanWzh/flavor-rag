@@ -11,6 +11,7 @@ Job state machine: QUEUED -> RUNNING -> SUCCESS | RETRY (backoff) | DEAD.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import socket
 import time
@@ -31,6 +32,7 @@ from app.observability.metrics import (
     INGESTION_JOB_LATENCY,
     INGESTION_JOBS,
     INGESTION_QUEUE_DEPTH,
+    INDEX_LAST_SUCCESS_TIMESTAMP,
 )
 
 _log = get_logger("flavorag.ingestion_jobs")
@@ -56,26 +58,69 @@ async def enqueue_ingestion_job(
     operation: str = "INGEST",
 ) -> IngestionJob:
     """Persist an outbox job in the caller's transaction; the doc becomes ``queued``."""
+    config_fingerprint = (
+        f"{chunk_config.strategy}:{chunk_config.chunk_size}:{chunk_config.overlap}"
+    )
+    raw_key = "|".join(
+        [
+            tenant_id or "default",
+            kb.id,
+            doc.id,
+            operation,
+            doc.content_hash or file_path,
+            pipeline_id or "",
+            config_fingerprint,
+        ]
+    )
+    idempotency_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    existing = (
+        await session.execute(
+            select(IngestionJob).where(
+                IngestionJob.idempotency_key == idempotency_key,
+                IngestionJob.deleted == 0,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        doc.status = (
+            "success" if existing.status == "SUCCESS" else "queued"
+        )
+        return existing
+
+    from app.ingestion.source_storage import persist_source
+
+    durable_path = await persist_source(
+        file_path,
+        kb_id=kb.id,
+        doc_id=doc.id,
+        filename=doc.doc_name,
+    )
+    doc.file_url = durable_path
+
+    generation = f"g_{gen_id()}"
     job = IngestionJob(
         id=gen_id(),
+        idempotency_key=idempotency_key,
         tenant_id=tenant_id or "default",
         kb_id=kb.id,
         doc_id=doc.id,
         pipeline_id=pipeline_id,
         source_type=source_type,
-        file_path=file_path,
+        file_path=durable_path,
         chunk_strategy=chunk_config.strategy,
         chunk_config_json={
             "chunkSize": chunk_config.chunk_size,
             "overlapSize": chunk_config.overlap,
         },
         operation=operation,
+        generation=generation,
         status="QUEUED",
         attempts=0,
         max_attempts=settings.ingestion_job_max_attempts,
         created_by=user_id,
     )
     session.add(job)
+    doc.pending_generation = generation
     doc.status = "queued"
     await session.flush()
     return job
@@ -201,7 +246,12 @@ class IngestionJobWorker:
                 ).scalar_one_or_none()
                 if kb is None or doc is None:
                     raise _PermanentJobError("knowledge base or document missing")
-                if not os.path.exists(job.file_path):
+                from app.ingestion.source_storage import is_object_source
+
+                if (
+                    not is_object_source(job.file_path)
+                    and not os.path.exists(job.file_path)
+                ):
                     raise _PermanentJobError(f"source file missing: {job.file_path}")
 
                 doc.status = "running"
@@ -220,6 +270,7 @@ class IngestionJobWorker:
                         overlap=int(config.get("overlapSize") or 128),
                     ),
                     pipeline_id=job.pipeline_id,
+                    generation=job.generation,
                 )
             except Exception as exc:
                 await session.rollback()
@@ -236,6 +287,7 @@ class IngestionJobWorker:
             await session.commit()
             INGESTION_JOBS.labels(result="success").inc()
             INGESTION_JOB_LATENCY.observe(elapsed)
+            INDEX_LAST_SUCCESS_TIMESTAMP.set(time.time())
             _log.info(
                 "ingestion_job_success",
                 job_id=job_id,

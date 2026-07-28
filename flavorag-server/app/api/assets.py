@@ -78,6 +78,7 @@ async def serve_asset(
         select(KnowledgeAsset).where(
             KnowledgeAsset.id == asset_id,
             KnowledgeAsset.deleted == 0,
+            KnowledgeAsset.index_status == "ACTIVE",
         )
     )
     asset = result.scalar_one_or_none()

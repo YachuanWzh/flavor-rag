@@ -10,7 +10,7 @@ import asyncio
 import hashlib
 import os
 import tempfile
-from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 from sqlalchemy import select
@@ -18,10 +18,8 @@ from sqlalchemy import select
 from app.config.settings import settings
 from app.config.logging_config import get_logger
 from app.database.session import async_session_factory
-from app.models import KnowledgeDocument, KnowledgeBase, KnowledgeChunk, KnowledgeAsset, gen_id
-from app.ingestion.pipeline import IngestionPipeline
+from app.models import KnowledgeDocument, KnowledgeBase, gen_id
 from app.ingestion.chunker import ChunkConfig
-from app.rag.search.vector import MilvusSearchChannel
 from app.ingestion.url_fetcher import SafeURLFetcher
 
 _log = get_logger("flavorag.scheduler.url_refresh")
@@ -34,9 +32,16 @@ class URLRefreshScheduler:
         self.poll_interval = poll_interval_sec
         self._task: asyncio.Task | None = None
         self._running = False
+        from app.services.schedule.lock_manager import ScheduleLockManager
+
+        self._leader_lock = ScheduleLockManager()
+        self._leader_key = "url-refresh-scheduler"
 
     async def start(self):
         if self._running:
+            return
+        if not await self._leader_lock.acquire(self._leader_key):
+            _log.info("url_refresh_scheduler_standby")
             return
         self._running = True
         self._task = asyncio.create_task(self._poll_loop())
@@ -50,6 +55,7 @@ class URLRefreshScheduler:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        await self._leader_lock.release(self._leader_key)
         _log.info("url_refresh_scheduler_stopped")
 
     async def _poll_loop(self):
@@ -121,8 +127,7 @@ class URLRefreshScheduler:
                 ext = self._guess_extension(fetched.final_url, fetched.content_type)
 
                 tmp_path = os.path.join(tempfile.gettempdir(), f"rag_url_{gen_id()}.{ext}")
-                with open(tmp_path, "wb") as f:
-                    f.write(content)
+                await asyncio.to_thread(Path(tmp_path).write_bytes, content)
 
                 try:
                     # Get collection name
@@ -135,42 +140,8 @@ class URLRefreshScheduler:
                     kb = kb_result.scalar_one_or_none()
                     if kb is None:
                         raise RuntimeError("knowledge base no longer exists")
-                    collection_name = kb.collection_name
-
-                    # Soft-delete old chunks
-                    chunks_result = await session.execute(
-                        select(KnowledgeChunk).where(
-                            KnowledgeChunk.doc_id == doc.id,
-                            KnowledgeChunk.deleted == 0,
-                        )
-                    )
-                    old_chunks = list(chunks_result.scalars().all())
-                    for chunk in old_chunks:
-                        chunk.deleted = 1
-                    assets_result = await session.execute(
-                        select(KnowledgeAsset).where(
-                            KnowledgeAsset.doc_id == doc.id,
-                            KnowledgeAsset.deleted == 0,
-                        )
-                    )
-                    old_assets = list(assets_result.scalars().all())
-                    for asset in old_assets:
-                        asset.deleted = 1
-
-                    if old_chunks or old_assets:
-                        from app.services.index_sync import IndexSyncService
-
-                        await IndexSyncService().delete_document(
-                            session,
-                            kb=kb,
-                            doc_id=doc.id,
-                            chunks=old_chunks,
-                            assets=old_assets,
-                        )
-
-                    await session.flush()
-
-                    # Re-ingest
+                    # Re-ingest into a pending generation; the active
+                    # generation remains queryable if any channel fails.
                     chunk_size = chunk_cfg.get("chunkSize", 512) if isinstance(chunk_cfg, dict) else 512
                     overlap_size = chunk_cfg.get("overlapSize", 128) if isinstance(chunk_cfg, dict) else 128
                     chunk_config = ChunkConfig(
@@ -178,14 +149,28 @@ class URLRefreshScheduler:
                         chunk_size=chunk_size,
                         overlap=overlap_size,
                     )
-                    pipeline = IngestionPipeline()
-                    chunk_count = await pipeline.run(
+                    from app.ingestion.source_storage import persist_source
+                    from app.services.ingestion_executor import execute_ingestion
+
+                    durable_source = await persist_source(
+                        tmp_path,
+                        kb_id=kb.id,
                         doc_id=doc.id,
-                        kb_id=doc.kb_id,
-                        file_path=tmp_path,
-                        collection_name=collection_name,
-                        db=session,
+                        filename=doc.doc_name,
+                    )
+                    doc.file_url = durable_source
+                    generation = f"g_{gen_id()}"
+                    doc.pending_generation = generation
+                    chunk_count = await execute_ingestion(
+                        session,
+                        kb=kb,
+                        doc=doc,
+                        file_path=durable_source,
+                        source_type="url",
+                        user_id=doc.updated_by or doc.created_by,
+                        tenant_id=doc.tenant_id or "default",
                         chunk_config=chunk_config,
+                        generation=generation,
                     )
 
                     # Store new content hash

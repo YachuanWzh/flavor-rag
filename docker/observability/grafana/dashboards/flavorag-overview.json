@@ -113,6 +113,33 @@
           "legendFormat": "open"
         }
       ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "RAG end-to-end p95",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "flavorag-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(flavorag_rag_end_to_end_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Missing active chunks",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "flavorag-prometheus" },
+      "targets": [
+        {
+          "expr": "flavorag_index_missing_chunks",
+          "legendFormat": "{{kb_id}}"
+        }
+      ]
     }
   ]
 }

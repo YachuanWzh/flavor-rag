@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   BarChart3,
   BookOpenText,
@@ -16,7 +23,8 @@ import {
   X,
 } from "lucide-react";
 import type { SourceRef } from "@/types";
-import DocumentPreviewModal from "./DocumentPreviewModal";
+
+const DocumentPreviewModal = lazy(() => import("./DocumentPreviewModal"));
 
 interface Props {
   open: boolean;
@@ -399,16 +407,18 @@ export default function SourcesDrawer({ open, sources, onClose, highlightIndex }
 
       {/* Document preview modal */}
       {previewSource && (
-        <DocumentPreviewModal
-          open={!!previewSource}
-          documentId={previewSource.documentId}
-          docName={previewSource.docName}
-          fileType={previewSource.fileType}
-          pageStart={previewSource.pageStart}
-          bboxes={previewSource.bboxes}
-          sourceContent={previewSource.content}
-          onClose={() => setPreviewSource(null)}
-        />
+        <Suspense fallback={null}>
+          <DocumentPreviewModal
+            open={!!previewSource}
+            documentId={previewSource.documentId}
+            docName={previewSource.docName}
+            fileType={previewSource.fileType}
+            pageStart={previewSource.pageStart}
+            bboxes={previewSource.bboxes}
+            sourceContent={previewSource.content}
+            onClose={() => setPreviewSource(null)}
+          />
+        </Suspense>
       )}
     </>
   );

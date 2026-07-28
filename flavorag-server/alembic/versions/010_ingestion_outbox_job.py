@@ -49,16 +49,19 @@ def upgrade() -> None:
         sa.Column("create_time", sa.DateTime),
         sa.Column("update_time", sa.DateTime),
         sa.Column("deleted", sa.SmallInteger, server_default="0"),
+        if_not_exists=True,
     )
     op.create_index(
         "idx_ingestion_job_claim",
         "t_ingestion_job",
         ["status", "next_retry_time", "create_time"],
+        if_not_exists=True,
     )
     op.create_index(
         "idx_ingestion_job_doc",
         "t_ingestion_job",
         ["tenant_id", "doc_id"],
+        if_not_exists=True,
     )
 
 

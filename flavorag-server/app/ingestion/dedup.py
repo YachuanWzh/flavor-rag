@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.logging_config import get_logger
@@ -144,14 +144,8 @@ class DuplicateDetector:
 
             # Find the closest existing chunk in the KB via postgres vector distance
             # (Milvus is used for retrieval; PG vector is used for dedup)
-            async_pg = await db.get_bind()
-            pg_url = str(async_pg.url).replace("+asyncpg", "")
-
-            from sqlalchemy import create_engine
-            import psycopg2
             import json
 
-            sync_url = pg_url.replace("postgresql://", "postgresql://", 1)
             # We use async session's connection for the vector query
             vector_str = json.dumps(query_vector)
             pg_result = await db.execute(

@@ -1,5 +1,4 @@
 """Tests for cross-element reference injection."""
-import pytest
 from app.ingestion.cross_reference import (
     inject_cross_references,
     _find_reference_sentences,

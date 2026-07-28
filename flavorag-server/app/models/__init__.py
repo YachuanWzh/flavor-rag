@@ -1,7 +1,7 @@
 ﻿import uuid
 from datetime import datetime, timezone
 from sqlalchemy import Column, String, Integer, SmallInteger, Text, BigInteger, DateTime, JSON, Float
-from sqlalchemy.orm import DeclarativeBase, declared_attr
+from sqlalchemy.orm import DeclarativeBase
 
 
 def _utcnow():
@@ -73,6 +73,7 @@ class Message(Base, TimestampMixin):
     id = Column(String(20), primary_key=True, default=gen_id)
     conversation_id = Column(String(20), nullable=False)
     user_id = Column(String(20), nullable=False)
+    tenant_id = Column(String(64), nullable=False, default="default")
     role = Column(String(16), nullable=False)
     content = Column(Text, nullable=False)
     thinking_content = Column(Text)
@@ -106,6 +107,8 @@ class KnowledgeBase(Base, TimestampMixin):
     name = Column(String(128), nullable=False)
     embedding_model = Column(String(64), nullable=False)
     collection_name = Column(String(64), nullable=False, unique=True)
+    active_collection_name = Column(String(128))
+    active_index_generation = Column(String(32), nullable=False, default="v1")
     pipeline_id = Column(String(20))
     tenant_id = Column(String(64), nullable=False, default="default")
     department_id = Column(String(64))
@@ -137,6 +140,8 @@ class KnowledgeDocument(Base, TimestampMixin):
     schedule_cron = Column(String(64))
     chunk_strategy = Column(String(32))
     chunk_config = Column(JSON)
+    active_generation = Column(String(32), nullable=False, default="v1")
+    pending_generation = Column(String(32))
     created_by = Column(String(20), nullable=False)
     updated_by = Column(String(20))
 
@@ -160,6 +165,8 @@ class KnowledgeChunk(Base, TimestampMixin):
     page_end = Column(Integer)
     bbox_json = Column(JSON)
     metadata_json = Column(JSON)
+    generation = Column(String(32), nullable=False, default="v1")
+    index_status = Column(String(16), nullable=False, default="ACTIVE")
     enabled = Column(SmallInteger, default=1)
     created_by = Column(String(20), nullable=False)
     updated_by = Column(String(20))
@@ -184,6 +191,8 @@ class KnowledgeAsset(Base, TimestampMixin):
     bbox_json = Column(JSON)
     description = Column(Text)
     metadata_json = Column(JSON)
+    generation = Column(String(32), nullable=False, default="v1")
+    index_status = Column(String(16), nullable=False, default="ACTIVE")
     created_by = Column(String(20), nullable=False)
     updated_by = Column(String(20))
 
@@ -325,6 +334,11 @@ class BatchImportJob(Base, TimestampMixin):
     status = Column(String(16), nullable=False, default="pending")  # pending/running/success/partial/error
     file_results = Column(JSON)  # list of per-file results
     error_message = Column(Text)
+    config_json = Column(JSON)
+    attempts = Column(Integer, nullable=False, default=0)
+    claimed_by = Column(String(64))
+    claimed_at = Column(DateTime)
+    next_retry_time = Column(DateTime)
     created_by = Column(String(20), nullable=False)
 
 
@@ -341,6 +355,7 @@ class BatchImportFileRecord(Base):
     doc_id = Column(String(20))
     chunk_count = Column(Integer, default=0)
     error_message = Column(Text)
+    source_location = Column(String(1024))
     create_time = Column(DateTime, default=_utcnow)
 
 
@@ -553,7 +568,7 @@ class EvaluationRun(Base):
     kb_id = Column(String(20), nullable=False)
     kb_name = Column(String(128), nullable=False)
     dataset_version = Column(String(64), nullable=False)
-    status = Column(String(16), nullable=False, default="running")
+    status = Column(String(16), nullable=False, default="queued")
     gate_status = Column(String(16), nullable=False, default="pending")
     config_json = Column(JSON, nullable=False)
     metrics_json = Column(JSON)
@@ -565,6 +580,11 @@ class EvaluationRun(Base):
     duration_ms = Column(BigInteger)
     started_at = Column(DateTime, default=_utcnow)
     completed_at = Column(DateTime)
+    attempts = Column(Integer, nullable=False, default=0)
+    claimed_by = Column(String(64))
+    claimed_at = Column(DateTime)
+    next_retry_time = Column(DateTime)
+    error_message = Column(Text)
     created_by = Column(String(20), nullable=False)
     create_time = Column(DateTime, default=_utcnow)
 
@@ -580,6 +600,7 @@ class IngestionJob(Base, TimestampMixin):
     __tablename__ = "t_ingestion_job"
 
     id = Column(String(20), primary_key=True, default=gen_id)
+    idempotency_key = Column(String(64), nullable=False, unique=True)
     tenant_id = Column(String(64), nullable=False, default="default")
     kb_id = Column(String(20), nullable=False)
     doc_id = Column(String(20), nullable=False)
@@ -589,6 +610,7 @@ class IngestionJob(Base, TimestampMixin):
     chunk_strategy = Column(String(32), nullable=False, default="FIXED_WINDOW")
     chunk_config_json = Column(JSON)
     operation = Column(String(24), nullable=False, default="INGEST")
+    generation = Column(String(32), nullable=False, default="v1")
     status = Column(String(16), nullable=False, default="QUEUED")
     attempts = Column(Integer, nullable=False, default=0)
     max_attempts = Column(Integer, nullable=False, default=3)
@@ -601,6 +623,45 @@ class IngestionJob(Base, TimestampMixin):
     chunk_count = Column(Integer, default=0)
     error_message = Column(Text)
     created_by = Column(String(20), nullable=False)
+
+
+class KnowledgeIndexGeneration(Base, TimestampMixin):
+    """Versioned physical-index build and promotion record."""
+
+    __tablename__ = "t_knowledge_index_generation"
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    kb_id = Column(String(20), nullable=False)
+    generation = Column(String(32), nullable=False)
+    collection_name = Column(String(128), nullable=False)
+    embedding_model = Column(String(128), nullable=False)
+    embedding_dim = Column(Integer, nullable=False)
+    parser_version = Column(String(64))
+    chunker_version = Column(String(64))
+    status = Column(String(16), nullable=False, default="BUILDING")
+    expected_chunks = Column(Integer, default=0)
+    indexed_chunks = Column(Integer, default=0)
+    activated_at = Column(DateTime)
+    error_message = Column(Text)
+    created_by = Column(String(20), nullable=False, default="system")
+
+
+class IndexRepairJob(Base, TimestampMixin):
+    """Visible retry queue for optional/failed external index channels."""
+
+    __tablename__ = "t_index_repair_job"
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    kb_id = Column(String(20), nullable=False)
+    doc_id = Column(String(20), nullable=False)
+    generation = Column(String(32), nullable=False)
+    channel = Column(String(24), nullable=False)
+    operation = Column(String(24), nullable=False, default="UPSERT")
+    status = Column(String(16), nullable=False, default="QUEUED")
+    attempts = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=5)
+    next_retry_time = Column(DateTime)
+    last_error = Column(Text)
 
 
 # ============================================================

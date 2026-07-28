@@ -16,6 +16,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Bootstrap an empty database from the current declarative metadata before
+    # applying compatibility DDL. This keeps ``alembic upgrade head`` as the
+    # single supported initialization command while remaining a no-op for
+    # existing installations.
+    from app.models import Base
+
+    Base.metadata.create_all(bind=op.get_bind())
+
     # --- Add pipeline_id column to t_knowledge_base ---
     op.execute(
         "ALTER TABLE t_knowledge_base "

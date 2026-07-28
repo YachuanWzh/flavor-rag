@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import mimetypes
 from dataclasses import dataclass
 
@@ -36,18 +37,33 @@ class S3PdfAssetStorage:
         self.bucket = settings.s3_bucket
         self._bucket_ready = False
 
-    async def upload(self, asset: PdfAsset, *, kb_id: str, doc_id: str) -> StoredPdfAsset:
-        return await asyncio.to_thread(self._upload_sync, asset, kb_id, doc_id)
+    async def upload(
+        self,
+        asset: PdfAsset,
+        *,
+        kb_id: str,
+        doc_id: str,
+        generation: str = "v1",
+    ) -> StoredPdfAsset:
+        return await asyncio.to_thread(
+            self._upload_sync, asset, kb_id, doc_id, generation
+        )
 
     async def delete_keys(self, storage_keys: list[str]) -> None:
         if not storage_keys:
             return
         await asyncio.to_thread(self._delete_keys_sync, storage_keys)
 
-    def _upload_sync(self, asset: PdfAsset, kb_id: str, doc_id: str) -> StoredPdfAsset:
+    def _upload_sync(
+        self, asset: PdfAsset, kb_id: str, doc_id: str, generation: str
+    ) -> StoredPdfAsset:
         self._ensure_bucket()
         extension = _extension_for(asset.filename, asset.mime_type)
-        key = f"assets/{kb_id}/{doc_id}/{asset.content_hash[:32]}{extension}"
+        generation_path = "" if generation == "v1" else f"{generation}/"
+        key = (
+            f"assets/{kb_id}/{doc_id}/{generation_path}"
+            f"{asset.content_hash[:32]}{extension}"
+        )
         self.client.put_object(
             Bucket=self.bucket,
             Key=key,
@@ -90,6 +106,7 @@ async def persist_pdf_assets(
     doc_id: str,
     created_by: str,
     session,
+    generation: str = "v1",
     storage: S3PdfAssetStorage | None = None,
 ) -> dict[str, str]:
     """Upload assets and add KnowledgeAsset rows to an existing transaction."""
@@ -99,7 +116,13 @@ async def persist_pdf_assets(
     from app.models import KnowledgeAsset, KnowledgeDocument
     from sqlalchemy import select
 
-    asset_ids = [asset.asset_id for asset in assets]
+    asset_ids = [
+        "asset_"
+        + hashlib.sha256(
+            f"{doc_id}:{generation}:{asset.content_hash}".encode()
+        ).hexdigest()[:26]
+        for asset in assets
+    ]
     existing_result = await session.execute(
         select(KnowledgeAsset).where(KnowledgeAsset.id.in_(asset_ids))
     )
@@ -118,14 +141,23 @@ async def persist_pdf_assets(
 
     mapping: dict[str, str] = {}
     uploaded_bytes = 0
-    for asset in assets:
-        stored = await storage.upload(asset, kb_id=kb_id, doc_id=doc_id)
-        mapping[asset.asset_id] = stored.storage_url
+    for asset, record_id in zip(assets, asset_ids, strict=True):
+        source_asset_id = asset.asset_id
+        stored = await storage.upload(
+            asset,
+            kb_id=kb_id,
+            doc_id=doc_id,
+            generation=generation,
+        )
+        # Chunks keep a stable, authenticated application URL. The underlying
+        # object-storage endpoint remains private and is never exposed as the
+        # durable citation/image URL.
+        mapping[source_asset_id] = f"/api/assets/{record_id}"
         uploaded_bytes += len(asset.data)
-        record = existing_by_id.get(asset.asset_id)
+        record = existing_by_id.get(record_id)
         if record is None:
             record = KnowledgeAsset(
-                id=asset.asset_id,
+                id=record_id,
                 kb_id=kb_id,
                 doc_id=doc_id,
                 tenant_id=tenant_id,
@@ -144,6 +176,8 @@ async def persist_pdf_assets(
         record.bbox_json = asset.bbox.to_dict() if asset.bbox else None
         record.description = asset.description or None
         record.metadata_json = asset.metadata
+        record.generation = generation
+        record.index_status = "PENDING"
         record.deleted = 0
     _log.info(
         "pdf_assets_persisted",

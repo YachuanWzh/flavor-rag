@@ -156,9 +156,8 @@ class ESKeywordSearchChannel(SearchChannel):
                 ))
             return results
         except Exception as exc:
-            # Search is best-effort: degrade to empty but never silently
             _log.warning("es_search_failed", kb_id=collection_name, error=str(exc))
-            return []
+            raise
 
     async def insert(self, chunks: list[dict], kb_id: str):
         """Bulk-index documents into ES.

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import os
-import tempfile
+import asyncio
+from pathlib import Path
 from datetime import datetime, timezone
 
 import httpx
@@ -23,7 +24,6 @@ from app.models import (
     KnowledgeDocumentScheduleExec,
     gen_id,
 )
-from app.rag.search.vector import MilvusSearchChannel
 from app.ingestion.url_fetcher import SafeURLFetcher
 
 _log = get_logger("flavorag.schedule.refresh")
@@ -85,14 +85,11 @@ class RefreshProcessor:
                 kb = kb_result.scalar_one_or_none()
                 if kb is None:
                     raise RuntimeError("knowledge base no longer exists")
-                collection_name = kb.collection_name
-
-                # Soft-delete old chunks
-                await self._cleanup_old_chunks(session, doc.id, kb)
-
-                # Re-ingest
-                from app.ingestion.pipeline import IngestionPipeline
+                # Re-ingest into a pending generation. The ingestion executor
+                # activates it only after every required index succeeds.
                 from app.ingestion.chunker import ChunkConfig, ChunkStrategy
+                from app.ingestion.source_storage import persist_source
+                from app.services.ingestion_executor import execute_ingestion
 
                 chunk_config = ChunkConfig()
                 if doc.chunk_strategy:
@@ -106,16 +103,27 @@ class RefreshProcessor:
                         chunk_config.chunk_size = int(cs)
                     ov = doc.chunk_config.get("overlapSize")
                     if ov:
-                        chunk_config.overlap_size = int(ov)
+                        chunk_config.overlap = int(ov)
 
-                pipeline = IngestionPipeline()
-                await pipeline.run(
+                durable_source = await persist_source(
+                    source_path,
+                    kb_id=kb.id,
                     doc_id=doc.id,
-                    kb_id=doc.kb_id,
-                    file_path=source_path,
-                    collection_name=collection_name,
-                    db=session,
+                    filename=doc.doc_name,
+                )
+                doc.file_url = durable_source
+                generation = f"g_{gen_id()}"
+                doc.pending_generation = generation
+                await execute_ingestion(
+                    session,
+                    kb=kb,
+                    doc=doc,
+                    file_path=durable_source,
+                    source_type=doc.source_type or "file",
+                    user_id=doc.updated_by or doc.created_by,
+                    tenant_id=doc.tenant_id or "default",
                     chunk_config=chunk_config,
+                    generation=generation,
                 )
 
                 # Update schedule state
@@ -192,7 +200,12 @@ class RefreshProcessor:
         """Resolve document source to a local file path."""
         # File documents: use file_url directly
         if doc.source_type == "file" or not doc.source_type:
-            if doc.file_url and os.path.exists(doc.file_url):
+            from app.ingestion.source_storage import is_object_source
+
+            if doc.file_url and (
+                is_object_source(doc.file_url)
+                or os.path.exists(doc.file_url)
+            ):
                 return doc.file_url
 
         # URL documents: download to temp
@@ -210,8 +223,9 @@ class RefreshProcessor:
                     f"{doc.id}.{ext}"
                 )
                 os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
-                with open(tmp_path, "wb") as f:
-                    f.write(fetched.content)
+                await asyncio.to_thread(
+                    Path(tmp_path).write_bytes, fetched.content
+                )
                 return tmp_path
             except Exception as exc:
                 _log.error("url_download_failed", doc_id=doc.id, error=str(exc))

@@ -134,4 +134,4 @@ def test_quality_gate_fails_closed_when_metrics_are_missing():
     gates = assess_quality_gates({"acl_leakage_count": 0}, top_k=5)
 
     assert gates["status"] == "failed"
-    assert gates["total"] == 8
+    assert gates["total"] == 17

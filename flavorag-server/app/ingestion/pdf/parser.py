@@ -11,9 +11,11 @@ import mimetypes
 import re
 import statistics
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 from app.config.logging_config import get_logger
+from app.config.settings import settings
 from app.ingestion.pdf.models import (
     PdfAsset,
     PdfBlock,
@@ -56,8 +58,7 @@ class StructuredPdfParser:
     async def parse_file(
         self, file_path: str, *, document_id: str = "", source_file: str = ""
     ) -> StructuredPdfDocument:
-        with open(file_path, "rb") as handle:
-            content = handle.read()
+        content = await asyncio.to_thread(Path(file_path).read_bytes)
         return await self.parse_bytes(
             content,
             document_id=document_id,
@@ -74,40 +75,14 @@ class StructuredPdfParser:
         if not content:
             raise ValueError("PDF content is empty")
 
-        try:
-            import pdfplumber
-            from pypdf import PdfReader
-        except ImportError as exc:
-            raise ImportError(
-                "pdfplumber and pypdf are required for structured PDF parsing"
-            ) from exc
-
-        table_blocks: list[PdfBlock] = []
-        text_blocks: list[PdfBlock] = []
-        assets: list[PdfAsset] = []
-        image_boxes_by_page: dict[int, list[PdfBoundingBox]] = {}
-        page_dimensions: dict[int, tuple[float, float]] = {}
-        native_chars_by_page: dict[int, int] = {}
-
-        with pdfplumber.open(BytesIO(content)) as pdf:
-            page_count = len(pdf.pages)
-            for page_index, page in enumerate(pdf.pages, start=1):
-                page_tables = self._extract_tables(page, page_index)
-                table_blocks.extend(page_tables)
-                table_boxes = [block.first_bbox for block in page_tables if block.first_bbox]
-                page_text_blocks = self._extract_text_blocks(page, page_index, table_boxes)
-                page_dimensions[page_index] = (float(page.width), float(page.height))
-                native_chars_by_page[page_index] = sum(
-                    len(block.content) for block in page_text_blocks
-                ) + sum(
-                    len(cell)
-                    for block in page_tables
-                    for row in [block.table_headers, *block.table_rows]
-                    for cell in row
-                )
-                self._annotate_table_context(page_tables, page_text_blocks)
-                text_blocks.extend(page_text_blocks)
-                image_boxes_by_page[page_index] = self._extract_image_boxes(page, page_index)
+        (
+            page_count,
+            table_blocks,
+            text_blocks,
+            page_dimensions,
+            native_chars_by_page,
+            assets,
+        ) = await asyncio.to_thread(self._extract_native_pdf, content)
 
         ocr_blocks = await self._extract_ocr_blocks(
             content,
@@ -116,8 +91,6 @@ class StructuredPdfParser:
         )
         text_blocks.extend(ocr_blocks)
 
-        reader = PdfReader(BytesIO(content))
-        assets = self._extract_image_assets(reader, image_boxes_by_page)
         asset_scope = (document_id or "unscoped").replace("-", "")[:8]
         for asset in assets:
             asset.asset_id = f"asset_{asset_scope}_{asset.content_hash[:16]}"
@@ -171,6 +144,71 @@ class StructuredPdfParser:
         )
         return document
 
+    def _extract_native_pdf(self, content: bytes) -> tuple[
+        int,
+        list[PdfBlock],
+        list[PdfBlock],
+        dict[int, tuple[float, float]],
+        dict[int, int],
+        list[PdfAsset],
+    ]:
+        """Run CPU/blocking PDF libraries outside the ASGI event loop."""
+        try:
+            import pdfplumber
+            from pypdf import PdfReader
+        except ImportError as exc:
+            raise ImportError(
+                "pdfplumber and pypdf are required for structured PDF parsing"
+            ) from exc
+
+        table_blocks: list[PdfBlock] = []
+        text_blocks: list[PdfBlock] = []
+        image_boxes_by_page: dict[int, list[PdfBoundingBox]] = {}
+        page_dimensions: dict[int, tuple[float, float]] = {}
+        native_chars_by_page: dict[int, int] = {}
+
+        with pdfplumber.open(BytesIO(content)) as pdf:
+            page_count = len(pdf.pages)
+            for page_index, page in enumerate(pdf.pages, start=1):
+                page_tables = self._extract_tables(page, page_index)
+                table_blocks.extend(page_tables)
+                table_boxes = [
+                    block.first_bbox
+                    for block in page_tables
+                    if block.first_bbox
+                ]
+                page_text_blocks = self._extract_text_blocks(
+                    page, page_index, table_boxes
+                )
+                page_dimensions[page_index] = (
+                    float(page.width),
+                    float(page.height),
+                )
+                native_chars_by_page[page_index] = sum(
+                    len(block.content) for block in page_text_blocks
+                ) + sum(
+                    len(cell)
+                    for block in page_tables
+                    for row in [block.table_headers, *block.table_rows]
+                    for cell in row
+                )
+                self._annotate_table_context(page_tables, page_text_blocks)
+                text_blocks.extend(page_text_blocks)
+                image_boxes_by_page[page_index] = self._extract_image_boxes(
+                    page, page_index
+                )
+
+        reader = PdfReader(BytesIO(content))
+        assets = self._extract_image_assets(reader, image_boxes_by_page)
+        return (
+            page_count,
+            table_blocks,
+            text_blocks,
+            page_dimensions,
+            native_chars_by_page,
+            assets,
+        )
+
     async def _extract_ocr_blocks(
         self,
         content: bytes,
@@ -188,20 +226,23 @@ class StructuredPdfParser:
         if not pages:
             return []
 
+        semaphore = asyncio.Semaphore(settings.pdf_ocr_max_concurrency)
+
         async def process(page_no: int) -> list[PdfBlock]:
             page_width, page_height = page_dimensions[page_no]
             try:
-                image = await asyncio.to_thread(
-                    _render_pdf_page_png,
-                    content,
-                    page_no,
-                )
-                recognized = await self.ocr_provider.recognize(
-                    image,
-                    page_no=page_no,
-                    page_width=page_width,
-                    page_height=page_height,
-                )
+                async with semaphore:
+                    image = await asyncio.to_thread(
+                        _render_pdf_page_png,
+                        content,
+                        page_no,
+                    )
+                    recognized = await self.ocr_provider.recognize(
+                        image,
+                        page_no=page_no,
+                        page_width=page_width,
+                        page_height=page_height,
+                    )
             except Exception as exc:
                 _log.warning("pdf_ocr_failed", page=page_no, error=str(exc))
                 return []

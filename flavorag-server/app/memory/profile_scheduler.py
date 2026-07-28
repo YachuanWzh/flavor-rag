@@ -6,9 +6,9 @@ cron time and rebuilds profiles for all active users.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
-from sqlalchemy import select, func, distinct
+from sqlalchemy import select, distinct
 
 from app.config.logging_config import get_logger
 from app.config.settings import settings
@@ -27,12 +27,19 @@ class ProfileDailyScheduler:
         self._running = False
         # Default: check every hour if it's time to run
         self._poll_interval_sec = 3600
+        from app.services.schedule.lock_manager import ScheduleLockManager
+
+        self._leader_lock = ScheduleLockManager()
+        self._leader_key = "profile-daily-scheduler"
 
     async def start(self):
         if self._running:
             return
         if settings.profile_update_mode != "daily":
             _log.info("profile_scheduler_disabled", mode=settings.profile_update_mode)
+            return
+        if not await self._leader_lock.acquire(self._leader_key):
+            _log.info("profile_scheduler_standby")
             return
         self._running = True
         self._task = asyncio.create_task(self._poll_loop())
@@ -46,6 +53,7 @@ class ProfileDailyScheduler:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        await self._leader_lock.release(self._leader_key)
         _log.info("profile_scheduler_stopped")
 
     async def _poll_loop(self):

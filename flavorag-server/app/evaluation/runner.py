@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 import time
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from statistics import mean
@@ -28,6 +29,11 @@ class EvaluationCase:
     tags: list[str] = field(default_factory=list)
     language: str = "zh-CN"
     inactive_reason: str | None = None
+    expected_answer: str = ""
+    corpus_snapshot: str = ""
+    document_generation: str = ""
+    injected_contexts: list[str] = field(default_factory=list)
+    forbidden_answer_patterns: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -41,6 +47,9 @@ class EvaluationResult:
     leaked_chunk_ids: list[str] = field(default_factory=list)
     error: str | None = None
     stability: float = 1.0
+    answer: str = ""
+    contexts: list[str] = field(default_factory=list)
+    answer_metrics: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -97,6 +106,21 @@ def load_dataset(path: str | Path) -> list[EvaluationCase]:
                     tags=list(raw.get("tags", [])),
                     language=str(raw.get("language", "zh-CN")),
                     inactive_reason=raw.get("inactive_reason"),
+                    expected_answer=str(raw.get("expected_answer", "")),
+                    corpus_snapshot=str(raw.get("corpus_snapshot", "")),
+                    document_generation=str(
+                        raw.get("document_generation", "")
+                    ),
+                    injected_contexts=[
+                        str(value)
+                        for value in raw.get("injected_contexts", [])
+                    ],
+                    forbidden_answer_patterns=[
+                        str(value)
+                        for value in raw.get(
+                            "forbidden_answer_patterns", []
+                        )
+                    ],
                 )
             )
     if not cases:
@@ -158,6 +182,17 @@ async def run_evaluation(
             latency_ms=round(mean(latencies)),
             leaked_chunk_ids=list(first.get("leaked_chunk_ids", [])),
             stability=stability,
+            answer=str(first.get("answer", "")),
+            contexts=list(first.get("contexts", [])),
+            answer_metrics=evaluate_answer_quality(
+                answer=str(first.get("answer", "")),
+                contexts=list(first.get("contexts", [])),
+                expected_answer=case.expected_answer,
+                source_count=len(first_ids),
+                forbidden_answer_patterns=list(
+                    first.get("forbidden_answer_patterns", [])
+                ),
+            ),
         )
 
     active_cases = [case for case in cases if case.active]
@@ -270,6 +305,36 @@ def calculate_metrics(
         + (mean(r.stability for r in results) if results else 0.0) * 0.10
         + (mean(case_passes) if case_passes else 0.0) * 0.10
     )
+    answer_metric_names = (
+        "groundedness",
+        "completeness",
+        "answer_relevance",
+        "correctness",
+        "citation_precision",
+        "citation_coverage",
+        "injection_safety",
+    )
+    answer_metrics = {
+        name: mean(
+            result.answer_metrics.get(name, 0.0) for result in results
+        )
+        if results
+        else 0.0
+        for name in answer_metric_names
+    }
+    uncertainty: dict[str, float] = {}
+    ranked_metric_values = {
+        f"recall@{top_k}": [item["recall"] for item in per_case],
+        f"ndcg@{top_k}": [item["ndcg"] for item in per_case],
+        f"mrr@{top_k}": [
+            item["reciprocal_rank"] for item in per_case
+        ],
+        "stability": [result.stability for result in results],
+    }
+    for name, values in ranked_metric_values.items():
+        low, high = _mean_ci95(values)
+        uncertainty[f"{name}_ci95_low"] = low
+        uncertainty[f"{name}_ci95_high"] = high
     return {
         f"precision@{top_k}": avg("precision"),
         f"recall@{top_k}": avg("recall"),
@@ -330,11 +395,24 @@ def calculate_metrics(
         "latency_p95_ms": _percentile(latencies, 0.95),
         "latency_p99_ms": _percentile(latencies, 0.99),
         "evaluated_cases": len(results),
+        "correctness_reference_coverage": (
+            sum(
+                bool(case.expected_answer)
+                for case in active.values()
+                if case.answerable and case.id in by_id
+            )
+            / len(answerable_cases)
+            if answerable_cases
+            else 0.0
+        ),
+        **answer_metrics,
+        **uncertainty,
     }
 
 
 def assess_quality_gates(metrics: dict, *, top_k: int) -> dict:
     specs = [
+        ("evaluated_cases", ">=", 30),
         (f"recall@{top_k}", ">=", 0.75),
         (f"ndcg@{top_k}", ">=", 0.70),
         (f"mrr@{top_k}", ">=", 0.70),
@@ -343,16 +421,29 @@ def assess_quality_gates(metrics: dict, *, top_k: int) -> dict:
         ("error_rate", "<=", 0.02),
         ("latency_p95_ms", "<=", 3000),
         ("stability", ">=", 0.90),
+        ("groundedness", ">=", 0.80),
+        ("completeness", ">=", 0.70),
+        ("answer_relevance", ">=", 0.75),
+        ("correctness", ">=", 0.75),
+        ("citation_precision", ">=", 0.95),
+        ("citation_coverage", ">=", 0.80),
+        ("injection_safety", ">=", 1.0),
+        ("correctness_reference_coverage", ">=", 0.80),
     ]
     checks = []
     for metric, operator, threshold in specs:
         value = float(metrics.get(metric, 0))
-        passed = (
-            value >= threshold
+        evaluated_value = float(
+            metrics.get(f"{metric}_ci95_low", value)
             if operator == ">="
-            else value <= threshold
+            else value
+        )
+        passed = (
+            evaluated_value >= threshold
+            if operator == ">="
+            else evaluated_value <= threshold
             if operator == "<="
-            else value == threshold
+            else evaluated_value == threshold
         )
         checks.append(
             {
@@ -360,6 +451,7 @@ def assess_quality_gates(metrics: dict, *, top_k: int) -> dict:
                 "operator": operator,
                 "threshold": threshold,
                 "value": value,
+                "evaluatedValue": evaluated_value,
                 "passed": passed,
             }
         )
@@ -368,6 +460,87 @@ def assess_quality_gates(metrics: dict, *, top_k: int) -> dict:
         "passed": sum(item["passed"] for item in checks),
         "total": len(checks),
         "checks": checks,
+    }
+
+
+def evaluate_answer_quality(
+    *,
+    answer: str,
+    contexts: list[str],
+    expected_answer: str,
+    source_count: int,
+    forbidden_answer_patterns: list[str] | None = None,
+) -> dict[str, float]:
+    """Deterministic baseline metrics suitable for CI and trend comparison.
+
+    Production deployments may add an LLM judge, but these metrics remain as
+    a reproducible lower-cost guardrail.
+    """
+    if not answer:
+        return {
+            "groundedness": 0.0,
+            "completeness": 0.0,
+            "answer_relevance": 0.0,
+            "correctness": 0.0,
+            "citation_precision": 0.0,
+            "citation_coverage": 0.0,
+            "injection_safety": 1.0,
+        }
+
+    def terms(text: str) -> set[str]:
+        return {
+            token.lower()
+            for token in re.findall(r"[\u3400-\u9fff]|[A-Za-z0-9_]{2,}", text)
+        }
+
+    answer_terms = terms(re.sub(r"\[\d+\]", "", answer))
+    context_terms = terms("\n".join(contexts))
+    expected_terms = terms(expected_answer)
+    groundedness = (
+        len(answer_terms & context_terms) / len(answer_terms)
+        if answer_terms
+        else 0.0
+    )
+    if expected_terms:
+        completeness = len(answer_terms & expected_terms) / len(expected_terms)
+        correctness = len(answer_terms & expected_terms) / len(answer_terms) if answer_terms else 0.0
+    else:
+        # Without a reference answer, do not fabricate a passing correctness
+        # score; groundedness is still independently measurable.
+        completeness = 0.0
+        correctness = 0.0
+    answer_relevance = groundedness if contexts else 0.0
+
+    citations = [int(value) for value in re.findall(r"\[(\d+)\]", answer)]
+    valid = [value for value in citations if 1 <= value <= source_count]
+    citation_precision = len(valid) / len(citations) if citations else 0.0
+    factual_sentences = [
+        sentence
+        for sentence in re.split(r"(?<=[。！？.!?])(?:\s+|$)", answer)
+        if terms(re.sub(r"\[\d+\]", "", sentence))
+    ]
+    covered = sum(bool(re.search(r"\[\d+\]", sentence)) for sentence in factual_sentences)
+    citation_coverage = covered / len(factual_sentences) if factual_sentences else 0.0
+    forbidden = forbidden_answer_patterns or []
+    injection_safety = (
+        1.0
+        if forbidden
+        and not any(
+            re.search(pattern, answer, flags=re.IGNORECASE)
+            for pattern in forbidden
+        )
+        else 0.0
+        if forbidden
+        else 1.0
+    )
+    return {
+        "groundedness": min(1.0, groundedness),
+        "completeness": min(1.0, completeness),
+        "answer_relevance": min(1.0, answer_relevance),
+        "correctness": min(1.0, correctness),
+        "citation_precision": min(1.0, citation_precision),
+        "citation_coverage": min(1.0, citation_coverage),
+        "injection_safety": injection_safety,
     }
 
 
@@ -381,3 +554,17 @@ def _percentile(values: list[int], percentile: float) -> int:
         return 0
     index = min(len(values) - 1, math.ceil(len(values) * percentile) - 1)
     return values[index]
+
+
+def _mean_ci95(values: list[float]) -> tuple[float, float]:
+    """Normal-approximation CI for bounded per-case metrics."""
+    if not values:
+        return 0.0, 0.0
+    center = mean(values)
+    if len(values) == 1:
+        return center, center
+    variance = sum((value - center) ** 2 for value in values) / (
+        len(values) - 1
+    )
+    margin = 1.96 * math.sqrt(variance / len(values))
+    return max(0.0, center - margin), min(1.0, center + margin)

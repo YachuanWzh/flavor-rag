@@ -116,8 +116,6 @@ class TestFixedWindowChunking:
         config = ChunkConfig(strategy="FIXED_WINDOW", chunk_size=15, overlap=5)
         chunks = self.chunker.chunk(text, config)
         assert len(chunks) >= 1
-        all_content = "".join(c["content"] for c in chunks)
-
 
 class TestSemanticChunking:
     def setup_method(self):

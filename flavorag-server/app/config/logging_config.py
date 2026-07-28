@@ -79,6 +79,42 @@ class _StructuredAdapter(logging.LoggerAdapter):
     them as key=value pairs.
     """
 
+    @staticmethod
+    def _sanitize_kwargs(kwargs: dict) -> None:
+        """Strip positional-or-keyword params that third-party callers may
+        inject (e.g. ``level``, ``msg``), preventing ``TypeError: got
+        multiple values for argument 'level'`` on Python 3.14+."""
+        kwargs.pop("level", None)
+        kwargs.pop("msg", None)
+
+    def log(self, *args, **kwargs):
+        self._sanitize_kwargs(kwargs)
+        return super().log(*args, **kwargs)
+
+    def info(self, *args, **kwargs):
+        self._sanitize_kwargs(kwargs)
+        return super().info(*args, **kwargs)
+
+    def warning(self, *args, **kwargs):
+        self._sanitize_kwargs(kwargs)
+        return super().warning(*args, **kwargs)
+
+    def error(self, *args, **kwargs):
+        self._sanitize_kwargs(kwargs)
+        return super().error(*args, **kwargs)
+
+    def debug(self, *args, **kwargs):
+        self._sanitize_kwargs(kwargs)
+        return super().debug(*args, **kwargs)
+
+    def critical(self, *args, **kwargs):
+        self._sanitize_kwargs(kwargs)
+        return super().critical(*args, **kwargs)
+
+    def exception(self, *args, **kwargs):
+        self._sanitize_kwargs(kwargs)
+        return super().exception(*args, **kwargs)
+
     def process(self, msg, kwargs):
         # Separate logging-internal kwargs from user-supplied structured fields
         logging_keys = {"exc_info", "extra", "stack_info", "stacklevel"}

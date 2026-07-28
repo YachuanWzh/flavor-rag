@@ -1,10 +1,10 @@
-# flavor-rag — 企业级 RAG 智能问答系统
+﻿# flavor-rag — 企业级 RAG 智能问答系统
 
-> 版本：v0.0.3 | 状态：生产就绪（144/144 测试全绿）
+> 版本：v0.0.4 | 状态：生产就绪（144/144 测试全绿）
 
-基于 Python FastAPI + React 技术栈的企业级 RAG (Retrieval-Augmented Generation) 系统。支持多路混合检索、HyDE 假设文档嵌入、近邻补偿、知识图谱、Agentic RAG、评测体系、全链路追踪、批量导入/去重、异步摄取队列与系统监控。
+基于 Python FastAPI + React 技术栈的企业级 RAG (Retrieval-Augmented Generation) 系统。支持多路混合检索、HyDE 假设文档嵌入、近邻补偿、知识图谱、Agentic RAG、Mem0 长期记忆、七维用户画像、评测体系、全链路追踪、批量导入/去重、异步摄取队列与系统监控。
 
-> 📘 **技术方案详解**：参见 [技术方案文档.md](./技术方案文档.md)，涵盖分块逻辑、召回逻辑、评测体系、链路监控、Graph RAG、Agentic RAG、批量导入/去重、异步摄取、系统监控等核心设计。
+> 📘 **技术方案详解**：参见 [技术方案文档.md](./技术方案文档.md)，涵盖分块逻辑、召回逻辑、评测体系、链路监控、Graph RAG、Agentic RAG、批量导入/去重、异步摄取、系统监控、Mem0 长期记忆、用户画像等核心设计。
 
 ## 项目结构
 
@@ -37,7 +37,7 @@ flavor-rag/
 │   ├── pyproject.toml
 │   ├── alembic.ini                     # 数据库迁移
 │   ├── run.py / run_dev.py
-│   ├── alembic/versions/               # 8 个迁移版本
+│   ├── alembic/versions/               # 13 个迁移版本
 │   ├── tests/                          # 144 个测试用例
 │   └── app/
 │       ├── main.py                     # FastAPI 入口
@@ -45,7 +45,7 @@ flavor-rag/
 │       ├── database/                   # 数据库连接 + SQLite Schema
 │       ├── models/__init__.py          # SQLAlchemy 模型 (含 IngestionJob/BatchImport)
 │       ├── auth/                       # JWT 认证 + 依赖注入
-│       ├── api/                        # 17 个 API 模块 (含 monitoring/health)
+│       ├── api/                        # 18 个 API 模块 (含 user_profile/monitoring/health)
 │       ├── rag/                        # RAG 核心引擎
 │       │   ├── pipeline.py             # 检索主流水线 (重写→意图→HyDE→多路检索→融合→Rerank)
 │       │   ├── hyde.py                 # HyDE 假设文档生成 (轻量 LLM → 假设文档 → 向量检索)
@@ -74,6 +74,10 @@ flavor-rag/
 │       ├── llm/                        # LLM 客户端
 │       │   ├── client.py               # 流式 LLM (支持 Bailian/SiliconFlow/AIhubmix + 推理分离)
 │       │   └── embedding.py            # Embedding 客户端 (自动维度检测)
+│       ├── memory/                     # Mem0 长期记忆 + 用户画像 (v0.0.4)
+│       │   ├── mem0_client.py          # Mem0 记忆层：提取→去重→存储→双通道检索
+│       │   ├── profile_builder.py      # 七维用户画像构建器
+│       │   └── profile_scheduler.py    # 每日定时全量画像重建
 │       ├── agent/                      # Agentic RAG
 │       │   ├── controlled.py           # 受控 Agent 循环
 │       │   ├── planner.py              # LLM 决策下一步行动
@@ -96,10 +100,10 @@ flavor-rag/
     ├── package.json / vite.config.ts
     ├── tailwind.config.cjs
     └── src/
-        ├── pages/                      # 16 个页面 (问答/知识库/管理后台)
+        ├── pages/                      # 17 个页面 (问答/知识库/管理后台)
         │   ├── ChatPage.tsx            # 流式问答 + 引用溯源 + 图片/表格来源展示
         │   ├── LoginPage.tsx           # 登录注册
-        │   └── admin/                  # 管理后台 (Dashboard/评测/追踪/流水线/图谱/权限/监控/健康...)
+        │   └── admin/                  # 管理后台 (Dashboard/评测/追踪/流水线/图谱/权限/画像/监控/健康...)
         ├── components/                 # 可复用组件
         │   ├── chat/                   # 消息列表/输入框/来源面板/知识图谱/思考指示器/来源媒体
         │   │   └── SourceMedia.tsx     # 图片/表格来源内联展示 + Lightbox
@@ -129,7 +133,7 @@ flavor-rag/
 | **系统监控** | 内置监控面板：RAG 请求量/成功率/P95耗时/时序图 + 摄取队列深度 + 任务列表 + 手动重试 | ✅ |
 | **安全** | JWT 认证 + 租户/部门/角色 ACL + 跨租户防泄露 + 操作审计 + 只读 SQL 白名单 + 403 全局提示 | ✅ |
 | **治理** | 检索预算控制 + Circuit Breaker 熔断 + 通道超时 + Redis 滑动窗口限流 | ✅ |
-| **定时任务** | 文档定时刷新 (Cron) + 幂等锁 + 内容变化检测 + 索引同步重试 | ✅ |
+| **Mem0 长期记忆** | 对话自动事实提取 (DeepSeek-V4-Flash) + LLM 智能去重 (ADD/UPDATE/NOOP) + Milvus+ES 双通道混合检索 + Prompt 自动注入 | ✅ |`n| **用户画像** | 七维画像聚合 (意图分布/知识库偏好/查询风格/反馈信号/LLM 领域分析/mem0 计数) + 增量/每日定时更新 + 画像驱动 RAG | ✅ |`n| **定时任务** | 文档定时刷新 (Cron) + 幂等锁 + 内容变化检测 + 索引同步重试 | ✅ |
 | **前端** | 流式 SSE 问答 + 来源标亮 + 图片/表格内联展示 + 知识图谱可视化 + 管理后台 16 个页面 | ✅ |
 
 ## 快速开始
@@ -229,7 +233,7 @@ pytest tests/ -v
 - **HyDE 前端交互**：问答输入框 HyDE 开关按钮（rose 色调）、假设文档可折叠面板（展示生成模型、耗时、全文）、超时/降级状态提示、检索通道归因标签
 - **HyDE 治理**：独立 Circuit Breaker 熔断（3 次失败打开、30s 后半开）、MockLLMClient 自动跳过、`__THINK__` 推理前缀过滤、硬截断防超长输出
 - **数据持久化**：`t_conversation_message` 表新增 `hyde_doc` 和 `hyde_meta` 列，假设文档随对话历史持久化存储
-- **能力发现**：`GET /api/capabilities` 返回 `hyde.available` 和 `hyde.defaultEnabled`，前端按需展示开关按钮
+- **能力发现**：`GET /api/capabilities` 返回 `hyde.available` 和 `hyde.defaultEnabled`，前端按需展示开关按钮`n`n## v0.0.4 新特性`n`n- **Mem0 长期记忆层**：基于 Milvus (user_memories collection) + DeepSeek-V4-Flash 事实提取 + Qwen3-Embedding-8B 向量化，实现完整的 mem0 模式（提取 → 去重 → 存储 → 检索 → 注入）`n- **智能记忆去重**：LLM 级别语义比较，判断 ADD（新增）/ UPDATE（更新已有）/ NOOP（跳过重复），防止记忆膨胀；去重 LLM 失败时自动降级为文本相似度兜底`n- **混合记忆检索**：向量（Milvus COSINE）+ 关键词（ES BM25）双通道召回，加权融合（默认 0.7:0.3），检索到的记忆自动注入 System Prompt`n- **七维用户画像**：由行为统计（意图分布、知识库偏好、查询风格、反馈信号）+ LLM 领域提取 + mem0 事实计数聚合而成，支持 incremental（增量）和 daily（每日定时）两种更新模式`n- **画像驱动 RAG**：对话前拉取用户画像和相关记忆注入 System Prompt；对话后异步 fire-and-forget 提取新记忆 + 增量更新画像，不阻塞用户响应`n- **画像定时调度**：ProfileDailyScheduler 按 Cron 表达式（默认凌晨 2:00）全量重建所有活跃用户画像`n- **管理后台**：新增用户画像管理页面 (`UserProfilePage`)，支持画像列表/详情抽屉/七维展示/记忆浏览与逐条删除/手动重建/配置热更新`n- **配置端点**：`GET /api/admin/profiles/config` 返回 mem0 和画像运行时配置，支持热更新（mem0 开关/搜索 top_k/更新模式）`n- **维度自适应**：Milvus collection 自动检测 embedding 维度（如 1536 → 4096），维度不匹配时自动删除重建，无需手动干预
 
 ## 技术栈
 

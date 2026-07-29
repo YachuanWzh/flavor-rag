@@ -4,99 +4,6 @@
 
 flavor-rag 是一个面向企业知识库的全链路 RAG 系统，覆盖多格式摄取、版本化索引、混合检索、证据约束生成、引用、长期记忆、离线评测和生产可观测性。本版本不把登录与权限作为企业级结论的一部分；重点是 RAG 数据面的正确性、可恢复性和可运维性。
 
-## v0.0.8 关键变化
-
-多知识库检索时，搜索结果简单拼接会导致“位置偏差”——排在后面的知识库被系统性截断；
-Reranker 的马太效应又让高分库占据全部名额。v0.0.8 从三个层面解决跨库召回公平性：
-
-- **KB Interleave**：多库搜索结果不再简单拼接，而是按知识库做 Round-Robin 交错排列，保证每个库在列表前部都有均匀代表。
-- **Per-KB 配额**：Rerank 后检查每个知识库的实际入选数，不足配额时从过度集中的库踢出最低分条目，换入不足库的次优候选。
-- **Fallback Pool**：当 Reranker 截断后某库候选不足时，从 pre-rerank 完整候选池中补入，避免“无米下锅”。
-- **来源归因标注**：上下文每段证据标注所属知识库和文档名，LLM 可以在回答中正确归因。
-- **Rewrite/Intent 降级**：查询改写和意图识别超时或异常时自动回退到原始查询 + 通用意图，不阻塞检索。
-- **单库零影响**：所有新增逻辑均有 `len(scopes) > 1` 守卫，单知识库查询走原有路径，无任何行为变化。
-
-```mermaid
-flowchart LR
-    S["多 Scope 搜索"] --> IL["KB Interleave"]
-    IL --> F["RRF + 去重"]
-    F --> RR["Rerank"]
-    RR --> Q["Per-KB Quota"]
-    Q --> FB["Fallback Pool 补入"]
-    FB --> LLM["带来源标注的 LLM 生成"]
-```
-
-配置：
-
-```dotenv
-RETRIEVAL_KB_QUOTA_ENABLED=true
-RETRIEVAL_KB_MIN_QUOTA=2
-RETRIEVAL_FINAL_TOP_K=20
-RETRIEVAL_CONTEXT_MAX_TOKENS=12000
-RETRIEVAL_CONTEXT_MAX_CHARS=24000
-LLM_CONTEXT_WINDOW_TOKENS=32768
-```
-
-## v0.0.7 关键变化
-
-以前的跨库边主要回答“两个库里有没有同名实体”。这很稳定，但 `JSON`、`API`
-这类通用词即使同时出现，也不代表两个知识库真的有关。v0.0.7 改为三层混合图谱：
-
-- **基础层（不调用 LLM）**：标题、代码标识符和同一 chunk 共现关系，保证模型不可用时仍有图。
-- **语义层（轻量 LLM）**：从原文抽取 `USES`、`DEPENDS_ON`、`IMPLEMENTS` 等白名单关系。每条边必须带原文证据、chunk ID、置信度、模型和 prompt 版本；实体或证据不在原文、关系类型越界、置信度低于阈值都会被拒绝。
-- **跨库层（高精度对齐）**：只把同租户、不同库中的有效同名实体作为跨库锚点。`JSON`、`API`、`HTTP`、`XML`、`YAML` 等通用词明确禁止生成名称型跨库桥，避免“都提过一个常见词”造成假关联。
-- **增量维护**：新建或修改文档时自动替换该文档的旧语义边；删除文档时清理其图节点并重建受影响的跨库桥；删除知识库沿用逐文档清理。新增知识库不需要额外操作，第一篇文档入库时自然进入图谱。
-- **失败可恢复**：语义 provider 临时失败不会回滚已写好的基础图；系统会创建持久化 Graph repair job，按退避策略自动重跑。
-- **历史数据原地升级**：不用新建知识库，也不用重新 chunk/Embedding。名称桥继续使用 `python -m app.rag.graph.backfill --apply`；语义关系先用 `python -m app.rag.graph.semantic_backfill` 预览，再加 `--apply` 从现有 active chunks 抽取。
-- **看得见证据**：知识星图选中实体后会展示关系类型、置信度和支持该关系的原文，方便人工判断这条边是否可信。
-- **一遍过门禁**：后端 `221 passed`，前端 `12 passed`，TypeScript 与 Vite 生产构建通过；真实数据验证了 `flavor-code → Harness → huamulan-agent` 的语义边 + 跨库锚点路径。
-
-```mermaid
-flowchart LR
-    D["新增 / 修改文档"] --> C["现有 chunks"]
-    C --> B["规则基础图"]
-    C --> L["轻量 LLM 关系抽取"]
-    L --> V{"原文证据 + 类型白名单 + 置信度"}
-    V -->|通过| S["SEMANTIC_RELATED"]
-    V -->|拒绝| X["不写入"]
-    B --> A["有效实体跨库对齐"]
-    S --> A
-    A --> G["可追溯知识星图"]
-    R["删除文档 / 知识库"] --> K["删除所属节点和边并局部重建跨库桥"]
-```
-
-该方案采用业界常见的“结构化抽取 + 实体消歧 + 证据来源 + 增量更新”组合，而不是让
-LLM 自由生成整张图。设计参考
-[Microsoft GraphRAG 方法](https://microsoft.github.io/graphrag/index/methods/)、
-[GraphRAG 输出模型](https://microsoft.github.io/graphrag/index/outputs/)和
-[Neo4j GraphRAG Knowledge Graph Builder](https://neo4j.com/docs/neo4j-graphrag-python/current/user_guide_kg_builder.html)。
-
-## v0.0.6 关键变化
-
-- **跨库检索**：知识库选择器新增“全部知识库”，显式使用 `kb_id=*`；服务端只展开当前用户有读取权限的知识库，向量、BM25、Neo4j 和 LightRAG 按库并发检索，融合后由 PostgreSQL 按精确 KB 集合与文档 ACL 再次过滤。
-- **强制 Graph RAG**：选择“全部知识库”后前端自动开启并锁定 Graph RAG；服务端也会忽略伪造的 `graph_rag=false`，确保跨库请求始终调度图谱通道。
-- **跨库知识关联**：Neo4j 实体新增 `tenant_id`、`normalized_name` 与 `cross_linkable`，过滤通用噪声后，同租户、不同知识库的规范化同名实体通过代表性 `CROSS_KB_RELATED` 关联；历史图可原地回填，后续文档增删改自动维护受影响的跨库桥。
-- **分类型知识星图**：单库最多 200 实体，全库按实体类型分别最多 200；支持“知识库 × 类型”语义缩放聚合、可视域与 overscan 裁剪、最多 420 个详情节点绘制预算、画布拖拽和指针锚定缩放。
-- **Graph 召回动效**：Graph 通道实际召回证据后，前端从查询匹配实体出发高亮连通路径，显示节点呼吸与边光流；`prefers-reduced-motion` 下自动降级为静态高亮。
-- **知识库创建修复**：前端不再硬编码无效的 Embedding 简写；服务端以 `EMBEDDING_MODEL` 为默认权威，并兼容旧值 `qwen3-embedding-8b`，统一规范化为 SiliconFlow 可识别的 `Qwen/Qwen3-Embedding-8B`。
-- **SDD + TDD**：新增跨库 Graph RAG、分类型容量、视域渲染与知识库创建契约测试；后端全量 `207 passed`，前端 `12 passed`、TypeScript、生产构建及真实 333 节点全库视觉 QA 通过。
-
-详细设计见 [跨知识库 Graph RAG SDD](docs/specs/cross-knowledge-base-graph-rag.md)，部署与故障处理见 [运维手册](docs/operations-runbook.md)，完整实现说明见 [技术方案文档](技术方案文档.md)。
-
-## v0.0.5 关键变化
-
-- 非破坏性索引：embedding 模型或维度不匹配会显式失败，不再自动删除 collection。全量重建写入新的物理 generation，校验完成后原子切换 active collection。
-- 一致性摄取：摄取使用稳定 idempotency key；新 chunk 和 PDF asset 先进入 `PENDING`，Milvus 及 required channel 成功后才激活。失败时旧 generation 继续服务。
-- 持久化后台任务：单文档摄取、批量导入、评测和索引重建均由 PostgreSQL 队列驱动，可在进程崩溃后恢复；多副本通过 `SKIP LOCKED` 或 advisory lock 协调。
-- 自动对账修复：定时对比 PostgreSQL active chunk 与 Milvus，缺失文档进入 repair queue，孤儿向量被清理；optional channel 失败可见且指数退避。
-- 检索正确性：修复推测检索跨 query/collection 误复用、HyDE 丢失、冻结预算对象修改、通道异常伪装为空结果和不同分数域共用阈值等问题。
-- Prompt 与引用安全：检索证据、记忆和画像均按不可信数据注入；最终引用会校验索引和证据重叠，流式内容、finish 事件和持久化答案保持一致。
-- 有界文档处理：限制文件大小、批量数、PDF 页数、压缩包展开大小/文件数/压缩比、图片像素和 OCR/VLM 并发；阻塞 PDF 解析与同步 SDK 调用移出事件循环。
-- 企业评测：评测绑定 corpus snapshot、document/index generation、embedding 模型和 prompt 版本，同时计算 Retrieval 与 Answer 指标、95% 置信区间、最小样本门禁和生成阶段 prompt-injection canary。
-- 生产部署：空 PostgreSQL 可直接 `alembic upgrade head`；容器使用锁定依赖、自动迁移、无 reload 多 worker、liveness/readiness、Prometheus 告警和 Grafana 面板。
-
-0.0.5 的详细设计见 [0.0.5 SDD](docs/0.0.5-enterprise-rag-sdd.md)。
-
 ## 架构
 
 ```mermaid
@@ -232,7 +139,7 @@ prompt 过大；显式语义模型不可用时会尝试已配置且端点匹配�
 | 控制可信度 | `MIN_CONFIDENCE`、`MIN_EVIDENCE_CHARS` | 0.70 / 8 | 越高/越长越严格 |
 | 控制随机性 | `TEMPERATURE` | 0 | 图谱抽取建议保持 0 |
 | 严格证据 | `REQUIRE_ENDPOINTS_IN_EVIDENCE` | true | 要求证据原句同时出现关系两端 |
-| 防方向误判 | `REJECT_NEGATIVE_STORES`、`VALIDATE_PART_OF_DIRECTION` | true / true | 拦截“删除却标存储”和 `PART_OF` 反向 |
+| 防方向误判 | `REJECT_NEGATIVE_STORES`、`VALIDATE_PART_OF_DIRECTION` | true / true | 拦截"删除却标存储"和 `PART_OF` 反向 |
 | 故障降级 | `PROVIDER_FALLBACK_ENABLED` | true | 主模型失败时尝试已配置的兼容轻量模型 |
 | 历史回填 | `BACKFILL_CONCURRENCY` | 2 | 最大运行时仍限制为 8 |
 
@@ -255,18 +162,34 @@ PENDING generation → required indexes success → ACTIVE
                    ↘ failure → old ACTIVE remains available
 ```
 
+**非破坏性索引（v0.0.5）**：embedding 模型或维度不匹配会显式失败，不再自动删除 collection。全量重建写入新的物理 generation，校验完成后原子切换 active collection。摄取使用稳定 idempotency key；新 chunk 和 PDF asset 先进入 `PENDING`，Milvus 及 required channel 成功后才激活。失败时旧 generation 继续服务。
+
+**持久化后台任务（v0.0.5）**：单文档摄取、批量导入、评测和索引重建均由 PostgreSQL 队列驱动，可在进程崩溃后恢复；多副本通过 `SKIP LOCKED` 或 advisory lock 协调。自动对账定时对比 PostgreSQL active chunk 与 Milvus，缺失文档进入 repair queue，孤儿向量被清理。
+
+**有界文档处理（v0.0.5）**：限制文件大小、批量数、PDF 页数、压缩包展开大小/文件数/压缩比、图片像素和 OCR/VLM 并发；阻塞 PDF 解析与同步 SDK 调用移出事件循环。
+
 ### 检索
 
-- `kb_id=*` 表示“全部可读知识库”；缺省/`null` 仍保留旧的首库选择语义，不与全库范围混用。
+- `kb_id=*` 表示"全部可读知识库"；缺省/`null` 仍保留旧的首库选择语义，不与全库范围混用。
 - 全库模式会解析为 `{kb_id, active collection, embedding model}` 范围集合，各检索通道按范围 fan-out；最终 ACL 过滤失败时 fail closed。
-- 多库搜索结果按 KB 交错排列（Interleave），消除位置偏差；Rerank 后执行 Per-KB 配额保障，不足时从 Fallback Pool 补入。
+
+**跨库检索（v0.0.6）**：知识库选择器新增"全部知识库"，服务端只展开当前用户有读取权限的知识库，向量、BM25、Neo4j 和 LightRAG 按库并发检索，融合后由 PostgreSQL 按精确 KB 集合与文档 ACL 再次过滤。
+
+**跨库公平召回（v0.0.8）**：多库搜索结果按 KB Interleave 交错排列，消除位置偏差；Rerank 后执行 Per-KB 配额保障（最低 `kb_min_quota` 条），不足时从 Fallback Pool 补入。所有新增逻辑均有 `len(scopes) > 1` 守卫，单知识库查询走原有路径。
+
 - 全库模式强制 Graph RAG，不能通过前端开关或直接 API 请求关闭。
 - 图谱 API 默认且最多返回 200 个实体；`truncated=true` 仅表示实际匹配实体超过 200。
-- Query rewrite、intent、推测向量检索和可选 HyDE 并行执行。
+- Query rewrite、intent、推测向量检索和可选 HyDE 并行执行；rewrite/intent 超时或异常时自动降级回退（v0.0.8）。
 - Vector、BM25、Graph 多通道有独立超时、熔断、状态和指标。
 - RRF、vector、reranker 使用独立阈值。
 - 最终上下文预算按 token 计算，并为 system、history、memory、profile 和输出保留空间。
 - PostgreSQL 会再次过滤非 `ACTIVE` chunk，避免外部索引短暂不一致造成脏读。
+
+**跨库知识关联（v0.0.6）**：Neo4j 实体新增 `tenant_id`、`normalized_name` 与 `cross_linkable`，过滤通用噪声后，同租户、不同知识库的规范化同名实体通过代表性 `CROSS_KB_RELATED` 关联。
+
+**可信语义知识图谱（v0.0.7）**：三层混合图谱——基础层（标题、代码标识符共现，零 LLM）、语义层（轻量 LLM 抽取 `USES`/`DEPENDS_ON`/`IMPLEMENTS` 等白名单关系，逐条原文证据校验）、跨库层（同租户同名实体锚点，`JSON`/`API` 等通用词禁作名称桥）。增删改自动维护图结构，语义 provider 失败时基础图继续可用。
+
+**来源归因标注（v0.0.8）**：上下文每段证据标注所属知识库和文档名，LLM 可在回答中正确归因。
 
 ### 生成与引用
 
@@ -275,6 +198,8 @@ PENDING generation → required indexes success → ACTIVE
 - 引用只允许 `[N]` 指向本次实际 sources；错误或无支持的引用不会被当作有效引用。
 - 服务端 finish 事件包含 `fullAnswer`，前端用它覆盖增量流，保证 UI 与数据库一致。
 - 对话后记忆只抽取用户明确表达的事实，不把 assistant 推测写成用户事实。
+
+**Prompt 与引用安全（v0.0.5）**：检索证据、记忆和画像均按不可信数据注入；最终引用会校验索引和证据重叠，流式内容、finish 事件和持久化答案保持一致。
 
 ## 评测与门禁
 
@@ -288,6 +213,8 @@ PENDING generation → required indexes success → ACTIVE
 - P50/P95/P99 latency 和关键指标 95% CI。
 
 门禁要求至少 30 个启用案例，并要求 reference answer 覆盖率。当前示例数据集绑定固定示例文档；选择其他 corpus 时 API 会明确拒绝运行，而不是用失效 chunk ID 静默打分。生产使用前应维护组织自己的版本化 golden set。
+
+**企业评测（v0.0.5）**：评测绑定 corpus snapshot、document/index generation、embedding 模型和 prompt 版本，同时计算 Retrieval 与 Answer 指标、95% 置信区间、最小样本门禁和生成阶段 prompt-injection canary。
 
 ## 验证
 
@@ -313,6 +240,19 @@ CI 还会在空 PostgreSQL 上执行完整 Alembic migration，并构建前后�
 - 对 PostgreSQL 和对象存储执行备份；外部索引应视为可重建投影。
 - `TRACE_STORE_CONTENT=false` 为推荐默认值，按保留策略清理 trace 和评测明细。
 - 示例 Compose 是单机拓扑；跨可用区高可用需要使用托管或集群化 PostgreSQL、Redis、Milvus、Elasticsearch 和 S3。
+
+**生产部署（v0.0.5）**：空 PostgreSQL 可直接 `alembic upgrade head`；容器使用锁定依赖、自动迁移、无 reload 多 worker、liveness/readiness、Prometheus 告警和 Grafana 面板。
+
+## 版本历史
+
+| 版本 | 日期 | 主题 | 详细设计 |
+|---|---|---|---|
+| v0.0.8 | 2026-07-28 | 跨库公平召回：KB Interleave + Per-KB 配额 + Fallback Pool + 来源归因 + Rewrite/Intent 降级 | [技术方案文档](技术方案文档.md) |
+| v0.0.7 | 2026-07-27 | 可信语义知识图谱：三层混合图谱 + 原文证据校验 + 增量维护 + 原地回填 | [技术方案文档](技术方案文档.md) |
+| v0.0.6 | 2026-07-25 | 跨知识库 Graph RAG：全库检索 + 跨库实体桥 + 强制 Graph + 分类型知识星图 | [SDD](docs/specs/cross-knowledge-base-graph-rag.md) |
+| v0.0.5 | 2026-07-20 | 企业级 RAG 数据面加固：非破坏索引 + 一致性摄取 + 持久化任务 + 企业评测 | [SDD](docs/0.0.5-enterprise-rag-sdd.md) |
+
+部署与故障处理见 [运维手册](docs/operations-runbook.md)，完整实现说明见 [技术方案文档](技术方案文档.md)。
 
 ## 许可证
 

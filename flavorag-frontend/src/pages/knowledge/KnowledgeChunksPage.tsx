@@ -311,6 +311,30 @@ export default function KnowledgeChunksPage() {
                 chunk.content.length > 520 ||
                 chunk.content.split("\n").length > 8;
               const locationText = pageLabel(chunk);
+              const outlinePath = chunk.metadata?.outline_path;
+              const headers = chunk.blockType === "TABLE" || chunk.blockType === "table"
+                ? chunk.metadata?.headers
+                : undefined;
+              const assetCount =
+                chunk.blockType === "IMAGE" || chunk.blockType === "image"
+                  ? (chunk.metadata?.asset_ids?.length ?? 0)
+                  : 0;
+              const fmtTime = (t?: string) => {
+                if (!t) return null;
+                try {
+                  const d = new Date(t);
+                  return d.toLocaleString("zh-CN", {
+                    month: "2-digit",
+                    day: "2-digit",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  });
+                } catch {
+                  return null;
+                }
+              };
+              const createdLabel = fmtTime(chunk.createTime);
+              const updatedLabel = fmtTime(chunk.updateTime);
 
               return (
                 <article
@@ -380,7 +404,35 @@ export default function KnowledgeChunksPage() {
                           约 {chunk.tokenCount.toLocaleString()} tokens
                         </span>
                       )}
+                      {headers && headers.length > 0 && (
+                        <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-2 py-0.5 text-xs text-amber-700">
+                          列: {headers.join(" · ")}
+                        </span>
+                      )}
+                      {assetCount > 0 && (
+                        <span className="inline-flex items-center gap-1 rounded bg-purple-50 px-2 py-0.5 text-xs text-purple-700">
+                          🖼 {assetCount} 图片
+                        </span>
+                      )}
                     </div>
+
+                    {outlinePath && outlinePath.length > 0 && (
+                      <div className="mb-3 flex items-center gap-1 overflow-hidden text-xs text-slate-400">
+                        <span className="shrink-0 text-slate-300">📄</span>
+                        {outlinePath.map((seg, i) => (
+                          <span key={i} className="flex items-center gap-1">
+                            {i > 0 && (
+                              <span className="text-slate-300 select-none">
+                                ›
+                              </span>
+                            )}
+                            <span className="truncate max-w-[160px]" title={seg}>
+                              {seg}
+                            </span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
 
                     <div className="relative">
                       <div
@@ -420,13 +472,26 @@ export default function KnowledgeChunksPage() {
                         )}
                       </div>
                       <div className="inline-flex items-center gap-2.5">
-                        <span className="text-xs font-medium text-slate-500">
-                          {isSaving
-                            ? "保存中"
-                            : isEnabled
-                              ? "已启用"
-                              : "已禁用"}
-                        </span>
+                        <div className="flex flex-col items-end">
+                          <span className="text-xs font-medium text-slate-500">
+                            {isSaving
+                              ? "保存中"
+                              : isEnabled
+                                ? "已启用"
+                                : "已禁用"}
+                          </span>
+                          {createdLabel && (
+                            <span
+                              className="text-[10px] text-slate-400"
+                              title={`创建: ${chunk.createTime}`}
+                            >
+                              {createdLabel}
+                              {updatedLabel &&
+                                updatedLabel !== createdLabel &&
+                                ` · 更新: ${updatedLabel}`}
+                            </span>
+                          )}
+                        </div>
                         <button
                           type="button"
                           role="switch"

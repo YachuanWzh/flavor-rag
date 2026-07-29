@@ -102,6 +102,19 @@ export interface KnowledgeChunk {
   blockType?: string;
   pageStart?: number | null;
   pageEnd?: number | null;
+  bboxes?: Array<Record<string, number>>;
+  metadata?: {
+    outline_path?: string[];
+    source_block_ids?: string[];
+    source_block_types?: string[];
+    extraction_methods?: string[];
+    headers?: string[];
+    cross_page?: boolean;
+    merge_confidence?: number;
+    cross_references?: string[];
+    asset_ids?: string[];
+    [key: string]: unknown;
+  };
   createTime?: string;
   updateTime?: string;
 }

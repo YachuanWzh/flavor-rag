@@ -8,7 +8,7 @@ include = ["app", "app.*"]
 
 [project]
 name = "flavorag-server"
-version = "0.0.7"
+version = "0.0.8"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115,<1",

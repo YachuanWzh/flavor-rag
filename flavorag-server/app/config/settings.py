@@ -81,15 +81,17 @@ class Settings(BaseSettings):
     # Retrieval governance
     retrieval_per_channel_top_k: int = 12
     retrieval_max_candidates: int = 40
-    retrieval_final_top_k: int = 5
+    retrieval_final_top_k: int = 10
     retrieval_channel_timeout_ms: int = 30000
     retrieval_total_timeout_ms: int = 35000
     retrieval_context_max_chars: int = 12000
-    retrieval_context_max_tokens: int = 3000
+    retrieval_context_max_tokens: int = 5000
     retrieval_min_relevance_score: float = 0.0
     retrieval_rrf_min_score: float = 0.012
     retrieval_vector_min_score: float = 0.35
     retrieval_reranker_min_score: float = 0.0
+    retrieval_kb_quota_enabled: bool = False
+    retrieval_kb_min_quota: int = 2
     query_decomposition_enabled: bool = True
     query_decomposition_max_queries: int = 3
     retrieval_channel_weights: str = "vector:1.0,keyword:1.0,graph:0.65"

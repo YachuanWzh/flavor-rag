@@ -18,6 +18,7 @@ const IngestionPipelinePage = lazy(() => import("./pages/admin/IngestionPipeline
 const EvaluationPage = lazy(() => import("./pages/admin/EvaluationPage"));
 const AccessControlPage = lazy(() => import("./pages/admin/AccessControlPage"));
 const UserProfilePage = lazy(() => import("./pages/admin/UserProfilePage"));
+const HyperParamsPage = lazy(() => import("./pages/admin/HyperParamsPage"));
 const KnowledgeBasePage = lazy(() => import("./pages/knowledge/KnowledgeBasePage"));
 const KnowledgeBaseDetailPage = lazy(() => import("./pages/knowledge/KnowledgeBaseDetailPage"));
 const KnowledgeChunksPage = lazy(() => import("./pages/knowledge/KnowledgeChunksPage"));
@@ -55,6 +56,7 @@ export const router = createBrowserRouter([
           { path: "evaluation", element: page(<EvaluationPage />) },
           { path: "access", element: page(<AccessControlPage />) },
           { path: "profiles", element: page(<UserProfilePage />) },
+          { path: "hyperparams", element: page(<HyperParamsPage />) },
         ],
       },
       { path: "knowledge", element: page(<KnowledgeBasePage />) },

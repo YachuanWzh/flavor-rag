@@ -13,10 +13,22 @@ from app.models import (
     User, Conversation, Message, KnowledgeBase, KnowledgeDocument,
     KnowledgeChunk, RagTraceRun,
 )
+from pydantic import BaseModel
+
 from app.rag.trace import TraceLogger
 from app.config.settings import settings
+from app.config.hyperparam import (
+    list_all_hyperparams,
+    update_hyperparam,
+    refresh_cache,
+)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+class HyperParamUpdate(BaseModel):
+    key: str
+    value: str
 
 
 # ---- Dashboard ----
@@ -287,3 +299,33 @@ async def get_trace_detail(
     if not detail:
         raise HTTPException(status_code=404, detail="Trace not found")
     return {"code": "0", "message": "success", "data": detail}
+
+
+# ---- Hyperparameter Configuration ----
+
+
+@router.get("/hyperparams")
+async def get_hyperparams(
+    user: User = Depends(get_current_user),
+):
+    """List all adjustable hyperparameters with current values and defaults."""
+    tenant_id = user.tenant_id or "default"
+    params = await list_all_hyperparams(tenant_id=tenant_id)
+    return {"code": "0", "message": "success", "data": params}
+
+
+@router.put("/hyperparams")
+async def put_hyperparam(
+    body: HyperParamUpdate,
+    user: User = Depends(get_current_user),
+):
+    """Update a single hyperparameter override."""
+    if not body.key or not body.value:
+        raise HTTPException(status_code=400, detail="key and value are required")
+    tenant_id = user.tenant_id or "default"
+    is_new = await update_hyperparam(body.key, body.value, tenant_id=tenant_id)
+    return {
+        "code": "0",
+        "message": "success",
+        "data": {"key": body.key, "value": body.value, "isNew": is_new},
+    }

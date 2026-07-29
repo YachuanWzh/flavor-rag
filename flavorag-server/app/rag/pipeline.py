@@ -34,6 +34,7 @@ from app.rag.governance import (
 from app.security.access import Principal
 from app.security.service import filter_authorized_results
 from app.config.settings import settings
+from app.config.hyperparam import get_hyperparam_typed
 from app.config.logging_config import get_logger
 
 
@@ -51,16 +52,60 @@ def can_reuse_speculative_results(
     )
 
 
-def relevance_threshold(results: list[SearchResult]) -> float:
+def relevance_threshold(results: list[SearchResult], tenant_id: str = "default") -> float:
     """Select a threshold in the score domain produced by the last stage."""
     if any("rerank_score" in item.metadata for item in results):
-        return settings.retrieval_reranker_min_score
+        return get_hyperparam_typed(
+            "retrieval_reranker_min_score", settings.retrieval_reranker_min_score,
+            tenant_id=tenant_id,
+        )
     if any("fusionScore" in item.metadata for item in results):
-        return settings.retrieval_rrf_min_score
-    return settings.retrieval_vector_min_score
+        return get_hyperparam_typed(
+            "retrieval_rrf_min_score", settings.retrieval_rrf_min_score,
+            tenant_id=tenant_id,
+        )
+    return get_hyperparam_typed(
+        "retrieval_vector_min_score", settings.retrieval_vector_min_score,
+        tenant_id=tenant_id,
+    )
 _pipeline_log = get_logger("flavorag.rag.pipeline")
 _ORIGINAL_REWRITE_QUERY = rewrite_query
 _ORIGINAL_RECOGNIZE_INTENT = recognize_intent
+
+
+def _interleave_by_kb(items: list) -> list:
+    """Round-robin interleave items grouped by kb_id.
+
+    Ensures each KB gets fair positional representation in the merged list,
+    preventing a high-scoring KB from monopolizing early positions and being
+    the only one selected by downstream round-robin bounding.
+    """
+    from app.rag.search.base import SearchResult  # noqa: already imported at top
+
+    groups: dict[str, list] = {}
+    order: list[str] = []
+    for item in items:
+        kb = item.metadata.get("kb_id", "") if isinstance(item, SearchResult) else ""
+        if kb not in groups:
+            groups[kb] = []
+            order.append(kb)
+        groups[kb].append(item)
+    # Sort within each KB group by score descending
+    for kb in order:
+        groups[kb].sort(key=lambda r: r.score, reverse=True)
+    # Round-robin across KBs
+    result: list = []
+    rank = 0
+    while True:
+        added = False
+        for kb in order:
+            if rank < len(groups[kb]):
+                result.append(groups[kb][rank])
+                added = True
+        if not added:
+            break
+        rank += 1
+    return result
 
 
 async def _rewrite_for_pipeline(
@@ -233,19 +278,46 @@ class RAGPipeline:
         *,
         top_k: int,
     ) -> list[SearchResult]:
-        batches = await asyncio.gather(
-            *(
-                self._search_vector(
+        async def _search_one(query: str, scope: RetrievalScope) -> list[SearchResult]:
+            try:
+                results = await self._search_vector(
                     query,
                     scope.collection_name,
                     top_k=top_k,
                     embedding_model=scope.embedding_model,
                 )
-                for query in queries
-                for scope in scopes
-            )
+            except Exception as exc:
+                _pipeline_log.warning(
+                    "vector_scope_search_failed",
+                    kb_id=scope.kb_id,
+                    collection=scope.collection_name,
+                    error=type(exc).__name__,
+                    detail=str(exc)[:200],
+                )
+                return []
+            if len(scopes) > 1:
+                for r in results:
+                    r.metadata.setdefault("kb_id", scope.kb_id)
+            if len(scopes) > 1:
+                _pipeline_log.info(
+                    "vector_scope_result",
+                    kb_id=scope.kb_id,
+                    collection=scope.collection_name,
+                    query_len=len(query),
+                    results=len(results),
+                )
+            return results
+
+        batches = await asyncio.gather(
+            *(_search_one(query, scope) for query in queries for scope in scopes)
         )
-        return [item for batch in batches for item in batch]
+        merged = [item for batch in batches for item in batch]
+        # Interleave results across KBs so that round-robin bounding in
+        # run_search_channels gives each KB fair representation regardless
+        # of absolute score differences.
+        if len(scopes) > 1:
+            merged = _interleave_by_kb(merged)
+        return merged
 
     async def _search_keyword_scopes(
         self,
@@ -254,14 +326,20 @@ class RAGPipeline:
         *,
         top_k: int,
     ) -> list[SearchResult]:
+        async def _search_one(query: str, scope: RetrievalScope) -> list[SearchResult]:
+            results = await self.es.search(query, scope.kb_id, top_k=top_k)
+            if len(scopes) > 1:
+                for r in results:
+                    r.metadata.setdefault("kb_id", scope.kb_id)
+            return results
+
         batches = await asyncio.gather(
-            *(
-                self.es.search(query, scope.kb_id, top_k=top_k)
-                for query in queries
-                for scope in scopes
-            )
+            *(_search_one(query, scope) for query in queries for scope in scopes)
         )
-        return [item for batch in batches for item in batch]
+        merged = [item for batch in batches for item in batch]
+        if len(scopes) > 1:
+            merged = _interleave_by_kb(merged)
+        return merged
 
     async def _search_graph_scopes(
         self,
@@ -314,12 +392,18 @@ class RAGPipeline:
                     kb_id=scope.kb_id,
                     error=type(exc).__name__,
                 )
+            if len(scopes) > 1:
+                for r in output:
+                    r.metadata.setdefault("kb_id", scope.kb_id)
             return output
 
         batches = await asyncio.gather(
             *(search_one(query, scope) for query in queries for scope in scopes)
         )
-        return [item for batch in batches for item in batch]
+        merged = [item for batch in batches for item in batch]
+        if len(scopes) > 1:
+            merged = _interleave_by_kb(merged)
+        return merged
 
     def _adjust_budget_for_profile(self, budget: RetrievalBudget, ctx: RAGContext) -> RetrievalBudget:
         """Adjust retrieval budget based on user profile (expertise level + intent distribution).
@@ -368,17 +452,50 @@ class RAGPipeline:
     async def run(self, ctx: RAGContext) -> RAGResult:
         t0 = time.time()
         trace_id = ctx.trace_run_id
+        _tenant = ctx.tenant_id or "default"
         budget = RetrievalBudget(
-            per_channel_top_k=settings.retrieval_per_channel_top_k,
-            max_candidates=settings.retrieval_max_candidates,
-            final_top_k=settings.retrieval_final_top_k,
-            channel_timeout_ms=settings.retrieval_channel_timeout_ms,
-            total_timeout_ms=settings.retrieval_total_timeout_ms,
-            context_max_chars=settings.retrieval_context_max_chars,
-            context_max_tokens=settings.retrieval_context_max_tokens,
-            max_subqueries=settings.query_decomposition_max_queries,
+            per_channel_top_k=get_hyperparam_typed(
+                "retrieval_per_channel_top_k", settings.retrieval_per_channel_top_k,
+                tenant_id=_tenant,
+            ),
+            max_candidates=get_hyperparam_typed(
+                "retrieval_max_candidates", settings.retrieval_max_candidates,
+                tenant_id=_tenant,
+            ),
+            final_top_k=get_hyperparam_typed(
+                "retrieval_final_top_k", settings.retrieval_final_top_k,
+                tenant_id=_tenant,
+            ),
+            channel_timeout_ms=get_hyperparam_typed(
+                "retrieval_channel_timeout_ms", settings.retrieval_channel_timeout_ms,
+                tenant_id=_tenant,
+            ),
+            total_timeout_ms=get_hyperparam_typed(
+                "retrieval_total_timeout_ms", settings.retrieval_total_timeout_ms,
+                tenant_id=_tenant,
+            ),
+            context_max_chars=get_hyperparam_typed(
+                "retrieval_context_max_chars", settings.retrieval_context_max_chars,
+                tenant_id=_tenant,
+            ),
+            context_max_tokens=get_hyperparam_typed(
+                "retrieval_context_max_tokens", settings.retrieval_context_max_tokens,
+                tenant_id=_tenant,
+            ),
+            max_subqueries=get_hyperparam_typed(
+                "query_decomposition_max_queries", settings.query_decomposition_max_queries,
+                tenant_id=_tenant,
+            ),
         )
         budget = self._adjust_budget_for_profile(budget, ctx)
+        _pipeline_log.info(
+            "retrieval_budget_final",
+            final_top_k=budget.final_top_k,
+            per_channel_top_k=budget.per_channel_top_k,
+            max_candidates=budget.max_candidates,
+            context_max_tokens=budget.context_max_tokens,
+            context_max_chars=budget.context_max_chars,
+        )
         non_evidence_text = "\n".join(
             [
                 ctx.question,
@@ -401,13 +518,30 @@ class RAGPipeline:
         available_evidence_tokens = max(
             1,
             min(
-                settings.retrieval_context_max_tokens,
+                budget.context_max_tokens,
                 settings.llm_context_window_tokens - reserved_tokens,
             ),
+        )
+        # Scale token budget with final_top_k so select_context doesn't
+        # silently truncate chunks due to a fixed token cap.  Estimate 450
+        # tokens per chunk as a conservative average.
+        _per_chunk_tokens = 450
+        _target_tokens = budget.final_top_k * _per_chunk_tokens
+        available_evidence_tokens = max(available_evidence_tokens, _target_tokens)
+        # Never exceed the LLM context window minus already-reserved space.
+        available_evidence_tokens = min(
+            available_evidence_tokens,
+            settings.llm_context_window_tokens - reserved_tokens,
         )
         budget = replace(
             budget,
             context_max_tokens=available_evidence_tokens,
+        )
+        _pipeline_log.info(
+            "context_budget_scaled",
+            final_top_k=budget.final_top_k,
+            context_max_tokens=budget.context_max_tokens,
+            estimated_chunks_fit=budget.context_max_tokens // _per_chunk_tokens,
         )
         if ctx.final_top_k is not None:
             budget = replace(
@@ -422,12 +556,26 @@ class RAGPipeline:
         ):
             return await self._run_parallel(ctx, budget, t0, trace_id)
 
-        # 1. Query rewrite (sequential fallback)
+        # 1. Query rewrite (sequential fallback, graceful degradation)
         t_rewrite = datetime.now(timezone.utc).replace(tzinfo=None)
-        rewrite_result = await asyncio.wait_for(
-            _rewrite_for_pipeline(ctx, budget),
-            timeout=settings.query_understanding_timeout_sec,
-        )
+        try:
+            rewrite_result = await asyncio.wait_for(
+                _rewrite_for_pipeline(ctx, budget),
+                timeout=settings.query_understanding_timeout_sec,
+            )
+        except (asyncio.TimeoutError, Exception) as exc:
+            from app.rag.rewrite import RewriteResult as _RR
+            _pipeline_log.warning(
+                "rewrite_timeout_fallback",
+                error=type(exc).__name__,
+                timeout_sec=settings.query_understanding_timeout_sec,
+            )
+            rewrite_result = _RR(
+                original_query=ctx.question,
+                normalized_query=ctx.question.strip(),
+                rewritten_query=ctx.question,
+                subqueries=[ctx.question],
+            )
         rewritten = (
             rewrite_result.rewritten_query
             if rewrite_result.rewritten_query != ctx.question
@@ -447,15 +595,31 @@ class RAGPipeline:
                                              "applied_mappings": rewrite_result.applied_mappings,
                                          })
 
-        # 2. Intent recognition
+        # 2. Intent recognition (graceful degradation)
         t_intent = datetime.now(timezone.utc).replace(tzinfo=None)
-        intent_resolution = await asyncio.wait_for(
-            _intent_for_pipeline(
-                rewrite_result.subqueries or [rewrite_result.rewritten_query],
-                ctx,
-            ),
-            timeout=settings.query_understanding_timeout_sec,
-        )
+        try:
+            intent_resolution = await asyncio.wait_for(
+                _intent_for_pipeline(
+                    rewrite_result.subqueries or [rewrite_result.rewritten_query],
+                    ctx,
+                ),
+                timeout=settings.query_understanding_timeout_sec,
+            )
+        except (asyncio.TimeoutError, Exception) as exc:
+            from app.rag.intent import IntentResolution as _IR, SubqueryIntent as _SI, IntentMatch as _IM
+            _pipeline_log.warning(
+                "intent_timeout_fallback",
+                error=type(exc).__name__,
+                timeout_sec=settings.query_understanding_timeout_sec,
+            )
+            intent_resolution = _IR(
+                subqueries=[
+                    _SI(
+                        query=rewrite_result.rewritten_query or ctx.question,
+                        matches=[_IM(intent_code="general", name="general", score=0.5)],
+                    )
+                ]
+            )
         intent = intent_resolution.to_dict()
         t_intent_end = datetime.now(timezone.utc).replace(tzinfo=None)
         intent_ms = int((t_intent_end - t_intent).total_seconds() * 1000)
@@ -740,10 +904,18 @@ class RAGPipeline:
             deduped,
             top_n=rerank_top_n,
         )
+        # Per-KB quota: guarantee each KB minimum representation in cross-KB mode
+        kb_quota = (
+            settings.retrieval_kb_min_quota
+            if settings.retrieval_kb_quota_enabled and len(ctx.retrieval_scopes) > 1
+            else None
+        )
         reranked, retrieval_decision = select_context(
             reranked,
             budget,
-            min_score=relevance_threshold(reranked),
+            min_score=relevance_threshold(reranked, tenant_id=_tenant),
+            kb_quota=kb_quota,
+            fallback_pool=deduped if kb_quota else None,
         )
         t_rerank_end = datetime.now(timezone.utc).replace(tzinfo=None)
         rerank_ms = int((t_rerank_end - t_rerank).total_seconds() * 1000)
@@ -770,6 +942,7 @@ class RAGPipeline:
         )
 
         # 9. Build chunks
+        _kb_name_map = {s.kb_id: s.kb_name for s in ctx.retrieval_scopes if s.kb_name}
         chunks = [
             {
                 "content": r.content,
@@ -783,6 +956,9 @@ class RAGPipeline:
                 "pageStart": r.page_start,
                 "pageEnd": r.page_end,
                 "neighborOf": r.metadata.get("neighbor_of") or [],
+                "kbId": r.metadata.get("kb_id") or "",
+                "kbName": _kb_name_map.get(r.metadata.get("kb_id", ""), ""),
+                "docName": r.doc_name or "",
             }
             for r in reranked
         ]
@@ -805,6 +981,8 @@ class RAGPipeline:
                 "assets": r.assets,
                 "neighborOf": r.metadata.get("neighbor_of") or [],
                 "fileType": r.file_type or "",
+                "kbId": r.metadata.get("kb_id") or "",
+                "kbName": _kb_name_map.get(r.metadata.get("kb_id", ""), ""),
             }
             for r in reranked
         ]
@@ -904,11 +1082,40 @@ class RAGPipeline:
                 )
             )
 
-        # Await rewrite + intent
-        rewrite_result, intent_resolution = await asyncio.wait_for(
-            asyncio.gather(rewrite_task, intent_task),
-            timeout=settings.query_understanding_timeout_sec,
-        )
+        # Await rewrite + intent (graceful degradation on timeout)
+        try:
+            rewrite_result, intent_resolution = await asyncio.wait_for(
+                asyncio.gather(rewrite_task, intent_task),
+                timeout=settings.query_understanding_timeout_sec,
+            )
+        except (asyncio.TimeoutError, Exception) as exc:
+            # Cancel lingering tasks to avoid leaked coroutines
+            for task in (rewrite_task, intent_task):
+                if not task.done():
+                    task.cancel()
+            _pipeline_log.warning(
+                "parallel_rewrite_intent_timeout_fallback",
+                error=type(exc).__name__,
+                timeout_sec=settings.query_understanding_timeout_sec,
+            )
+            # Fallback: use original query with default intent
+            from app.rag.rewrite import RewriteResult as _RR
+            from app.rag.intent import IntentResolution as _IR, SubqueryIntent as _SI, IntentMatch as _IM
+
+            rewrite_result = _RR(
+                original_query=ctx.question,
+                normalized_query=ctx.question.strip(),
+                rewritten_query=ctx.question,
+                subqueries=[ctx.question],
+            )
+            intent_resolution = _IR(
+                subqueries=[
+                    _SI(
+                        query=ctx.question,
+                        matches=[_IM(intent_code="general", name="general", score=0.5)],
+                    )
+                ]
+            )
 
         t_parallel_end = datetime.now(timezone.utc).replace(tzinfo=None)
         parallel_ms = int((t_parallel_end - t_parallel_start).total_seconds() * 1000)
@@ -1211,6 +1418,14 @@ class RAGPipeline:
         t_fuse_end = datetime.now(timezone.utc).replace(tzinfo=None)
         fusion_ms = int((t_fuse_end - t_fuse).total_seconds() * 1000)
         _pipeline_log.info("rrf_fusion", input_channels=len(all_results), input_total=total_hits, output_count=len(merged), took_ms=fusion_ms)
+        # Diagnostic: KB distribution after fusion
+        _fuse_dist: dict[str, int] = {}
+        for _r in merged:
+            _kb = _r.metadata.get("kb_id", "")
+            if _kb:
+                _fuse_dist[_kb] = _fuse_dist.get(_kb, 0) + 1
+        if _fuse_dist:
+            _pipeline_log.info("kb_dist_after_fusion", dist=_fuse_dist, total=len(merged))
         if self._trace:
             await self._trace.trace_node(trace_id or "", "fusion", "rrf_fusion",
                                          t_fuse, t_fuse_end,
@@ -1225,6 +1440,14 @@ class RAGPipeline:
         recall_count = len(deduped)
         removed = len(merged) - len(deduped)
         _pipeline_log.info("deduplicate", before=len(merged), after=recall_count, removed=removed, took_ms=dedup_ms)
+        # Diagnostic: KB distribution after dedup+filter
+        _dedup_dist: dict[str, int] = {}
+        for _r in deduped:
+            _kb = _r.metadata.get("kb_id", "")
+            if _kb:
+                _dedup_dist[_kb] = _dedup_dist.get(_kb, 0) + 1
+        if _dedup_dist:
+            _pipeline_log.info("kb_dist_after_dedup_filter", dist=_dedup_dist, total=len(deduped))
 
         await self._resolve_metadata(deduped, kb_id=ctx.kb_id)
 
@@ -1266,6 +1489,14 @@ class RAGPipeline:
         else:
             deduped = []
         recall_count = len(deduped)
+        # Diagnostic: KB distribution after ACL filter
+        _acl_dist: dict[str, int] = {}
+        for _r in deduped:
+            _kb = _r.metadata.get("kb_id", "")
+            if _kb:
+                _acl_dist[_kb] = _acl_dist.get(_kb, 0) + 1
+        if _acl_dist:
+            _pipeline_log.info("kb_dist_after_acl", dist=_acl_dist, total=len(deduped))
 
         # 7. Rerank
         t_rerank = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -1277,9 +1508,32 @@ class RAGPipeline:
             else min(budget.max_candidates, max(budget.final_top_k * 2, budget.final_top_k))
         )
         reranked = await self.reranker.rerank(search_question, deduped, top_n=rerank_top_n)
-        reranked, retrieval_decision = select_context(
-            reranked, budget, min_score=relevance_threshold(reranked)
+        # Per-KB quota: guarantee each KB minimum representation in cross-KB mode
+        kb_quota = (
+            settings.retrieval_kb_min_quota
+            if settings.retrieval_kb_quota_enabled and len(ctx.retrieval_scopes) > 1
+            else None
         )
+        # Diagnostic: KB distribution before select_context
+        if kb_quota:
+            _pre_dist: dict[str, int] = {}
+            for _r in reranked:
+                _kb = _r.metadata.get("kb_id", "")
+                if _kb:
+                    _pre_dist[_kb] = _pre_dist.get(_kb, 0) + 1
+            _pipeline_log.info("kb_quota_pre_select", reranked_count=len(reranked), kb_dist=_pre_dist, kb_quota=kb_quota)
+        reranked, retrieval_decision = select_context(
+            reranked, budget, min_score=relevance_threshold(reranked, tenant_id=ctx.tenant_id or "default"),
+            kb_quota=kb_quota,
+            fallback_pool=deduped if kb_quota else None,
+        )
+        if kb_quota:
+            _post_dist: dict[str, int] = {}
+            for _r in reranked:
+                _kb = _r.metadata.get("kb_id", "")
+                if _kb:
+                    _post_dist[_kb] = _post_dist.get(_kb, 0) + 1
+            _pipeline_log.info("kb_quota_post_select", selected_count=len(reranked), kb_dist=_post_dist)
         t_rerank_end = datetime.now(timezone.utc).replace(tzinfo=None)
         rerank_ms = int((t_rerank_end - t_rerank).total_seconds() * 1000)
         final_count = len(reranked)
@@ -1299,6 +1553,7 @@ class RAGPipeline:
         )
 
         # 9. Build chunks
+        _kb_name_map = {s.kb_id: s.kb_name for s in ctx.retrieval_scopes if s.kb_name}
         chunks = [
             {
                 "content": r.content, "chunk_id": r.chunk_id, "score": r.score,
@@ -1308,6 +1563,9 @@ class RAGPipeline:
                 "matchedChannels": r.metadata.get("matchedChannels", []),
                 "blockType": r.block_type, "pageStart": r.page_start, "pageEnd": r.page_end,
                 "neighborOf": r.metadata.get("neighbor_of") or [],
+                "kbId": r.metadata.get("kb_id") or "",
+                "kbName": _kb_name_map.get(r.metadata.get("kb_id", ""), ""),
+                "docName": r.doc_name or "",
             }
             for r in reranked
         ]
@@ -1324,6 +1582,8 @@ class RAGPipeline:
                 "pageEnd": r.page_end, "bboxes": r.bboxes, "assets": r.assets,
                 "neighborOf": r.metadata.get("neighbor_of") or [],
                 "fileType": r.file_type or "",
+                "kbId": r.metadata.get("kb_id") or "",
+                "kbName": _kb_name_map.get(r.metadata.get("kb_id", ""), ""),
             }
             for r in reranked
         ]

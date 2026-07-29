@@ -723,3 +723,24 @@ class UserProfile(Base):
     profile_version = Column(Integer, default=1)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+# ============================================================
+# Hyperparameter Configuration (运行时可配置的检索超参数)
+# ============================================================
+
+
+class HyperParameterConfig(Base, TimestampMixin):
+    """Runtime hyperparameter overrides persisted to database.
+
+    Each row is a key-value pair scoped to a tenant. When a key exists for
+    the tenant, the runtime reads it in preference to the env-file default.
+    """
+
+    __tablename__ = "t_hyperparameter_config"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    tenant_id = Column(String(64), nullable=False, default="default")
+    key = Column(String(128), nullable=False)
+    value = Column(Text, nullable=False)

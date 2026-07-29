@@ -209,11 +209,23 @@ async def run_search_channels(
     return bounded, statuses
 
 
+def _kb_distribution(items: list[SearchResult]) -> dict[str, int]:
+    """Count items per kb_id (only tagged items)."""
+    dist: dict[str, int] = {}
+    for item in items:
+        kb = item.metadata.get("kb_id", "")
+        if kb:
+            dist[kb] = dist.get(kb, 0) + 1
+    return dist
+
+
 def select_context(
     candidates: list[SearchResult],
     budget: RetrievalBudget,
     *,
     min_score: float,
+    kb_quota: int | None = None,
+    fallback_pool: list[SearchResult] | None = None,
 ) -> tuple[list[SearchResult], RetrievalDecision]:
     eligible = [item for item in candidates if item.score >= min_score]
     below = len(candidates) - len(eligible)
@@ -251,6 +263,81 @@ def select_context(
         selected.append(item)
         used_chars += length
         used_tokens += token_length
+
+    # ── Per-KB quota: swap-based diversity guarantee ──
+    # When cross-KB retrieval is active and quota is configured, guarantee
+    # each knowledge base at least *kb_quota* representative results.
+    # Strategy: REPLACE the lowest-scoring items from over-represented KBs
+    # with the best eligible items from under-represented KBs.  This keeps
+    # the total count within final_top_k (no token-budget overflow) while
+    # ensuring every searched KB has a voice.
+    # fallback_pool (pre-rerank candidates) is used when the reranker output
+    # does not contain enough items from a given KB.
+    if kb_quota and kb_quota > 0:
+        # Determine all KBs from both eligible AND fallback_pool
+        all_kbs = {
+            item.metadata.get("kb_id", "")
+            for item in eligible
+            if item.metadata.get("kb_id")
+        }
+        if fallback_pool:
+            for item in fallback_pool:
+                kb = item.metadata.get("kb_id", "")
+                if kb:
+                    all_kbs.add(kb)
+        if len(all_kbs) > 1:
+            selected_ids = {item.chunk_id for item in selected}
+            kb_counts = _kb_distribution(selected)
+            for kb in all_kbs:
+                if kb_counts.get(kb, 0) >= kb_quota:
+                    continue
+                needed = kb_quota - kb_counts.get(kb, 0)
+                # Best candidates from this KB not yet selected (prefer reranked)
+                backfill = [
+                    item for item in eligible
+                    if item.metadata.get("kb_id") == kb
+                    and item.chunk_id not in selected_ids
+                ][:needed]
+                # If reranked pool is insufficient, pull from fallback_pool
+                if len(backfill) < needed and fallback_pool:
+                    extra_needed = needed - len(backfill)
+                    backfill_ids = {item.chunk_id for item in backfill}
+                    extra = [
+                        item for item in fallback_pool
+                        if item.metadata.get("kb_id") == kb
+                        and item.chunk_id not in selected_ids
+                        and item.chunk_id not in backfill_ids
+                    ][:extra_needed]
+                    backfill.extend(extra)
+                if not backfill:
+                    continue
+                # Find items to evict: lowest-score selected items from KBs
+                # that have MORE than kb_quota representation.
+                evictable = sorted(
+                    (
+                        item for item in selected
+                        if kb_counts.get(item.metadata.get("kb_id", ""), 0) > kb_quota
+                    ),
+                    key=lambda x: x.score,
+                )
+                for fill_item in backfill:
+                    if evictable:
+                        victim = evictable.pop(0)
+                        idx = selected.index(victim)
+                        selected[idx] = fill_item
+                        # Update counts
+                        victim_kb = victim.metadata.get("kb_id", "")
+                        if victim_kb:
+                            kb_counts[victim_kb] = kb_counts.get(victim_kb, 1) - 1
+                        kb_counts[kb] = kb_counts.get(kb, 0) + 1
+                        selected_ids.discard(victim.chunk_id)
+                        selected_ids.add(fill_item.chunk_id)
+                    else:
+                        # No evictable items; append (rare edge case)
+                        selected.append(fill_item)
+                        selected_ids.add(fill_item.chunk_id)
+                        kb_counts[kb] = kb_counts.get(kb, 0) + 1
+
     dropped_budget = len(eligible) - len(selected)
     if not selected:
         return [], RetrievalDecision(

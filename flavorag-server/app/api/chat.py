@@ -689,8 +689,24 @@ async def chat(
                     + json.dumps({"stage": "generating", "message": "正在生成回答..."}, ensure_ascii=False)
                     + "\n\n"
                 )
+            def _format_source_label(c: dict) -> str:
+                parts = []
+                kb_name = c.get("kbName") or ""
+                doc_name = c.get("docName") or ""
+                if kb_name:
+                    parts.append(f"知识库: {kb_name}")
+                if doc_name:
+                    parts.append(f"文档: {doc_name}")
+                return " | ".join(parts)
+
+            def _format_context_item(i: int, c: dict) -> str:
+                label = _format_source_label(c)
+                header = f"[来源 {i + 1}] ({label})" if label else f"[来源 {i + 1}]"
+                return f"{header}\n{c['content']}"
+
             context_text = "\n\n---\n\n".join(
-                f"[来源 {i + 1}] {c['content']}" for i, c in enumerate(rag_result.context_chunks)
+                _format_context_item(i, c)
+                for i, c in enumerate(rag_result.context_chunks)
             )
             # ── mem0: inject user memories + profile into system prompt ──
             memory_block = ""

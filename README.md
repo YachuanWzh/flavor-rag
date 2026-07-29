@@ -1,8 +1,41 @@
 # flavor-rag
 
-> 版本：v0.0.7 · 可信语义知识图谱版 · 2026-07-28
+> 版本：v0.0.8 · 跨库公平召回版 · 2026-07-28
 
 flavor-rag 是一个面向企业知识库的全链路 RAG 系统，覆盖多格式摄取、版本化索引、混合检索、证据约束生成、引用、长期记忆、离线评测和生产可观测性。本版本不把登录与权限作为企业级结论的一部分；重点是 RAG 数据面的正确性、可恢复性和可运维性。
+
+## v0.0.8 关键变化
+
+多知识库检索时，搜索结果简单拼接会导致“位置偏差”——排在后面的知识库被系统性截断；
+Reranker 的马太效应又让高分库占据全部名额。v0.0.8 从三个层面解决跨库召回公平性：
+
+- **KB Interleave**：多库搜索结果不再简单拼接，而是按知识库做 Round-Robin 交错排列，保证每个库在列表前部都有均匀代表。
+- **Per-KB 配额**：Rerank 后检查每个知识库的实际入选数，不足配额时从过度集中的库踢出最低分条目，换入不足库的次优候选。
+- **Fallback Pool**：当 Reranker 截断后某库候选不足时，从 pre-rerank 完整候选池中补入，避免“无米下锅”。
+- **来源归因标注**：上下文每段证据标注所属知识库和文档名，LLM 可以在回答中正确归因。
+- **Rewrite/Intent 降级**：查询改写和意图识别超时或异常时自动回退到原始查询 + 通用意图，不阻塞检索。
+- **单库零影响**：所有新增逻辑均有 `len(scopes) > 1` 守卫，单知识库查询走原有路径，无任何行为变化。
+
+```mermaid
+flowchart LR
+    S["多 Scope 搜索"] --> IL["KB Interleave"]
+    IL --> F["RRF + 去重"]
+    F --> RR["Rerank"]
+    RR --> Q["Per-KB Quota"]
+    Q --> FB["Fallback Pool 补入"]
+    FB --> LLM["带来源标注的 LLM 生成"]
+```
+
+配置：
+
+```dotenv
+RETRIEVAL_KB_QUOTA_ENABLED=true
+RETRIEVAL_KB_MIN_QUOTA=2
+RETRIEVAL_FINAL_TOP_K=20
+RETRIEVAL_CONTEXT_MAX_TOKENS=12000
+RETRIEVAL_CONTEXT_MAX_CHARS=24000
+LLM_CONTEXT_WINDOW_TOKENS=32768
+```
 
 ## v0.0.7 关键变化
 
@@ -159,7 +192,7 @@ SOURCE_STORAGE_BACKEND=s3
 EMBEDDING_MODEL=Qwen/Qwen3-Embedding-8B
 EMBEDDING_DIM=4096
 LLM_MODEL=qwen-plus-latest
-LLM_CONTEXT_WINDOW_TOKENS=8192
+LLM_CONTEXT_WINDOW_TOKENS=32768
 LLM_MAX_OUTPUT_TOKENS=2048
 
 GRAPH_ENABLED=true
@@ -226,6 +259,7 @@ PENDING generation → required indexes success → ACTIVE
 
 - `kb_id=*` 表示“全部可读知识库”；缺省/`null` 仍保留旧的首库选择语义，不与全库范围混用。
 - 全库模式会解析为 `{kb_id, active collection, embedding model}` 范围集合，各检索通道按范围 fan-out；最终 ACL 过滤失败时 fail closed。
+- 多库搜索结果按 KB 交错排列（Interleave），消除位置偏差；Rerank 后执行 Per-KB 配额保障，不足时从 Fallback Pool 补入。
 - 全库模式强制 Graph RAG，不能通过前端开关或直接 API 请求关闭。
 - 图谱 API 默认且最多返回 200 个实体；`truncated=true` 仅表示实际匹配实体超过 200。
 - Query rewrite、intent、推测向量检索和可选 HyDE 并行执行。

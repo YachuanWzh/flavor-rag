@@ -2,6 +2,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
   Activity, ArrowLeft, ArrowLeftRight, Brain, ClipboardList, Clock,
   FlaskConical, Gauge, GitBranch, HelpCircle, Layers, LayoutDashboard, ShieldCheck,
+  Sliders,
 } from "lucide-react";
 
 function HeartPulseIcon({ size = 16 }: { size?: number }) {
@@ -37,6 +38,7 @@ const navItems = [
   { to: "/admin/evaluation", Icon: FlaskConical, label: "检索评测" },
   { to: "/admin/access", Icon: ShieldCheck, label: "访问控制" },
   { to: "/admin/profiles", Icon: Brain, label: "用户画像" },
+  { to: "/admin/hyperparams", Icon: Sliders, label: "参数配置" },
 ];
 
 export default function AdminLayout() {

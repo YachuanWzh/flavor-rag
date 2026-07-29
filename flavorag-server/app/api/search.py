@@ -13,6 +13,7 @@ from app.rag.search.vector import MilvusSearchChannel
 from app.rag.search.keyword import ESKeywordSearchChannel
 from app.rag.postprocess.fusion import rrf_fusion, deduplicate
 from app.config.settings import settings
+from app.config.hyperparam import get_hyperparam_typed
 from app.rag.governance import RetrievalBudget, run_search_channels, select_context
 from app.rag.pipeline import RAGPipeline
 from app.rag.postprocess.reranker import Reranker
@@ -59,6 +60,7 @@ async def rag_search(
     Returns top-K chunks sorted by relevance.
     """
     principal = principal_from_user(user)
+    _tenant = user.tenant_id or "default"
     kb_stmt = select(KnowledgeBase).where(
         kb_access_predicate(principal, Permission.READ)
     )
@@ -75,10 +77,19 @@ async def rag_search(
 
     budget = RetrievalBudget(
         per_channel_top_k=max(req.top_k * 2, req.top_k),
-        max_candidates=settings.retrieval_max_candidates,
+        max_candidates=get_hyperparam_typed(
+            "retrieval_max_candidates", settings.retrieval_max_candidates,
+            tenant_id=_tenant,
+        ),
         final_top_k=req.top_k,
-        channel_timeout_ms=settings.retrieval_channel_timeout_ms,
-        context_max_chars=settings.retrieval_context_max_chars,
+        channel_timeout_ms=get_hyperparam_typed(
+            "retrieval_channel_timeout_ms", settings.retrieval_channel_timeout_ms,
+            tenant_id=_tenant,
+        ),
+        context_max_chars=get_hyperparam_typed(
+            "retrieval_context_max_chars", settings.retrieval_context_max_chars,
+            tenant_id=_tenant,
+        ),
     )
     milvus = MilvusSearchChannel()
     channels = {}
@@ -121,7 +132,10 @@ async def rag_search(
     deduped, decision = select_context(
         reranked,
         budget,
-        min_score=settings.retrieval_min_relevance_score,
+        min_score=get_hyperparam_typed(
+            "retrieval_min_relevance_score", settings.retrieval_min_relevance_score,
+            tenant_id=_tenant,
+        ),
     )
 
     chunks = [

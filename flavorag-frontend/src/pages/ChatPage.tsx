@@ -12,6 +12,8 @@ import ChatInput from "@/components/chat/ChatInput";
 import MessageList from "@/components/chat/MessageList";
 import SourcesDrawer from "@/components/chat/SourcesDrawer";
 import KnowledgeGraphPanel from "@/components/chat/KnowledgeGraphPanel";
+import InterviewExperience from "@/features/interview/InterviewExperience";
+import { Mic2, Sparkles } from "lucide-react";
 
 const DocumentPreviewModal = lazy(
   () => import("@/components/chat/DocumentPreviewModal"),
@@ -34,6 +36,7 @@ export default function ChatPage() {
   } = useChatStore();
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [initLoading, setInitLoading] = useState(true);
+  const [interviewMode, setInterviewMode] = useState(false);
 
   // Sources drawer state
   const [drawerSources, setDrawerSources] = useState<SourceRef[]>([]);
@@ -152,6 +155,13 @@ export default function ChatPage() {
 
         <div className="p-3 border-t mt-auto space-y-2">
           <button
+            onClick={() => setInterviewMode(true)}
+            className="flex w-full items-center gap-2 rounded-lg bg-slate-900 px-3 py-2 text-left text-xs font-medium text-white hover:bg-slate-800"
+          >
+            <Mic2 className="h-3.5 w-3.5 text-cyan-300" />
+            模拟面试
+          </button>
+          <button
             onClick={() => navigate("/knowledge")}
             className="block w-full text-left text-xs text-gray-500 hover:text-blue-600"
           >
@@ -175,6 +185,28 @@ export default function ChatPage() {
       <div className="flex min-w-0 flex-1 flex-col lg:flex-row">
         {/* Main */}
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="hidden h-14 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-5 md:flex">
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-700">
+                Evidence workspace
+              </p>
+              <p className="text-sm font-semibold text-slate-900">
+                {interviewMode ? "面试模式" : "智能对话"}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setInterviewMode((enabled) => !enabled)}
+              className={`inline-flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition ${
+                interviewMode
+                  ? "bg-cyan-50 text-cyan-800 ring-1 ring-cyan-200"
+                  : "bg-slate-950 text-white hover:bg-slate-800"
+              }`}
+            >
+              {interviewMode ? <Sparkles className="h-4 w-4" /> : <Mic2 className="h-4 w-4 text-cyan-300" />}
+              {interviewMode ? "退出面试模式" : "开启面试模式"}
+            </button>
+          </div>
           <div className="flex h-14 shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-3 md:hidden">
             <div className="min-w-0 flex-1">
               <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-cyan-700">
@@ -195,13 +227,31 @@ export default function ChatPage() {
             </div>
             <button
               type="button"
+              onClick={() => setInterviewMode((enabled) => !enabled)}
+              className={`shrink-0 rounded-lg px-2.5 py-1.5 text-xs font-medium ${
+                interviewMode ? "bg-cyan-100 text-cyan-800" : "bg-slate-900 text-white"
+              }`}
+            >
+              {interviewMode ? "退出面试" : "面试"}
+            </button>
+            <button
+              type="button"
               onClick={handleNewSession}
               className="shrink-0 rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white"
             >
               新对话
             </button>
           </div>
-          <div className="flex-1 overflow-y-auto">
+          {interviewMode ? (
+            <InterviewExperience
+              knowledgeBases={kbs}
+              selectedKbId={selectedKbId}
+              conversationId={currentSessionId}
+              onClose={() => setInterviewMode(false)}
+              onViewSources={(sources) => handleViewSources(sources)}
+            />
+          ) : (
+          <><div className="flex-1 overflow-y-auto">
             {messages.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center px-6 text-center">
                 <span className="mb-3 text-xs font-medium uppercase tracking-[0.22em] text-cyan-700">
@@ -241,9 +291,11 @@ export default function ChatPage() {
             hyde={hydeEnabled}
             onHydeChange={setHyde}
           />
+          </>
+          )}
         </main>
 
-        {graphRagEnabled && (
+        {graphRagEnabled && !interviewMode && (
           <KnowledgeGraphPanel
             kbId={selectedKbId}
             kbName={

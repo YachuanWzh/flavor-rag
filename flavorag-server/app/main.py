@@ -23,6 +23,7 @@ from app.api.graph import router as graph_router
 from app.api.monitoring import router as monitoring_router
 from app.api.assets import router as assets_router
 from app.api.user_profile import router as user_profile_router
+from app.api.interview import router as interview_router
 from app.config.settings import settings
 from app.config.logging_config import (
     configure_root_logger,
@@ -393,6 +394,7 @@ app.include_router(graph_router)
 app.include_router(monitoring_router)
 app.include_router(assets_router)
 app.include_router(user_profile_router)
+app.include_router(interview_router)
 
 
 @app.get("/api/health")

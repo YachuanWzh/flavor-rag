@@ -64,6 +64,8 @@ export interface SourceRef {
   }>;
   neighborOf?: string[];  // 近邻补偿：该证据关联的父分块 ID
   fileType?: string;      // 源文件类型 (pdf, md, txt...)
+  kbId?: string;
+  kbName?: string;
 }
 
 export interface CitationStats {

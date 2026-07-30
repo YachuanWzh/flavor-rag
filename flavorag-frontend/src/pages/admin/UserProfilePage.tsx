@@ -2,9 +2,12 @@ import { useEffect, useState, useCallback } from "react";
 import {
   Brain, ChevronRight, Search, RefreshCw, Trash2,
   ThumbsUp, ThumbsDown, MessageSquare, Clock, Target,
-  TrendingUp, Database, Zap, X,
+  TrendingUp, Database, Zap, X, Award,
 } from "lucide-react";
 import { api } from "@/services/api";
+import InterviewRadar from "@/features/interview/InterviewRadar";
+import { getAdminInterviewProfile } from "@/features/interview/interviewService";
+import type { InterviewProfileData } from "@/features/interview/types";
 
 // ─── Types ───
 
@@ -76,6 +79,9 @@ export default function UserProfilePage() {
   // Detail drawer
   const [detail, setDetail] = useState<ProfileDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [interviewProfile, setInterviewProfile] = useState<InterviewProfileData | null>(null);
+  const [interviewProfileLoading, setInterviewProfileLoading] = useState(false);
+  const [showInterviewProfile, setShowInterviewProfile] = useState(false);
 
   // Memories
   const [memories, setMemories] = useState<MemoryItem[]>([]);
@@ -104,6 +110,8 @@ export default function UserProfilePage() {
   const openDetail = async (userId: string) => {
     setDetailLoading(true);
     setShowMemories(false);
+    setShowInterviewProfile(false);
+    setInterviewProfile(null);
     try {
       const data = await api.get(`/api/admin/profiles/${userId}`) as any;
       setDetail(data);
@@ -111,6 +119,23 @@ export default function UserProfilePage() {
       setDetail(null);
     } finally {
       setDetailLoading(false);
+    }
+  };
+
+  const loadInterviewProfile = async (userId: string) => {
+    if (showInterviewProfile) {
+      setShowInterviewProfile(false);
+      return;
+    }
+    setShowInterviewProfile(true);
+    if (interviewProfile) return;
+    setInterviewProfileLoading(true);
+    try {
+      setInterviewProfile(await getAdminInterviewProfile(userId));
+    } catch {
+      setInterviewProfile(null);
+    } finally {
+      setInterviewProfileLoading(false);
     }
   };
 
@@ -252,6 +277,10 @@ export default function UserProfilePage() {
           onClose={() => setDetail(null)}
           onRebuild={() => rebuildProfile(detail.userId)}
           onShowMemories={() => loadMemories(detail.userId)}
+          onShowInterviewProfile={() => loadInterviewProfile(detail.userId)}
+          interviewProfile={interviewProfile}
+          interviewProfileLoading={interviewProfileLoading}
+          showInterviewProfile={showInterviewProfile}
           memories={memories}
           memoriesLoading={memoriesLoading}
           showMemories={showMemories}
@@ -266,6 +295,7 @@ export default function UserProfilePage() {
 
 function ProfileDetailDrawer({
   detail, loading, onClose, onRebuild, onShowMemories,
+  onShowInterviewProfile, interviewProfile, interviewProfileLoading, showInterviewProfile,
   memories, memoriesLoading, showMemories, onDeleteMemory,
 }: {
   detail: ProfileDetail;
@@ -273,6 +303,10 @@ function ProfileDetailDrawer({
   onClose: () => void;
   onRebuild: () => void;
   onShowMemories: () => void;
+  onShowInterviewProfile: () => void;
+  interviewProfile: InterviewProfileData | null;
+  interviewProfileLoading: boolean;
+  showInterviewProfile: boolean;
   memories: MemoryItem[];
   memoriesLoading: boolean;
   showMemories: boolean;
@@ -302,6 +336,16 @@ function ProfileDetailDrawer({
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={onShowInterviewProfile}
+              className={`rounded-lg border px-3 py-1.5 text-xs font-medium ${
+                showInterviewProfile
+                  ? "border-cyan-200 bg-cyan-50 text-cyan-700"
+                  : "border-slate-200 text-slate-600 hover:bg-slate-50"
+              }`}
+            >
+              <Award className="mr-1 inline h-3.5 w-3.5" />面试画像
+            </button>
             <button onClick={onRebuild} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50">
               <RefreshCw className="mr-1 inline h-3.5 w-3.5" />重建
             </button>
@@ -325,6 +369,53 @@ function ProfileDetailDrawer({
                   <Metric label="最后活跃" value={detail.lastActiveTime?.slice(5, 16) || "—"} icon={<Clock className="h-3.5 w-3.5" />} />
                 </div>
               </Section>
+
+              {showInterviewProfile && (
+                <Section title="面试能力画像" icon={<Award className="h-4 w-4" />}>
+                  {interviewProfileLoading ? (
+                    <p className="py-10 text-center text-xs text-slate-400">正在加载面试画像…</p>
+                  ) : interviewProfile?.profile ? (
+                    <div>
+                      <InterviewRadar
+                        compact
+                        dimensions={interviewProfile.scoreDimensions}
+                        scores={interviewProfile.profile.dimensionScores}
+                        overallScore={interviewProfile.profile.overallScore}
+                        delta={interviewProfile.profile.delta}
+                      />
+                      <div className="mt-2 grid grid-cols-3 gap-2">
+                        <Metric label="累计面试" value={String(interviewProfile.profile.interviewCount)} />
+                        <Metric label="当前能力值" value={interviewProfile.profile.overallScore.toFixed(1)} />
+                        <Metric
+                          label="趋势"
+                          value={
+                            interviewProfile.profile.trend === "up"
+                              ? `+${interviewProfile.profile.delta.toFixed(1)}`
+                              : interviewProfile.profile.delta.toFixed(1)
+                          }
+                        />
+                      </div>
+                      {interviewProfile.recent.length > 0 && (
+                        <div className="mt-3 space-y-1.5">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">最近面试</p>
+                          {interviewProfile.recent.slice(0, 4).map((item) => (
+                            <div key={item.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs">
+                              <span className="min-w-0 truncate text-slate-600">{item.targetRole} · {item.kbName}</span>
+                              <span className="ml-3 font-mono font-semibold text-slate-800">{item.overallScore.toFixed(1)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="py-8 text-center">
+                      <Award className="mx-auto h-8 w-8 text-slate-300" />
+                      <p className="mt-2 text-sm font-medium text-slate-600">还没有面试记录</p>
+                      <p className="mt-1 text-xs text-slate-400">完成首次模拟面试后将在这里形成能力画像。</p>
+                    </div>
+                  )}
+                </Section>
+              )}
 
               {/* D2: Professional Domain */}
               <Section title="专业领域画像" icon={<Target className="h-4 w-4" />}>

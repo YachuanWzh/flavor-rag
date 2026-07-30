@@ -11,6 +11,7 @@ import httpx
 from fastapi import HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import ProgrammingError
 
 from app.audit.middleware import get_audit_context
 from app.audit.service import record_audit
@@ -32,6 +33,22 @@ class FriendlyError:
 
 def describe_error(exc: BaseException) -> FriendlyError:
     """Map implementation details to a stable, user-facing error contract."""
+    if isinstance(exc, ProgrammingError):
+        database_error = str(getattr(exc, "orig", exc)).lower()
+        if (
+            "undefinedtable" in database_error
+            or ("relation" in database_error and "does not exist" in database_error)
+            or "no such table" in database_error
+        ):
+            return FriendlyError(
+                "DB_SCHEMA_OUTDATED",
+                (
+                    "数据库结构尚未升级。请管理员在 flavorag-server 目录执行 "
+                    "`python -m alembic upgrade head`，重启服务后再试。"
+                ),
+                True,
+                503,
+            )
     if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
         return FriendlyError(
             "REQUEST_TIMEOUT",

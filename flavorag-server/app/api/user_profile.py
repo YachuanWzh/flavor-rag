@@ -197,6 +197,18 @@ async def rebuild_profile(
     return {"code": "0", "message": "画像重建完成", "data": {"profileVersion": profile.profile_version}}
 
 
+@router.get("/{user_id}/interview")
+async def get_interview_profile(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_admin_user),
+):
+    """Get the interview capability radar and recent interview trend."""
+    from app.api.interview import _profile_payload
+
+    return {"code": "0", "data": await _profile_payload(db, user_id)}
+
+
 # ─── Memory facts management ───
 
 

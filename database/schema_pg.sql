@@ -664,3 +664,101 @@ CREATE TABLE IF NOT EXISTS t_evaluation_run (
     created_by VARCHAR(20) NOT NULL,
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Private interview simulation materials and results.
+CREATE TABLE IF NOT EXISTS t_interview_material (
+    id VARCHAR(20) PRIMARY KEY,
+    user_id VARCHAR(20) NOT NULL,
+    tenant_id VARCHAR(64) NOT NULL DEFAULT 'default',
+    kind VARCHAR(16) NOT NULL,
+    file_name VARCHAR(256),
+    mime_type VARCHAR(128),
+    file_size BIGINT NOT NULL DEFAULT 0,
+    content_hash VARCHAR(64) NOT NULL,
+    extracted_text TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (user_id, kind)
+);
+
+CREATE TABLE IF NOT EXISTS t_interview_session (
+    id VARCHAR(20) PRIMARY KEY,
+    user_id VARCHAR(20) NOT NULL,
+    tenant_id VARCHAR(64) NOT NULL DEFAULT 'default',
+    conversation_id VARCHAR(20),
+    kb_id VARCHAR(20),
+    kb_name VARCHAR(128),
+    target_role VARCHAR(128),
+    user_focus TEXT,
+    difficulty VARCHAR(16) NOT NULL DEFAULT 'senior',
+    question_count INTEGER NOT NULL DEFAULT 12,
+    resume_hash VARCHAR(64),
+    jd_hash VARCHAR(64),
+    status VARCHAR(16) NOT NULL DEFAULT 'IN_PROGRESS',
+    overall_score DOUBLE PRECISION,
+    dimension_scores JSONB,
+    role_fit_breakdown JSONB,
+    summary TEXT,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS t_interview_question (
+    id VARCHAR(20) PRIMARY KEY,
+    interview_id VARCHAR(20) NOT NULL,
+    sequence INTEGER NOT NULL,
+    category VARCHAR(16) NOT NULL,
+    question TEXT NOT NULL,
+    follow_up TEXT,
+    rubric JSONB,
+    source JSONB,
+    metadata JSONB,
+    agent_generated SMALLINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (interview_id, sequence)
+);
+
+CREATE TABLE IF NOT EXISTS t_interview_answer (
+    id VARCHAR(20) PRIMARY KEY,
+    interview_id VARCHAR(20) NOT NULL,
+    question_id VARCHAR(20) NOT NULL,
+    answer TEXT NOT NULL DEFAULT '',
+    answer_language VARCHAR(16),
+    skipped SMALLINT NOT NULL DEFAULT 0,
+    score DOUBLE PRECISION,
+    dimension_scores JSONB,
+    analysis TEXT,
+    strengths JSONB,
+    improvements JSONB,
+    reference_points JSONB,
+    answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (interview_id, question_id)
+);
+
+CREATE TABLE IF NOT EXISTS t_interview_profile (
+    id VARCHAR(20) PRIMARY KEY,
+    user_id VARCHAR(20) NOT NULL UNIQUE,
+    tenant_id VARCHAR(64) NOT NULL DEFAULT 'default',
+    dimension_scores JSONB,
+    overall_score DOUBLE PRECISION,
+    previous_overall_score DOUBLE PRECISION,
+    delta DOUBLE PRECISION NOT NULL DEFAULT 0,
+    trend VARCHAR(16) NOT NULL DEFAULT 'stable',
+    interview_count INTEGER NOT NULL DEFAULT 0,
+    latest_interview_id VARCHAR(20),
+    target_role VARCHAR(128),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_interview_material_tenant_user
+  ON t_interview_material (tenant_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_interview_session_user_status
+  ON t_interview_session (user_id, status);
+CREATE INDEX IF NOT EXISTS idx_interview_question_interview
+  ON t_interview_question (interview_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_interview_profile_tenant_user
+  ON t_interview_profile (tenant_id, user_id);

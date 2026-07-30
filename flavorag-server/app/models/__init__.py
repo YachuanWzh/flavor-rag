@@ -1,6 +1,17 @@
 ﻿import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Integer, SmallInteger, Text, BigInteger, DateTime, JSON, Float
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    DateTime,
+    Float,
+    Integer,
+    JSON,
+    SmallInteger,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase
 
 
@@ -721,6 +732,128 @@ class UserProfile(Base):
     total_conversations = Column(Integer, default=0)
     last_active_time = Column(DateTime)
     profile_version = Column(Integer, default=1)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+# ============================================================
+# Interview simulation
+# ============================================================
+
+
+class InterviewMaterial(Base):
+    """Current private resume/JD material for a user."""
+
+    __tablename__ = "t_interview_material"
+    __table_args__ = (
+        UniqueConstraint("user_id", "kind", name="uq_interview_material_user_kind"),
+    )
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    user_id = Column(String(20), nullable=False)
+    tenant_id = Column(String(64), nullable=False, default="default")
+    kind = Column(String(16), nullable=False)  # RESUME | JD
+    file_name = Column(String(256))
+    mime_type = Column(String(128))
+    file_size = Column(BigInteger, nullable=False, default=0)
+    content_hash = Column(String(64), nullable=False)
+    extracted_text = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class InterviewSession(Base):
+    __tablename__ = "t_interview_session"
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    user_id = Column(String(20), nullable=False)
+    tenant_id = Column(String(64), nullable=False, default="default")
+    conversation_id = Column(String(20))
+    kb_id = Column(String(20))
+    kb_name = Column(String(128))
+    target_role = Column(String(128))
+    user_focus = Column(Text)
+    difficulty = Column(String(16), nullable=False, default="senior")
+    question_count = Column(Integer, nullable=False, default=12)
+    resume_hash = Column(String(64))
+    jd_hash = Column(String(64))
+    status = Column(String(16), nullable=False, default="IN_PROGRESS")
+    overall_score = Column(Float)
+    dimension_scores = Column(JSON)
+    role_fit_breakdown = Column(JSON)
+    summary = Column(Text)
+    started_at = Column(DateTime, default=_utcnow)
+    completed_at = Column(DateTime)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class InterviewQuestion(Base):
+    __tablename__ = "t_interview_question"
+    __table_args__ = (
+        UniqueConstraint(
+            "interview_id",
+            "sequence",
+            name="uq_interview_question_sequence",
+        ),
+    )
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    interview_id = Column(String(20), nullable=False)
+    sequence = Column(Integer, nullable=False)
+    category = Column(String(16), nullable=False)
+    question = Column(Text, nullable=False)
+    follow_up = Column(Text)
+    rubric = Column(JSON)
+    source = Column(JSON)
+    metadata_json = Column("metadata", JSON)
+    agent_generated = Column(SmallInteger, nullable=False, default=0)
+    created_at = Column(DateTime, default=_utcnow)
+
+
+class InterviewAnswer(Base):
+    __tablename__ = "t_interview_answer"
+    __table_args__ = (
+        UniqueConstraint(
+            "interview_id",
+            "question_id",
+            name="uq_interview_answer_question",
+        ),
+    )
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    interview_id = Column(String(20), nullable=False)
+    question_id = Column(String(20), nullable=False)
+    answer = Column(Text, nullable=False, default="")
+    answer_language = Column(String(16))
+    skipped = Column(SmallInteger, nullable=False, default=0)
+    score = Column(Float)
+    dimension_scores = Column(JSON)
+    analysis = Column(Text)
+    strengths = Column(JSON)
+    improvements = Column(JSON)
+    reference_points = Column(JSON)
+    answered_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class InterviewProfile(Base):
+    __tablename__ = "t_interview_profile"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_interview_profile_user"),
+    )
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    user_id = Column(String(20), nullable=False)
+    tenant_id = Column(String(64), nullable=False, default="default")
+    dimension_scores = Column(JSON)
+    overall_score = Column(Float)
+    previous_overall_score = Column(Float)
+    delta = Column(Float, nullable=False, default=0)
+    trend = Column(String(16), nullable=False, default="stable")
+    interview_count = Column(Integer, nullable=False, default=0)
+    latest_interview_id = Column(String(20))
+    target_role = Column(String(128))
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 

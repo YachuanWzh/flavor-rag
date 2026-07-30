@@ -1,5 +1,6 @@
 import httpx
 import pytest
+from sqlalchemy.exc import ProgrammingError
 
 import app.error_handling as error_handling
 from app.error_handling import describe_error, record_system_error
@@ -14,6 +15,21 @@ def test_friendly_error_does_not_expose_internal_details():
     timeout = describe_error(httpx.ReadTimeout("provider timed out"))
     assert timeout.code == "REQUEST_TIMEOUT"
     assert timeout.retryable is True
+
+
+def test_missing_database_table_reports_pending_migration():
+    error = ProgrammingError(
+        "SELECT * FROM t_interview_material",
+        {},
+        RuntimeError('relation "t_interview_material" does not exist'),
+    )
+
+    descriptor = describe_error(error)
+
+    assert descriptor.code == "DB_SCHEMA_OUTDATED"
+    assert descriptor.status_code == 503
+    assert descriptor.retryable is True
+    assert "alembic upgrade head" in descriptor.message
 
 
 @pytest.mark.asyncio

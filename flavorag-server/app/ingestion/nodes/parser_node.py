@@ -112,6 +112,7 @@ class ParserNode:
     async def _parse_structured(self, ctx: IngestionContext, ext: str):
         from app.ingestion.structured import (
             parse_csv_document,
+            parse_clipboard_document,
             parse_docx_document,
             parse_html_document,
             parse_image_document,
@@ -124,6 +125,8 @@ class ParserNode:
         name = ctx.source_file_name or f"document.{ext}"
         if ext in ("txt", "md", "markdown", "log"):
             return parse_text_document(self._decode_text(content), name, ext)
+        if ext == "clipdoc":
+            return await parse_clipboard_document(content, name)
         if ext == "csv":
             return parse_csv_document(content, name)
         if ext in ("docx", "doc"):

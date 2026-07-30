@@ -10,7 +10,7 @@ vi.mock("./api", () => ({
   },
 }));
 
-import { createKnowledgeBase } from "./knowledgeService";
+import { createKnowledgeBase, pasteClipboardDocument } from "./knowledgeService";
 
 describe("createKnowledgeBase", () => {
   beforeEach(() => {
@@ -31,5 +31,49 @@ describe("createKnowledgeBase", () => {
 
     const form = postMock.mock.calls[0][1] as FormData;
     expect(form.get("embedding_model")).toBe("vendor/custom-embedding");
+  });
+});
+
+describe("pasteClipboardDocument", () => {
+  beforeEach(() => {
+    postMock.mockReset();
+    postMock.mockResolvedValue({ id: "doc-1" });
+  });
+
+  it("sends pasted content and chunk options as multipart data", async () => {
+    await pasteClipboardDocument(
+      "kb-1",
+      {
+        content: "# 标题\n\n正文",
+        docName: "产品说明",
+        imageReferences: [{
+          id: "rich-image-1",
+          url: "https://cdn.example.com/diagram.png",
+          urls: [
+            "https://cdn.example.com/diagram.png",
+            "https://backup.example.com/diagram.png",
+          ],
+          alt: "流程图",
+        }],
+      },
+      { strategy: "SEMANTIC", chunkSize: 600, overlap: 100 },
+    );
+
+    expect(postMock.mock.calls[0][0]).toBe("/api/knowledge-base/kb-1/docs/paste");
+    const form = postMock.mock.calls[0][1] as FormData;
+    expect(form.get("content")).toBe("# 标题\n\n正文");
+    expect(form.get("doc_name")).toBe("产品说明");
+    expect(form.get("chunk_strategy")).toBe("SEMANTIC");
+    expect(form.get("chunk_size")).toBe("600");
+    expect(form.get("overlap")).toBe("100");
+    expect(JSON.parse(String(form.get("image_references")))).toEqual([{
+      id: "rich-image-1",
+      url: "https://cdn.example.com/diagram.png",
+      urls: [
+        "https://cdn.example.com/diagram.png",
+        "https://backup.example.com/diagram.png",
+      ],
+      alt: "流程图",
+    }]);
   });
 });

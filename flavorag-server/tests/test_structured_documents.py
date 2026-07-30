@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import base64
+import io
+import json
+
 import pytest
+from PIL import Image
 
 from app.ingestion.parser import DocumentParser
 from app.ingestion.structured import (
     BlockType,
     GenericStructuredChunker,
     StructuredDocument,
+    parse_clipboard_document,
     parse_csv_document,
 )
 from app.rag.rewrite import normalize_query
@@ -41,6 +47,101 @@ async def test_legacy_parser_entry_also_returns_structured_document(tmp_path):
     assert isinstance(document, StructuredDocument)
     assert any(block.block_type == BlockType.HEADING for block in document.blocks)
     assert "第一步配置环境" in document.to_markdown()
+
+
+@pytest.mark.asyncio
+async def test_clipboard_document_preserves_images_as_searchable_assets(monkeypatch):
+    image_buffer = io.BytesIO()
+    Image.new("RGB", (2, 2), color="red").save(image_buffer, format="PNG")
+
+    class FakeDescriber:
+        async def describe(self, image_bytes, mime_type, *, context=""):
+            assert mime_type == "image/png"
+            return "一张红色的示意图"
+
+    monkeypatch.setattr(
+        "app.ingestion.pdf.vlm.get_image_describer",
+        lambda: FakeDescriber(),
+    )
+    bundle = json.dumps({
+        "version": 1,
+        "content": (
+            "# 架构\n\n图片前面的任务规划说明。\n\n"
+            "![架构图](clipboard-image://img-1)\n\n"
+            "图片后面的执行流程说明。"
+        ),
+        "images": [{
+            "id": "img-1",
+            "filename": "architecture.png",
+            "mimeType": "image/png",
+            "alt": "架构图",
+            "data": base64.b64encode(image_buffer.getvalue()).decode("ascii"),
+        }],
+    }).encode("utf-8")
+
+    document = await parse_clipboard_document(bundle, "architecture.clipdoc")
+    image_blocks = [
+        block for block in document.blocks if block.block_type == BlockType.IMAGE
+    ]
+
+    assert len(document.assets) == 1
+    assert len(image_blocks) == 1
+    assert "图片前文: # 架构 图片前面的任务规划说明。" in image_blocks[0].embedding_text
+    assert "图片内容: 一张红色的示意图" in image_blocks[0].embedding_text
+    assert "图片后文: 图片后面的执行流程说明。" in image_blocks[0].embedding_text
+    assert image_blocks[0].outline_path == ["架构"]
+    assert "asset://" in image_blocks[0].content
+    assert "clipboard-image://" not in document.to_markdown()
+
+    chunks = GenericStructuredChunker().chunk(document)
+    assert [chunk["block_type"] for chunk in chunks] == [
+        "PARAGRAPH",
+        "IMAGE",
+        "PARAGRAPH",
+    ]
+    assert chunks[1]["asset_ids"]
+    assert "图片前面的任务规划说明" in chunks[1]["embedding_content"]
+    assert "图片后面的执行流程说明" in chunks[1]["embedding_content"]
+
+
+@pytest.mark.asyncio
+async def test_clipboard_document_preserves_table_structure_and_position():
+    bundle = json.dumps({
+        "version": 1,
+        "content": (
+            "# Agent评估\n\n以下是核心评估维度。\n\n"
+            "| 评估维度 | 核心指标 | 说明 |\n"
+            "| --- | --- | --- |\n"
+            "| 任务完成率 | Success Rate | 是否达成目标 |\n"
+            "| 过程正确性 | Tool Call Accuracy | 参数是否正确 |\n\n"
+            "表格之后是抽检策略。"
+        ),
+        "images": [],
+    }).encode("utf-8")
+
+    document = await parse_clipboard_document(bundle, "evaluation.clipdoc")
+    block_types = [block.block_type for block in document.blocks]
+    assert block_types == [
+        BlockType.HEADING,
+        BlockType.PARAGRAPH,
+        BlockType.TABLE,
+        BlockType.PARAGRAPH,
+    ]
+
+    table = document.blocks[2]
+    assert table.table_headers == ["评估维度", "核心指标", "说明"]
+    assert table.table_rows[0] == ["任务完成率", "Success Rate", "是否达成目标"]
+    assert table.outline_path == ["Agent评估"]
+
+    chunks = GenericStructuredChunker().chunk(document)
+    assert [chunk["block_type"] for chunk in chunks] == [
+        "PARAGRAPH",
+        "TABLE",
+        "PARAGRAPH",
+    ]
+    assert "评估维度: 任务完成率" in chunks[1]["embedding_content"]
+    assert "核心指标: Success Rate" in chunks[1]["embedding_content"]
+    assert "表格之后是抽检策略" in chunks[2]["content"]
 
 
 def test_term_normalization_is_idempotent():

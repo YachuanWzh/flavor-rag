@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 import io
+import json
 import mimetypes
 import re
 import uuid
@@ -67,6 +69,28 @@ def _clean(value: Any) -> str:
     return " ".join(str(value or "").replace("\r", "\n").split())
 
 
+def _markdown_table_cells(line: str) -> list[str]:
+    value = line.strip()
+    if "|" not in value:
+        return []
+    if value.startswith("|"):
+        value = value[1:]
+    if value.endswith("|") and not value.endswith("\\|"):
+        value = value[:-1]
+    return [
+        _clean(cell.replace("\\|", "|"))
+        for cell in re.split(r"(?<!\\)\|", value)
+    ]
+
+
+def _is_markdown_table_separator(line: str) -> bool:
+    cells = _markdown_table_cells(line)
+    return bool(cells) and all(
+        re.fullmatch(r":?-{3,}:?", cell.replace(" ", ""))
+        for cell in cells
+    )
+
+
 def parse_text_document(text: str, source_file: str, file_type: str) -> StructuredDocument:
     blocks: list[StructuredBlock] = []
     outline: list[str] = []
@@ -90,7 +114,10 @@ def parse_text_document(text: str, source_file: str, file_type: str) -> Structur
                 )
             )
 
-    for line in text.splitlines():
+    lines = text.splitlines()
+    line_index = 0
+    while line_index < len(lines):
+        line = lines[line_index]
         if line.strip().startswith("```"):
             if in_code:
                 blocks.append(
@@ -106,9 +133,44 @@ def parse_text_document(text: str, source_file: str, file_type: str) -> Structur
             else:
                 flush_paragraph()
             in_code = not in_code
+            line_index += 1
             continue
         if in_code:
             code_lines.append(line)
+            line_index += 1
+            continue
+        if (
+            line_index + 1 < len(lines)
+            and _markdown_table_cells(line)
+            and _is_markdown_table_separator(lines[line_index + 1])
+        ):
+            flush_paragraph()
+            headers = _markdown_table_cells(line)
+            table_start = line_index
+            line_index += 2
+            rows: list[list[str]] = []
+            while line_index < len(lines) and lines[line_index].strip():
+                cells = _markdown_table_cells(lines[line_index])
+                if not cells:
+                    break
+                rows.append(
+                    (cells + [""] * len(headers))[: len(headers)]
+                )
+                line_index += 1
+            blocks.append(
+                StructuredBlock(
+                    _id("table"),
+                    BlockType.TABLE,
+                    outline_path=list(outline),
+                    table_headers=headers,
+                    table_rows=rows,
+                    location={
+                        "lineStart": table_start + 1,
+                        "lineEnd": line_index,
+                    },
+                    metadata={"format": "markdown"},
+                )
+            )
             continue
         heading = re.match(r"^(#{1,6})\s+(.+)$", line.strip())
         if heading:
@@ -126,6 +188,7 @@ def parse_text_document(text: str, source_file: str, file_type: str) -> Structur
                     metadata={"level": level},
                 )
             )
+            line_index += 1
             continue
         if re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", line):
             flush_paragraph()
@@ -139,11 +202,13 @@ def parse_text_document(text: str, source_file: str, file_type: str) -> Structur
                     list(outline),
                 )
             )
+            line_index += 1
             continue
         if not line.strip():
             flush_paragraph()
         else:
             paragraph.append(line)
+        line_index += 1
     flush_paragraph()
     if code_lines:
         blocks.append(
@@ -156,6 +221,179 @@ def parse_text_document(text: str, source_file: str, file_type: str) -> Structur
             )
         )
     return StructuredDocument(source_file, file_type, blocks)
+
+
+async def parse_clipboard_document(
+    content: bytes,
+    source_file: str,
+) -> StructuredDocument:
+    """Parse the internal text-and-image clipboard bundle format."""
+    payload = json.loads(content.decode("utf-8"))
+    if payload.get("version") != 1:
+        raise ValueError("Unsupported clipboard document version")
+
+    text = str(payload.get("content") or "")
+    image_payloads = payload.get("images") or []
+    if not isinstance(image_payloads, list):
+        raise ValueError("Clipboard document images must be a list")
+
+    from app.ingestion.pdf.vlm import get_image_describer
+
+    describer = get_image_describer()
+    image_info_by_id: dict[str, dict[str, Any]] = {}
+    assets: list[PdfAsset] = []
+    for index, image in enumerate(image_payloads, start=1):
+        image_id = str(image.get("id") or "")
+        if not image_id:
+            raise ValueError(f"Clipboard image at index {index} has no id")
+        try:
+            image_bytes = base64.b64decode(image["data"], validate=True)
+        except Exception as exc:
+            raise ValueError(f"Invalid clipboard image at index {index}") from exc
+        mime_type = str(image.get("mimeType") or "application/octet-stream")
+        filename = str(image.get("filename") or f"clipboard-image-{index}")
+        alt = str(image.get("alt") or filename).strip()
+        try:
+            description = await describer.describe(
+                image_bytes,
+                mime_type,
+                context=f"剪贴板文档={source_file}; 图片序号={index}",
+            )
+            description_status = "enriched" if description else "missing"
+        except Exception:
+            description = ""
+            description_status = "failed"
+        asset = PdfAsset.from_bytes(
+            page_no=index,
+            bbox=None,
+            filename=filename,
+            mime_type=mime_type,
+            data=image_bytes,
+            description=description,
+            metadata={
+                "source": "clipboard",
+                "description_status": description_status,
+            },
+        )
+        assets.append(asset)
+        image_info_by_id[image_id] = {
+            "index": index,
+            "asset": asset,
+            "alt": alt,
+            "description": description,
+            "description_status": description_status,
+            "mime_type": mime_type,
+        }
+
+    marker_pattern = re.compile(
+        r"!\[([^\]]*)\]\(clipboard-image://([A-Za-z0-9._-]+)\)"
+    )
+
+    def context_text(value: str, *, tail: bool = False) -> str:
+        value = marker_pattern.sub("", value)
+        value = " ".join(value.split())
+        return value[-500:] if tail else value[:500]
+
+    blocks: list[StructuredBlock] = []
+    current_outline: list[str] = []
+
+    def append_text_segment(segment: str) -> None:
+        nonlocal current_outline
+        parsed = parse_text_document(segment, source_file, "clipboard")
+        for block in parsed.blocks:
+            if block.block_type == BlockType.HEADING:
+                level = max(1, int(block.metadata.get("level") or 1))
+                current_outline = current_outline[: level - 1]
+                current_outline.append(block.content)
+                block.outline_path = list(current_outline)
+            elif not block.outline_path:
+                block.outline_path = list(current_outline)
+            blocks.append(block)
+
+    def append_image_block(
+        image_id: str,
+        marker_alt: str,
+        *,
+        offset: int,
+        before: str,
+        after: str,
+    ) -> bool:
+        info = image_info_by_id.get(image_id)
+        if info is None:
+            return False
+        asset = info["asset"]
+        alt = marker_alt.strip() or info["alt"]
+        visible = info["description"] or alt or asset.filename
+        embedding_parts = []
+        if current_outline:
+            embedding_parts.append(f"章节: {' > '.join(current_outline)}")
+        if before:
+            embedding_parts.append(f"图片前文: {before}")
+        embedding_parts.append(f"图片内容: {visible}")
+        if after:
+            embedding_parts.append(f"图片后文: {after}")
+        blocks.append(
+            StructuredBlock(
+                _id("image"),
+                BlockType.IMAGE,
+                f"{info['description']}\n\n![{alt}](asset://{asset.asset_id})".strip(),
+                "\n".join(embedding_parts),
+                list(current_outline),
+                asset_ids=[asset.asset_id],
+                location={
+                    "clipboardImage": info["index"],
+                    "charOffset": offset,
+                },
+                metadata={
+                    "source": "clipboard",
+                    "descriptionStatus": info["description_status"],
+                    "mimeType": info["mime_type"],
+                    "contextBefore": before,
+                    "contextAfter": after,
+                },
+            )
+        )
+        return True
+
+    referenced_ids: set[str] = set()
+    cursor = 0
+    for marker in marker_pattern.finditer(text):
+        append_text_segment(text[cursor:marker.start()])
+        image_id = marker.group(2)
+        if append_image_block(
+            image_id,
+            marker.group(1),
+            offset=marker.start(),
+            before=context_text(text[:marker.start()], tail=True),
+            after=context_text(text[marker.end():]),
+        ):
+            referenced_ids.add(image_id)
+        cursor = marker.end()
+    append_text_segment(text[cursor:])
+
+    # Preserve assets even when a source application supplied image bytes but
+    # omitted the corresponding HTML marker.
+    for image_id, info in image_info_by_id.items():
+        if image_id not in referenced_ids:
+            append_image_block(
+                image_id,
+                info["alt"],
+                offset=len(text),
+                before=context_text(text, tail=True),
+                after="",
+            )
+
+    document = StructuredDocument(
+        source_file,
+        "clipboard",
+        blocks,
+        assets,
+        metadata={
+            "imageCount": len(assets),
+            "sourceFormat": "clipboard",
+        },
+    )
+    return document
 
 
 def parse_csv_document(content: bytes, source_file: str) -> StructuredDocument:

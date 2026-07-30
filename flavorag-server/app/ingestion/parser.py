@@ -22,6 +22,7 @@ class DocumentParser:
         ".jpg": "_parse_image",
         ".jpeg": "_parse_image",
         ".webp": "_parse_image",
+        ".clipdoc": "_parse_clipboard",
         ".pdf": "_parse_pdf",
     }
 
@@ -134,6 +135,14 @@ class DocumentParser:
             Path(file_path).read_bytes(),
             source_file or os.path.basename(file_path),
             ext,
+        )
+
+    async def _parse_clipboard(self, file_path: str, *, source_file: str = ""):
+        from app.ingestion.structured import parse_clipboard_document
+
+        return await parse_clipboard_document(
+            Path(file_path).read_bytes(),
+            source_file or os.path.basename(file_path),
         )
 
     # ---- PDF ----

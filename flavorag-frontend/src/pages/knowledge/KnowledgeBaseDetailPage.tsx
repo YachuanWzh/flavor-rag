@@ -2,11 +2,12 @@ import { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   ArrowLeft, Upload, Trash2, FileText, Eye, Loader2, Link as LinkIcon, Globe,
-  Files, CheckCircle, XCircle, AlertCircle, RefreshCw,
+  Files, CheckCircle, XCircle, AlertCircle, RefreshCw, ClipboardPaste,
 } from "lucide-react";
 import {
   fetchDocuments,
   uploadDocument,
+  pasteClipboardDocument,
   uploadDocumentFromUrl,
   batchUploadDocuments,
   deleteDocument,
@@ -14,6 +15,120 @@ import {
   type ChunkOptions,
 } from "@/services/knowledgeService";
 import type { KnowledgeDocument, BatchFileResult } from "@/types";
+
+interface ClipboardImage {
+  id: string;
+  file?: File;
+  sourceUrl?: string;
+  sourceUrls?: string[];
+  alt: string;
+  previewUrl: string;
+  previewFailed?: boolean;
+}
+
+function richImageSourceCandidates(image: HTMLImageElement): string[] {
+  const rawCandidates = [
+    image.getAttribute("data-src"),
+    image.getAttribute("data-original"),
+    image.getAttribute("data-original-src"),
+    image.getAttribute("data-lazy-src"),
+    image.getAttribute("data-url"),
+    image.getAttribute("src"),
+  ];
+  for (const attribute of ["data-srcset", "srcset"]) {
+    const srcset = image.getAttribute(attribute);
+    if (srcset) {
+      rawCandidates.push(
+        ...srcset.split(",").map((item) => item.trim().split(/\s+/)[0]),
+      );
+    }
+  }
+  const normalized = rawCandidates
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.trim())
+    .map((value) => value.startsWith("//") ? `https:${value}` : value)
+    .filter((value) => /^(?:https?:|data:image\/|blob:)/i.test(value));
+  const unique = Array.from(new Set(normalized));
+  const priority = (value: string) => {
+    if (/^data:image\//i.test(value)) return 0;
+    if (/^https?:/i.test(value)) return 1;
+    return 2;
+  };
+  return unique.sort((left, right) => priority(left) - priority(right));
+}
+
+function clipboardImageMarker(image: ClipboardImage): string {
+  const safeAlt = image.alt.replace(/[\[\]\r\n]/g, " ").trim() || "粘贴图片";
+  return `![${safeAlt}](clipboard-image://${image.id})`;
+}
+
+function renderRichClipboardText(
+  document: Document,
+  imageEntries: Map<HTMLImageElement, ClipboardImage>,
+): string {
+  const render = (node: Node): string => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return node.textContent || "";
+    }
+    if (!(node instanceof HTMLElement)) return "";
+    if (
+      ["STYLE", "SCRIPT", "NOSCRIPT", "TEMPLATE", "META", "LINK", "HEAD"].includes(node.tagName)
+      || node.getAttribute("aria-hidden") === "true"
+      || /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)/i.test(
+        node.getAttribute("style") || "",
+      )
+    ) {
+      return "";
+    }
+    if (node.tagName === "IMG") {
+      const entry = imageEntries.get(node as HTMLImageElement);
+      return entry ? `\n\n${clipboardImageMarker(entry)}\n\n` : (node.getAttribute("alt") || "");
+    }
+    if (node.tagName === "BR") return "\n";
+    if (node.tagName === "TABLE") {
+      const rows = Array.from(node.querySelectorAll("tr"))
+        .filter((row) => row.closest("table") === node)
+        .map((row) => Array.from(row.children)
+          .filter((cell) => ["TD", "TH"].includes(cell.tagName))
+          .map((cell) => Array.from(cell.childNodes).map(render).join("")
+            .replace(/\s+/g, " ")
+            .replace(/\|/g, "\\|")
+            .trim()));
+      if (rows.length === 0) return "";
+      const columnCount = Math.max(...rows.map((row) => row.length));
+      const normalizedRows = rows.map((row) => [
+        ...row,
+        ...Array(Math.max(0, columnCount - row.length)).fill(""),
+      ]);
+      const markdownRows = normalizedRows.map((row) => `| ${row.join(" | ")} |`);
+      const separator = `| ${Array(columnCount).fill("---").join(" | ")} |`;
+      return `\n\n${markdownRows[0]}\n${separator}\n${markdownRows.slice(1).join("\n")}\n\n`;
+    }
+
+    const body = Array.from(node.childNodes).map(render).join("");
+    if (/^H[1-6]$/.test(node.tagName)) {
+      const level = Number(node.tagName.slice(1));
+      return `\n\n${"#".repeat(level)} ${body.trim()}\n\n`;
+    }
+    if (node.tagName === "LI") return `\n- ${body.trim()}\n`;
+    if (node.tagName === "PRE") return `\n\n\`\`\`\n${body.trim()}\n\`\`\`\n\n`;
+    if (node.tagName === "BLOCKQUOTE") {
+      return `\n\n${body.split("\n").map((line) => line ? `> ${line}` : line).join("\n")}\n\n`;
+    }
+    if (["P", "DIV", "SECTION", "ARTICLE", "FIGURE", "FIGCAPTION"].includes(node.tagName)) {
+      return `\n${body}\n`;
+    }
+    return body;
+  };
+
+  return render(document.body)
+    .replace(/\u00a0/g, " ")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/g, " ").trimEnd())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
 export default function KnowledgeBaseDetailPage() {
   const { kbId } = useParams<{ kbId: string }>();
@@ -31,11 +146,14 @@ export default function KnowledgeBaseDetailPage() {
   const [chunkSize, setChunkSize] = useState(512);
   const [chunkOverlap, setChunkOverlap] = useState(128);
 
-  // Upload mode: file / url / batch
-  const [uploadMode, setUploadMode] = useState<"file" | "url" | "batch">("batch");
+  // Upload mode: file / URL / batch / pasted Markdown
+  const [uploadMode, setUploadMode] = useState<"file" | "url" | "batch" | "paste">("batch");
   const [urlInput, setUrlInput] = useState("");
   const [urlDocName, setUrlDocName] = useState("");
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [markdownContent, setMarkdownContent] = useState("");
+  const [markdownDocName, setMarkdownDocName] = useState("");
+  const [clipboardImages, setClipboardImages] = useState<ClipboardImage[]>([]);
 
   // Batch upload state
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
@@ -89,6 +207,203 @@ export default function KnowledgeBaseDetailPage() {
       await loadDocs();
     } catch (err: any) {
       setError(err?.message || "URL添加失败");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleClipboardContentPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const pastedFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    const richHtml = event.clipboardData.getData("text/html");
+    const htmlDocument = richHtml
+      ? new DOMParser().parseFromString(richHtml, "text/html")
+      : null;
+    const htmlImages = htmlDocument
+      ? Array.from(htmlDocument.querySelectorAll("img"))
+          .map((image) => ({
+            element: image,
+            sourceUrls: richImageSourceCandidates(image),
+            alt: image.getAttribute("alt") || image.getAttribute("title") || "",
+          }))
+      : [];
+    if (
+      pastedFiles.length === 0
+      && !htmlImages.some((image) => image.sourceUrls.length > 0)
+    ) return;
+
+    event.preventDefault();
+    const clipboardText = event.clipboardData.getData("text/plain");
+    const fileEntries: ClipboardImage[] = pastedFiles.map((source, index) => {
+      const id = `paste-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+      const subtype = source.type.split("/")[1]?.replace("jpeg", "jpg") || "png";
+      const file = new File([source], `${id}.${subtype}`, { type: source.type });
+      return {
+        id,
+        file,
+        alt: `粘贴图片 ${clipboardImages.length + index + 1}`,
+        previewUrl: URL.createObjectURL(file),
+      };
+    });
+    const positionedEntries = new Map<HTMLImageElement, ClipboardImage>();
+    const entries: ClipboardImage[] = [];
+    htmlImages.forEach((image, index) => {
+      const fileEntry = fileEntries[index];
+      if (fileEntry) {
+        const entry = {
+          ...fileEntry,
+          alt: image.alt || fileEntry.alt,
+        };
+        positionedEntries.set(image.element, entry);
+        entries.push(entry);
+      } else if (image.sourceUrls.length > 0) {
+        const entry: ClipboardImage = {
+          id: `rich-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
+          sourceUrl: image.sourceUrls[0],
+          sourceUrls: image.sourceUrls,
+          alt: image.alt || `富文本图片 ${clipboardImages.length + index + 1}`,
+          previewUrl: image.sourceUrls[0],
+        };
+        positionedEntries.set(image.element, entry);
+        entries.push(entry);
+      }
+    });
+    const extraFileEntries = fileEntries.slice(htmlImages.length);
+    entries.push(...extraFileEntries);
+
+    const positionedText = htmlDocument && positionedEntries.size > 0
+      ? renderRichClipboardText(htmlDocument, positionedEntries)
+      : clipboardText;
+    const extraImageMarkdown = extraFileEntries
+      .map(clipboardImageMarker)
+      .join("\n\n");
+    const insertion = [positionedText, extraImageMarkdown].filter(Boolean).join("\n\n");
+    const start = event.currentTarget.selectionStart;
+    const end = event.currentTarget.selectionEnd;
+    setMarkdownContent((previous) =>
+      `${previous.slice(0, start)}${insertion}${previous.slice(end)}`,
+    );
+    setClipboardImages((previous) => [...previous, ...entries]);
+  };
+
+  const removeClipboardImage = (id: string) => {
+    setClipboardImages((previous) => {
+      const removed = previous.find((image) => image.id === id);
+      if (removed) URL.revokeObjectURL(removed.previewUrl);
+      return previous.filter((image) => image.id !== id);
+    });
+    setMarkdownContent((previous) =>
+      previous
+        .split("\n")
+        .filter((line) => !line.includes(`clipboard-image://${id}`))
+        .join("\n")
+        .replace(/\n{3,}/g, "\n\n"),
+    );
+  };
+
+  const handleClipboardContentChange = (
+    event: React.ChangeEvent<HTMLTextAreaElement>,
+  ) => {
+    const nextContent = event.target.value;
+    setMarkdownContent(nextContent);
+    setClipboardImages((previous) => previous.filter((image) => {
+      const retained = nextContent.includes(`clipboard-image://${image.id}`);
+      if (!retained) URL.revokeObjectURL(image.previewUrl);
+      return retained;
+    }));
+  };
+
+  const handleClipboardPreviewError = (id: string) => {
+    setClipboardImages((previous) => previous.map((image) => {
+      if (image.id !== id || !image.sourceUrls) return image;
+      const currentIndex = image.sourceUrls.indexOf(image.previewUrl);
+      const nextUrl = image.sourceUrls[currentIndex + 1];
+      return nextUrl
+        ? { ...image, previewUrl: nextUrl }
+        : { ...image, previewFailed: true };
+    }));
+  };
+
+  const handleClipboardImport = async () => {
+    if (!kbId || (!markdownContent.trim() && clipboardImages.length === 0)) return;
+    try {
+      setUploading(true);
+      setError("");
+      setSuccessMsg("");
+      const resolvedImages = await Promise.all(clipboardImages.map(async (image) => {
+        if (image.file) {
+          return { file: image.file };
+        }
+        if (!image.sourceUrl && !image.sourceUrls?.length) {
+          throw new Error(`图片「${image.alt}」缺少可读取的数据`);
+        }
+        const candidates = image.sourceUrls || [image.sourceUrl!];
+        for (const candidate of candidates) {
+          const controller = new AbortController();
+          const timeout = window.setTimeout(() => controller.abort(), 8000);
+          try {
+            const response = await fetch(candidate, {
+              credentials: "include",
+              signal: controller.signal,
+            });
+            if (!response.ok) continue;
+            const blob = await response.blob();
+            if (!blob.type.startsWith("image/")) continue;
+            const subtype = blob.type.split("/")[1]?.replace("jpeg", "jpg") || "png";
+            return {
+              file: new File([blob], `${image.id}.${subtype}`, { type: blob.type }),
+            };
+          } catch {
+            // Try the next clipboard-provided source.
+          } finally {
+            window.clearTimeout(timeout);
+          }
+        }
+        const remoteCandidates = candidates.filter((url) => /^https?:/i.test(url));
+        if (remoteCandidates.length > 0) {
+          return {
+            reference: {
+              id: image.id,
+              url: remoteCandidates[0],
+              urls: remoteCandidates,
+              alt: image.alt,
+            },
+          };
+        }
+        throw new Error(
+          `无法读取图片「${image.alt}」：源应用只提供了不可跨页面访问的临时图片地址`,
+        );
+      }));
+      const result = await pasteClipboardDocument(
+        kbId,
+        {
+          content: markdownContent,
+          docName: markdownDocName.trim() || undefined,
+          images: resolvedImages.flatMap((image) => image.file ? [image.file] : []),
+          imageReferences: resolvedImages.flatMap((image) =>
+            image.reference ? [image.reference] : [],
+          ),
+        },
+        {
+          strategy: chunkStrategy,
+          chunkSize,
+          overlap: chunkOverlap,
+        },
+      );
+      if (result.isDuplicate) {
+        setSuccessMsg(`内容已存在于文档「${result.existingDocName || "已有文档"}」，未重复导入`);
+      } else {
+        setSuccessMsg(`剪贴板文档「${result.docName}」已提交处理`);
+        clipboardImages.forEach((image) => URL.revokeObjectURL(image.previewUrl));
+        setMarkdownContent("");
+        setMarkdownDocName("");
+        setClipboardImages([]);
+      }
+      await loadDocs();
+    } catch (err: any) {
+      setError(err?.message || "剪贴板内容导入失败");
     } finally {
       setUploading(false);
     }
@@ -331,6 +646,15 @@ export default function KnowledgeBaseDetailPage() {
             <Globe size={14} className="inline mr-1" />
             URL导入
           </button>
+          <button
+            onClick={() => setUploadMode("paste")}
+            className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+              uploadMode === "paste" ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+            }`}
+          >
+            <ClipboardPaste size={14} className="inline mr-1" />
+            粘贴内容
+          </button>
         </div>
 
         {/* Upload area */}
@@ -461,6 +785,91 @@ export default function KnowledgeBaseDetailPage() {
                 <span className="text-xs text-gray-400">支持 TXT / MD / PDF / DOCX / XLSX / CSV / PPTX / HTML</span>
               </button>
             )}
+          </div>
+        ) : uploadMode === "paste" ? (
+          <div className="mb-6 p-6 bg-white border rounded-lg">
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">文档名称（可选）</label>
+                <input
+                  type="text"
+                  value={markdownDocName}
+                  onChange={(e) => setMarkdownDocName(e.target.value)}
+                  placeholder="例如：产品说明"
+                  maxLength={256}
+                  className="w-full border rounded px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs text-gray-500">文本 / Markdown / 图片</label>
+                  <span className="text-xs text-gray-400">{markdownContent.length} 字符</span>
+                </div>
+                <textarea
+                  value={markdownContent}
+                  onChange={handleClipboardContentChange}
+                  onPaste={handleClipboardContentPaste}
+                  placeholder={"在这里粘贴文本、Markdown 或截图。\n\n# 标题\n\n正文和图片可以一起粘贴……"}
+                  rows={14}
+                  spellCheck={false}
+                  className="w-full border rounded px-3 py-2 text-sm font-mono resize-y min-h-[240px] focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400"
+                />
+              </div>
+              {clipboardImages.length > 0 && (
+                <div>
+                  <div className="text-xs text-gray-500 mb-2">
+                    已捕获 {clipboardImages.length} 张剪贴板图片
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {clipboardImages.map((image) => (
+                      <div key={image.id} className="relative border rounded-md overflow-hidden bg-gray-50">
+                        {image.previewFailed ? (
+                          <div className="w-full h-24 px-2 flex items-center justify-center text-center text-xs text-amber-600">
+                            预览不可用，导入时将继续尝试读取
+                          </div>
+                        ) : (
+                          <img
+                            src={image.previewUrl}
+                            alt={image.alt}
+                            referrerPolicy="no-referrer"
+                            onError={() => handleClipboardPreviewError(image.id)}
+                            className="w-full h-24 object-contain"
+                          />
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => removeClipboardImage(image.id)}
+                          className="absolute top-1 right-1 p-0.5 rounded-full bg-white/90 text-gray-500 hover:text-red-500"
+                          title="移除图片"
+                        >
+                          <XCircle size={16} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-gray-400">
+                  图片会保存为文档资产并生成可检索描述，随后统一分块、Embedding 和入库
+                </span>
+                <button
+                  onClick={handleClipboardImport}
+                  disabled={uploading || (!markdownContent.trim() && clipboardImages.length === 0)}
+                  className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 flex items-center gap-1"
+                >
+                  {uploading ? (
+                    <>
+                      <Loader2 size={14} className="animate-spin" /> 导入中
+                    </>
+                  ) : (
+                    <>
+                      <ClipboardPaste size={14} /> 导入剪贴板内容
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
           </div>
         ) : (
           <div className="mb-6 p-6 bg-white border rounded-lg">

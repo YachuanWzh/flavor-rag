@@ -1,8 +1,13 @@
 """Knowledge base CRUD API + document upload + URL source."""
 from __future__ import annotations
 
+import base64
+import hashlib
+import io
+import json
 import mimetypes
 import os
+import re
 import traceback
 import asyncio
 from datetime import datetime, timezone
@@ -466,6 +471,344 @@ async def upload_document(
         if doc is not None:
             doc.status = "failed"
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{kb_id}/docs/paste")
+async def paste_clipboard_document(
+    kb_id: str,
+    content: str = Form(""),
+    doc_name: str = Form(""),
+    chunk_strategy: str = Form("FIXED_WINDOW"),
+    chunk_size: int = Form(512),
+    overlap: int = Form(128),
+    images: list[UploadFile] = File(default_factory=list),
+    image_references: str = Form("[]"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Import clipboard text and images through the normal ingestion path."""
+    kb = await require_kb(
+        db, principal_from_user(user), kb_id, Permission.WRITE
+    )
+    if not kb:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    try:
+        remote_images = json.loads(image_references or "[]")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="图片引用格式不合法") from exc
+    if not isinstance(remote_images, list):
+        raise HTTPException(status_code=400, detail="图片引用必须是数组")
+    if not content.strip() and not images and not remote_images:
+        raise HTTPException(status_code=400, detail="粘贴内容不能为空")
+    if chunk_size < 100 or chunk_size > 5000:
+        raise HTTPException(status_code=400, detail="chunk_size 必须在 100 到 5000 之间")
+    if overlap < 0 or overlap >= chunk_size:
+        raise HTTPException(
+            status_code=400,
+            detail="overlap 必须大于等于 0 且小于 chunk_size",
+        )
+    if len(images) + len(remote_images) > settings.upload_batch_max_files:
+        raise HTTPException(
+            status_code=400,
+            detail=f"一次最多粘贴 {settings.upload_batch_max_files} 张图片",
+        )
+
+    try:
+        canonical_strategy = ChunkStrategy.from_value(chunk_strategy).name
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    text_bytes = content.encode("utf-8")
+    total_size = len(text_bytes)
+    if total_size > settings.upload_max_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"粘贴内容超过大小限制（{settings.upload_max_bytes} 字节）",
+        )
+
+    doc_id = gen_id()
+    requested_name = doc_name.strip()
+    if requested_name:
+        # Treat the supplied value as a display filename, never as a path.
+        normalized_name = requested_name.replace("\\", "/").rsplit("/", 1)[-1].strip()
+        if (
+            not normalized_name
+            or normalized_name in {".", ".."}
+            or any(ord(char) < 32 for char in normalized_name)
+        ):
+            raise HTTPException(status_code=400, detail="文档名称不合法")
+    else:
+        normalized_name = f"粘贴文档-{doc_id}"
+
+    image_payloads: list[dict] = []
+    image_hashes: set[str] = set()
+    canonical_content = content
+
+    def append_image(
+        *,
+        raw: bytes,
+        filename: str,
+        content_type: str,
+        original_id: str,
+        supplied_alt: str,
+        index: int,
+    ) -> None:
+        nonlocal total_size, canonical_content
+        total_size += len(raw)
+        if total_size > settings.upload_max_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"文本和图片总大小超过限制（{settings.upload_max_bytes} 字节）",
+            )
+        filename = filename.replace("\\", "/").rsplit("/", 1)[-1]
+        extension = os.path.splitext(filename)[1].lower().lstrip(".")
+        try:
+            from app.ingestion.upload_validation import validate_upload
+            from PIL import Image
+
+            with Image.open(io.BytesIO(raw)) as parsed_image:
+                if parsed_image.width * parsed_image.height > settings.upload_max_image_pixels:
+                    raise UploadValidationError("image pixel count exceeds configured maximum")
+                detected_extension = (parsed_image.format or "").lower().replace("jpeg", "jpg")
+                detected_mime = Image.MIME.get(parsed_image.format or "", "")
+                parsed_image.verify()
+            if detected_extension not in {"png", "jpg", "webp"}:
+                raise UploadValidationError(
+                    f"unsupported clipboard image format: {detected_extension or 'unknown'}"
+                )
+            if extension not in {"png", "jpg", "jpeg", "webp"}:
+                extension = detected_extension
+                filename = f"{os.path.splitext(filename)[0] or f'clipboard-image-{index}'}.{extension}"
+            normalized_mime = detected_mime or (
+                content_type
+                if content_type.startswith("image/")
+                else f"image/{detected_extension}"
+            )
+            validate_upload(
+                filename=filename,
+                content_type=normalized_mime,
+                header=raw[:16],
+                size=len(raw),
+                max_bytes=settings.upload_max_bytes,
+            )
+        except UploadValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"图片校验失败: {filename}") from exc
+
+        digest = hashlib.sha256(raw).hexdigest()
+        canonical_id = digest[:20]
+        alt_match = re.search(
+            rf"!\[([^\]]*)\]\(clipboard-image://{re.escape(original_id)}\)",
+            canonical_content,
+        )
+        alt = supplied_alt or (alt_match.group(1) if alt_match else "") or f"粘贴图片 {index}"
+        canonical_content = canonical_content.replace(
+            f"clipboard-image://{original_id}",
+            f"clipboard-image://{canonical_id}",
+        )
+        if digest in image_hashes:
+            return
+        image_hashes.add(digest)
+        suffix = "jpg" if extension == "jpeg" else extension
+        image_payloads.append({
+            "id": canonical_id,
+            "filename": f"clipboard-{digest[:16]}.{suffix}",
+            "mimeType": normalized_mime,
+            "alt": alt,
+            "data": base64.b64encode(raw).decode("ascii"),
+        })
+
+    for index, image in enumerate(images, start=1):
+        raw = await image.read(settings.upload_max_bytes + 1)
+        filename = (
+            image.filename or f"clipboard-image-{index}.png"
+        ).replace("\\", "/").rsplit("/", 1)[-1]
+        append_image(
+            raw=raw,
+            filename=filename,
+            content_type=image.content_type or "",
+            original_id=os.path.splitext(filename)[0],
+            supplied_alt="",
+            index=index,
+        )
+
+    for offset, reference in enumerate(remote_images, start=len(images) + 1):
+        if not isinstance(reference, dict):
+            raise HTTPException(status_code=400, detail="图片引用项不合法")
+        reference_id = str(reference.get("id") or "")
+        alt = str(reference.get("alt") or "")[:256]
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", reference_id):
+            raise HTTPException(status_code=400, detail="图片引用 ID 不合法")
+        candidate_urls = reference.get("urls") or [reference.get("url")]
+        if not isinstance(candidate_urls, list):
+            raise HTTPException(status_code=400, detail="图片候选 URL 不合法")
+        candidate_urls = [
+            str(url) for url in candidate_urls
+            if url and len(str(url)) <= 4096
+        ]
+        candidate_urls = list(dict.fromkeys(candidate_urls))[:5]
+        if not candidate_urls:
+            raise HTTPException(status_code=400, detail="图片引用 URL 不合法")
+        fetched = None
+        last_fetch_error: Exception | None = None
+        for url in candidate_urls:
+            try:
+                fetched = await SafeURLFetcher(
+                    max_bytes=min(
+                        settings.url_ingestion_max_bytes,
+                        max(1, settings.upload_max_bytes - total_size),
+                    ),
+                    timeout_sec=min(settings.url_ingestion_timeout_sec, 20),
+                    max_redirects=settings.url_ingestion_max_redirects,
+                    allow_private_networks=settings.url_allow_private_networks,
+                ).fetch(url)
+                break
+            except (URLSecurityError, httpx.HTTPError) as exc:
+                last_fetch_error = exc
+        if fetched is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"无法读取富文本图片「{alt or reference_id}」: {last_fetch_error}",
+            ) from last_fetch_error
+        filename = fetched.filename or f"{reference_id}{mimetypes.guess_extension(fetched.content_type) or ''}"
+        append_image(
+            raw=fetched.content,
+            filename=filename,
+            content_type=fetched.content_type,
+            original_id=reference_id,
+            supplied_alt=alt,
+            index=offset,
+        )
+
+    has_images = bool(image_payloads)
+    extension = "clipdoc" if has_images else "md"
+    name_stem = normalized_name.rsplit(".", 1)[0] if "." in normalized_name else normalized_name
+    doc_name = f"{name_stem}.{extension}"
+    if len(doc_name) > 256:
+        raise HTTPException(status_code=400, detail="文档名称不能超过 256 个字符")
+
+    stored_content = (
+        json.dumps(
+            {
+                "version": 1,
+                "content": canonical_content,
+                "images": image_payloads,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if has_images
+        else text_bytes
+    )
+    file_path = os.path.join(_UPLOAD_DIR, f"{doc_id}.{extension}")
+    doc = None
+    try:
+        await asyncio.to_thread(Path(file_path).write_bytes, stored_content)
+        content_hash = compute_content_hash(file_path)
+
+        dedup = DuplicateDetector()
+        dup_result = await dedup.check_file(
+            file_path, kb_id, db, tenant_id=user.tenant_id or "default"
+        )
+        if dup_result.is_duplicate:
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+            return {
+                "code": "0",
+                "message": "duplicate",
+                "data": {
+                    "isDuplicate": True,
+                    "existingDocId": dup_result.existing_doc_id,
+                    "existingDocName": dup_result.existing_doc_name,
+                },
+            }
+
+        doc = KnowledgeDocument(
+            id=doc_id,
+            kb_id=kb_id,
+            tenant_id=kb.tenant_id,
+            department_id=kb.department_id,
+            doc_name=doc_name,
+            file_url=file_path,
+            file_type=extension,
+            file_size=total_size,
+            content_hash=content_hash,
+            source_type="file",
+            chunk_strategy=canonical_strategy,
+            chunk_config={
+                "chunkSize": chunk_size,
+                "overlapSize": overlap,
+                "clipboardImageCount": len(image_payloads),
+            },
+            status="running",
+            created_by=user.id,
+        )
+        db.add(doc)
+        await db.flush()
+
+        chunk_config = ChunkConfig(
+            strategy=canonical_strategy,
+            chunk_size=chunk_size,
+            overlap=overlap,
+        )
+        if settings.ingestion_async_enabled:
+            await enqueue_ingestion_job(
+                db,
+                kb=kb,
+                doc=doc,
+                file_path=file_path,
+                source_type="file",
+                chunk_config=chunk_config,
+                user_id=user.id,
+                tenant_id=user.tenant_id or "default",
+            )
+            return {
+                "code": "0",
+                "message": "success",
+                "data": {
+                    "id": doc.id,
+                    "docName": doc.doc_name,
+                    "chunkCount": 0,
+                    "status": "queued",
+                },
+            }
+
+        chunk_count = await _run_ingestion(
+            kb=kb,
+            doc=doc,
+            file_path=file_path,
+            source_type="file",
+            user=user,
+            db=db,
+            chunk_config=chunk_config,
+        )
+        return {
+            "code": "0",
+            "message": "success",
+            "data": {
+                "id": doc.id,
+                "docName": doc.doc_name,
+                "chunkCount": chunk_count,
+                "status": "success",
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        traceback.print_exc()
+        if doc is not None:
+            doc.status = "failed"
+        else:
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/{kb_id}/docs/upload-url")

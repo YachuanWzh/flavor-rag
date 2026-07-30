@@ -61,6 +61,51 @@ export async function uploadDocument(
   });
 }
 
+export interface ClipboardPasteRequest {
+  content: string;
+  docName?: string;
+  images?: File[];
+  imageReferences?: Array<{
+    id: string;
+    url: string;
+    urls?: string[];
+    alt?: string;
+  }>;
+}
+
+export interface ClipboardPasteResult {
+  id?: string;
+  docName?: string;
+  chunkCount?: number;
+  status?: string;
+  isDuplicate?: boolean;
+  existingDocId?: string;
+  existingDocName?: string;
+}
+
+/** Import clipboard text and images through the normal ingestion pipeline. */
+export async function pasteClipboardDocument(
+  kbId: string,
+  req: ClipboardPasteRequest,
+  options: ChunkOptions = {},
+): Promise<ClipboardPasteResult> {
+  const { strategy = "FIXED_WINDOW", chunkSize = 512, overlap = 128 } = options;
+  const form = new FormData();
+  form.append("content", req.content);
+  if (req.docName) form.append("doc_name", req.docName);
+  form.append("chunk_strategy", strategy);
+  form.append("chunk_size", String(chunkSize));
+  form.append("overlap", String(overlap));
+  for (const image of req.images || []) {
+    form.append("images", image);
+  }
+  form.append("image_references", JSON.stringify(req.imageReferences || []));
+  return api.post(`/api/knowledge-base/${kbId}/docs/paste`, form, {
+    headers: { "Content-Type": "multipart/form-data" },
+    timeout: 600000,
+  });
+}
+
 /** URL upload request. */
 export interface URLUploadRequest {
   url: string;

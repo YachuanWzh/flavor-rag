@@ -556,6 +556,13 @@ export default function InterviewExperience({
     }
   };
 
+  const openHistoricalReview = () => {
+    if (!historyInterview || historyInterview.status !== "COMPLETED") return;
+    setInterview(historyInterview);
+    setExpandedQuestion(historyInterview.questions[0]?.id || null);
+    setPhase("review");
+  };
+
   const confirmExit = async () => {
     if (!interview || loading) return;
     setLoading(true);
@@ -654,6 +661,7 @@ export default function InterviewExperience({
           loading={historyLoading}
           error={historyError}
           onSelect={selectHistoryInterview}
+          onOpenFullReview={openHistoricalReview}
           onClear={clearHistory}
           onBack={() => setPhase(historyReturnPhase)}
           onClose={onClose}

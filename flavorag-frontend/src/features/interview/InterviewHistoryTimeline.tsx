@@ -27,6 +27,7 @@ interface Props {
   loading: boolean;
   error: string;
   onSelect: (id: string) => void;
+  onOpenFullReview: () => void;
   onClear: () => Promise<void>;
   onBack: () => void;
   onClose: () => void;
@@ -69,6 +70,7 @@ export default function InterviewHistoryTimeline({
   loading,
   error,
   onSelect,
+  onOpenFullReview,
   onClear,
   onBack,
   onClose,
@@ -189,6 +191,16 @@ export default function InterviewHistoryTimeline({
                       <p className="mt-4 max-w-3xl text-sm leading-6 text-slate-300">
                         {selected.summary || "本次面试暂无总评。"}
                       </p>
+                      <div className="mt-5 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={onOpenFullReview}
+                          className="inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-sm font-semibold text-slate-950 shadow-sm transition hover:bg-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
+                        >
+                          查看完整复盘
+                          <ArrowUpRight className="h-4 w-4" />
+                        </button>
+                      </div>
                     </div>
 
                     <div className="grid gap-4 p-5 md:grid-cols-[minmax(0,0.9fr)_minmax(260px,1.1fr)] md:p-7">

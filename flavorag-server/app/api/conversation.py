@@ -239,6 +239,10 @@ async def submit_feedback(
         db.add(feedback)
 
     await db.flush()
+    from app.evaluation.cases import sync_case_feedback
+
+    await sync_case_feedback(db, answer=message, feedback=feedback)
+    await db.flush()
     return {"code": "0", "message": "success", "data": {"id": feedback.id, "vote": feedback.vote}}
 
 

@@ -5,6 +5,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Float,
+    Index,
     Integer,
     JSON,
     SmallInteger,
@@ -109,6 +110,65 @@ class MessageFeedback(Base, TimestampMixin):
     vote = Column(SmallInteger, nullable=False)
     reason = Column(String(255))
     comment = Column(String(1024))
+
+
+class EvaluationDatasetCase(Base, TimestampMixin):
+    """Production question promoted into the evaluation dataset lifecycle.
+
+    Every completed answer receives one inactive ``base`` case.  A reviewer can
+    promote it to ``golden``; down-voted answers remain inactive until their
+    ground truth is corrected, so bad retrieval is never silently blessed as
+    expected evidence.
+    """
+
+    __tablename__ = "t_evaluation_dataset_case"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "source_question_id",
+            name="uq_evaluation_case_source_question",
+        ),
+        Index(
+            "idx_evaluation_case_tenant_status",
+            "tenant_id",
+            "case_type",
+            "active",
+            "create_time",
+        ),
+        Index(
+            "idx_evaluation_case_user",
+            "tenant_id",
+            "user_id",
+            "create_time",
+        ),
+    )
+
+    id = Column(String(20), primary_key=True, default=gen_id)
+    tenant_id = Column(String(64), nullable=False, default="default")
+    source_question_id = Column(String(20), nullable=False)
+    source_answer_id = Column(String(20))
+    user_id = Column(String(20), nullable=False)
+    conversation_id = Column(String(20), nullable=False)
+    case_type = Column(String(16), nullable=False, default="base")
+    review_status = Column(String(24), nullable=False, default="generated")
+    question = Column(Text, nullable=False)
+    expected_answer = Column(Text, nullable=False, default="")
+    expected_chunk_ids = Column(JSON, nullable=False, default=list)
+    expected_doc_ids = Column(JSON, nullable=False, default=list)
+    retrieved_chunk_ids = Column(JSON, nullable=False, default=list)
+    retrieved_doc_ids = Column(JSON, nullable=False, default=list)
+    knowledge_base_ids = Column(JSON, nullable=False, default=list)
+    category = Column(String(64), nullable=False, default="production")
+    difficulty = Column(String(16), nullable=False, default="medium")
+    tags = Column(JSON, nullable=False, default=list)
+    answerable = Column(SmallInteger, nullable=False, default=1)
+    active = Column(SmallInteger, nullable=False, default=0)
+    quality_score = Column(Float, nullable=False, default=0)
+    feedback_vote = Column(SmallInteger)
+    feedback_reason = Column(String(255))
+    feedback_comment = Column(String(1024))
+    promoted_by = Column(String(20))
+    promoted_at = Column(DateTime)
 
 
 class KnowledgeBase(Base, TimestampMixin):

@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from app.evaluation import DATASET_PATH
 from app.evaluation.runner import (
     DatasetValidationError,
     EvaluationCase,
@@ -128,6 +129,43 @@ def test_dataset_validation_rejects_duplicate_ids(tmp_path):
 
     with pytest.raises(DatasetValidationError):
         load_dataset(path)
+
+
+def test_archive_golden_dataset_covers_every_archived_document():
+    cases = load_dataset(DATASET_PATH)
+    active = [case for case in cases if case.active]
+    answerable = [case for case in active if case.answerable]
+    negatives = [case for case in active if not case.answerable]
+
+    assert len(active) == 54
+    assert len(answerable) == 48
+    assert len(negatives) == 6
+    assert len({doc_id for case in answerable for doc_id in case.expected_doc_ids}) == 36
+    assert len(
+        {kb_id for case in answerable for kb_id in case.knowledge_base_ids}
+    ) == 6
+    assert all(case.expected_chunk_ids for case in answerable)
+    assert all(case.expected_doc_ids for case in answerable)
+    assert all(case.expected_answer for case in answerable)
+    assert all(not case.expected_chunk_ids for case in negatives)
+    assert {"direct", "lexical", "paraphrase", "multi_hop", "cross_kb"} <= {
+        case.category for case in active
+    }
+
+
+def test_single_kb_scope_excludes_cross_kb_cases():
+    from app.api.evaluation import _cases_for_scope
+
+    cases = load_dataset(DATASET_PATH)
+    scoped = _cases_for_scope(cases, "1c83f94f0cb54af6")
+
+    assert len(scoped) == 9
+    assert all(
+        not case.knowledge_base_ids
+        or case.knowledge_base_ids == ["1c83f94f0cb54af6"]
+        for case in scoped
+    )
+    assert len(_cases_for_scope(cases, "*")) == 54
 
 
 def test_quality_gate_fails_closed_when_metrics_are_missing():

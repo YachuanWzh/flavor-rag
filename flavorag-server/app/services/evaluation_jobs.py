@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from sqlalchemy import desc, or_, select, update
 
 from app.config.logging_config import get_logger
+from app.evaluation import DATASET_PATH
 from app.evaluation.runner import (
     assess_quality_gates,
     calculate_case_metrics,
@@ -17,11 +17,12 @@ from app.evaluation.runner import (
     load_dataset,
     run_evaluation,
 )
-from app.models import EvaluationRun, KnowledgeBase
-from app.rag.pipeline import RAGContext, RAGPipeline
+from app.evaluation.cases import to_evaluation_case
+from app.models import EvaluationDatasetCase, EvaluationRun, KnowledgeBase
+from app.rag.pipeline import RAGContext, RAGPipeline, RetrievalScope
 
 _log = get_logger("flavorag.evaluation.worker")
-_DATASET = Path(__file__).resolve().parents[2] / "evaluation" / "minimal.jsonl"
+_DATASET = DATASET_PATH
 
 
 def _utcnow() -> datetime:
@@ -142,18 +143,63 @@ async def execute_evaluation_run(run_id: str, session_factory) -> None:
         if record is None:
             return
         config = dict(record.config_json or {})
-        kb = await session.get(KnowledgeBase, record.kb_id)
-        if kb is None or kb.deleted:
-            raise RuntimeError("evaluation knowledge base is missing")
+        scope_id = record.kb_id
+        kb = None
+        if scope_id != "*":
+            kb = await session.get(KnowledgeBase, scope_id)
+            if kb is None or kb.deleted:
+                raise RuntimeError("evaluation knowledge base is missing")
+        persisted_cases = [
+            to_evaluation_case(item)
+            for item in (
+                await session.execute(
+                    select(EvaluationDatasetCase).where(
+                        EvaluationDatasetCase.tenant_id == record.tenant_id,
+                        EvaluationDatasetCase.deleted == 0,
+                    )
+                )
+            ).scalars().all()
+        ]
 
     categories = list(config.get("categories") or [])
     cases = [
         case
-        for case in load_dataset(_DATASET)
-        if not categories or case.category in categories
+        for case in [*load_dataset(_DATASET), *persisted_cases]
+        if (
+            scope_id == "*"
+            or not case.knowledge_base_ids
+            or set(case.knowledge_base_ids).issubset({scope_id})
+        )
+        and (not categories or case.category in categories)
     ]
     top_k = int(config.get("top_k", 5))
     runtime = dict(config.get("_runtime") or {})
+    retrieval_scopes = [
+        RetrievalScope(
+            kb_id=str(item["kb_id"]),
+            kb_name=str(item.get("kb_name", "")),
+            collection_name=str(item["collection_name"]),
+            embedding_model=(
+                str(item["embedding_model"])
+                if item.get("embedding_model")
+                else None
+            ),
+        )
+        for item in runtime.get("retrieval_scopes", [])
+    ]
+    if not retrieval_scopes and kb is not None:
+        retrieval_scopes = [
+            RetrievalScope(
+                kb_id=kb.id,
+                kb_name=kb.name,
+                collection_name=(
+                    kb.active_collection_name or kb.collection_name
+                ),
+                embedding_model=kb.embedding_model,
+            )
+        ]
+    if not retrieval_scopes:
+        raise RuntimeError("evaluation retrieval scopes are missing")
     pipeline = RAGPipeline()
     cases_by_question = {case.question: case for case in cases}
 
@@ -162,17 +208,28 @@ async def execute_evaluation_run(run_id: str, session_factory) -> None:
         result = await pipeline.run(
             RAGContext(
                 question=question,
-                kb_id=kb.id,
+                kb_id=None if scope_id == "*" else retrieval_scopes[0].kb_id,
                 collection_name=(
-                    kb.active_collection_name or kb.collection_name
+                    None
+                    if scope_id == "*"
+                    else retrieval_scopes[0].collection_name
                 ),
                 user_id=str(runtime.get("user_id", "")),
                 tenant_id=str(runtime.get("tenant_id", "default")),
                 department_id=str(runtime.get("department_id", "")),
                 role=str(runtime.get("role", "user")),
-                graph_rag=bool(config.get("graph_rag", False)),
+                graph_rag=(
+                    True
+                    if scope_id == "*"
+                    else bool(config.get("graph_rag", False))
+                ),
                 final_top_k=top_k,
-                embedding_model=kb.embedding_model,
+                embedding_model=(
+                    None
+                    if scope_id == "*"
+                    else retrieval_scopes[0].embedding_model
+                ),
+                retrieval_scopes=retrieval_scopes,
             )
         )
         chunk_ids = [

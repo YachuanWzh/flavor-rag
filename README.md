@@ -212,7 +212,12 @@ PENDING generation → required indexes success → ACTIVE
 - prompt-injection canary safety；
 - P50/P95/P99 latency 和关键指标 95% CI。
 
-门禁要求至少 30 个启用案例，并要求 reference answer 覆盖率。当前示例数据集绑定固定示例文档；选择其他 corpus 时 API 会明确拒绝运行，而不是用失效 chunk ID 静默打分。生产使用前应维护组织自己的版本化 golden set。
+门禁要求至少 30 个启用案例，并要求 reference answer 覆盖率。当前
+`knowledge-archive-golden-v1.jsonl` 覆盖 6 个归档知识库、36 篇文档和
+2,174 个切片；每条案例显式绑定知识库、文档、切片、corpus snapshot
+和 document generation。评测页可选择单库切片，也可选择“全部知识库”
+运行跨库评测。语料版本不匹配时 API 会明确拒绝运行，不会用失效 chunk ID
+静默打分。
 
 **企业评测（v0.0.5）**：评测绑定 corpus snapshot、document/index generation、embedding 模型和 prompt 版本，同时计算 Retrieval 与 Answer 指标、95% 置信区间、最小样本门禁和生成阶段 prompt-injection canary。
 

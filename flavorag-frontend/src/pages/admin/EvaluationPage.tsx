@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Activity, AlertTriangle, ArrowDownRight, ArrowUpRight, BarChart3,
   Check, ChevronDown, Clock3, Download, FlaskConical, Gauge, Layers3,
-  Play, RefreshCw, Search, ShieldCheck, Target, ThumbsDown, X,
+  Play, RefreshCw, Search, ShieldCheck, Sparkles, Target, ThumbsDown,
+  UserRound, X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/services/api";
@@ -89,6 +90,31 @@ interface FeedbackCandidate {
   suggestedCase: Record<string, unknown>;
 }
 
+interface QuestionAsset {
+  id: string;
+  conversationId: string;
+  user: { id: string; username: string };
+  question: string;
+  answer: { id: string; content: string; sourceCount: number } | null;
+  feedback: { vote: number; reason?: string; comment?: string } | null;
+  qualityScore: number;
+  label: "BAD_CASE" | "GOOD_CASE" | "GOLDEN" | "UNRATED";
+  dataset: {
+    id: string;
+    caseType: "base" | "golden";
+    reviewStatus: "generated" | "approved" | "needs_review";
+    active: boolean;
+  } | null;
+  createdAt?: string;
+}
+
+interface QuestionAssetPage {
+  items: QuestionAsset[];
+  page: number;
+  pageSize: number;
+  total: number;
+}
+
 const metricLabels: Record<string, string> = {
   "precision@5": "Precision@5",
   "recall@5": "Recall@5",
@@ -117,6 +143,7 @@ const categoryLabels: Record<string, string> = {
   lexical: "关键词",
   paraphrase: "语义改写",
   multi_hop: "多跳检索",
+  cross_kb: "跨库综合",
   semantic: "语义检索",
   scenario: "场景推理",
   numeric: "数值查询",
@@ -125,6 +152,7 @@ const categoryLabels: Record<string, string> = {
   adversarial: "对抗攻击",
   ambiguous: "歧义问题",
   visual: "多模态",
+  production: "线上问题",
 };
 
 export default function EvaluationPage() {
@@ -134,25 +162,40 @@ export default function EvaluationPage() {
   const [runs, setRuns] = useState<RunResult[]>([]);
   const [trend, setTrend] = useState<TrendData>({ points: [], alerts: [] });
   const [feedback, setFeedback] = useState<FeedbackCandidate[]>([]);
+  const [questionAssets, setQuestionAssets] = useState<QuestionAssetPage>({
+    items: [], page: 1, pageSize: 100, total: 0,
+  });
   const [selectedRun, setSelectedRun] = useState<RunResult | null>(null);
   const [running, setRunning] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"overview" | "slices" | "cases">("overview");
+  const [tab, setTab] = useState<"overview" | "slices" | "cases" | "questions">("overview");
   const [topK, setTopK] = useState(5);
   const [concurrency, setConcurrency] = useState(4);
   const [repetitions, setRepetitions] = useState(1);
   const [caseQuery, setCaseQuery] = useState("");
   const [caseCategory, setCaseCategory] = useState("all");
+  const [questionQuery, setQuestionQuery] = useState("");
+  const [questionUser, setQuestionUser] = useState("all");
+  const [questionLabel, setQuestionLabel] = useState("all");
+  const [promotingId, setPromotingId] = useState<string | null>(null);
 
   const load = async (preferredKbId?: string) => {
     setLoading(true);
     try {
-      const [summary, candidates, kbList] = await Promise.all([
-        api.get("/api/admin/evaluation/overview"),
+      const requestedKbId = preferredKbId || kbId || "*";
+      const overviewSuffix = requestedKbId
+        ? `?kb_id=${encodeURIComponent(requestedKbId)}`
+        : "";
+      const [summary, candidates, kbList, questions] = await Promise.all([
+        api.get(`/api/admin/evaluation/overview${overviewSuffix}`),
         api.get("/api/admin/evaluation/feedback-candidates?limit=20"),
         fetchKnowledgeBases(),
-      ]) as unknown as [Overview, FeedbackCandidate[], KnowledgeBase[]];
-      const nextKbId = preferredKbId || kbId || kbList[0]?.id || "";
+        api.get("/api/admin/evaluation/questions?page_size=100"),
+      ]) as unknown as [Overview, FeedbackCandidate[], KnowledgeBase[], QuestionAssetPage];
+      const nextKbId = requestedKbId === "*"
+        || kbList.some((item) => item.id === requestedKbId)
+        ? requestedKbId
+        : kbList[0]?.id || "";
       const suffix = nextKbId ? `&kb_id=${nextKbId}` : "";
       const [history, trendData] = await Promise.all([
         api.get(`/api/admin/evaluation/runs?limit=30${suffix}`),
@@ -160,6 +203,7 @@ export default function EvaluationPage() {
       ]) as unknown as [RunResult[], TrendData];
       setOverview(summary);
       setFeedback(candidates);
+      setQuestionAssets(questions);
       setKbs(kbList);
       setKbId(nextKbId);
       setRuns(history);
@@ -251,6 +295,26 @@ export default function EvaluationPage() {
     URL.revokeObjectURL(url);
   };
 
+  const generateGolden = async (item: QuestionAsset) => {
+    if (!item.answer || promotingId) return;
+    setPromotingId(item.id);
+    try {
+      const result = await api.post(
+        `/api/admin/evaluation/questions/${item.id}/golden`,
+      ) as unknown as { active: boolean; reviewStatus: string };
+      toast.success(
+        result.active
+          ? "已生成 Golden Case，并加入回归测试集"
+          : "已保存为 Golden 候选；Bad Case 需补标后才会启用",
+      );
+      await load(kbId);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Golden Case 生成失败");
+    } finally {
+      setPromotingId(null);
+    }
+  };
+
   const filteredCases = useMemo(
     () => (overview?.cases || []).filter((item) =>
       (caseCategory === "all" || item.category === caseCategory)
@@ -268,6 +332,29 @@ export default function EvaluationPage() {
       .filter((item) => !item.case_metrics.passed)
       .sort((a, b) => a.case_metrics.recall - b.case_metrics.recall),
     [selectedRun],
+  );
+
+  const questionUsers = useMemo(
+    () => Array.from(
+      new Map(questionAssets.items.map((item) => [item.user.id, item.user])).values(),
+    ),
+    [questionAssets.items],
+  );
+
+  const filteredQuestionAssets = useMemo(
+    () => questionAssets.items.filter((item) => {
+      const matchesQuery = !questionQuery
+        || item.question.toLowerCase().includes(questionQuery.toLowerCase())
+        || item.answer?.content.toLowerCase().includes(questionQuery.toLowerCase());
+      const matchesUser = questionUser === "all" || item.user.id === questionUser;
+      const matchesLabel = questionLabel === "all"
+        || (questionLabel === "bad" && item.label === "BAD_CASE")
+        || (questionLabel === "good" && item.label === "GOOD_CASE")
+        || (questionLabel === "golden" && item.label === "GOLDEN")
+        || (questionLabel === "unrated" && item.label === "UNRATED");
+      return matchesQuery && matchesUser && matchesLabel;
+    }),
+    [questionAssets.items, questionLabel, questionQuery, questionUser],
   );
 
   const metrics = selectedRun?.metrics || {};
@@ -301,6 +388,7 @@ export default function EvaluationPage() {
                 onChange={(event) => changeKb(event.target.value)}
                 className="h-9 min-w-44 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium outline-none focus:border-teal-500"
               >
+                <option value="*">全部知识库（跨库评测）</option>
                 {kbs.map((kb) => (
                   <option key={kb.id} value={kb.id}>{kb.name}</option>
                 ))}
@@ -430,6 +518,7 @@ export default function EvaluationPage() {
                 ["overview", "质量总览", Gauge],
                 ["slices", "切片诊断", Layers3],
                 ["cases", "案例资产", FlaskConical],
+                ["questions", "用户问题", UserRound],
               ] as const).map(([value, label, Icon]) => (
                 <button
                   key={value}
@@ -742,6 +831,165 @@ export default function EvaluationPage() {
                 </aside>
               </div>
             )}
+
+            {tab === "questions" && (
+              <div className="mt-5">
+                <Panel
+                  title="用户问题资产"
+                  subtitle={`共 ${questionAssets.total} 条 · 回答完成后自动生成 Base Case`}
+                  action={(
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-teal-50 px-2.5 py-1 text-[10px] font-semibold text-teal-700">
+                      <Sparkles className="h-3 w-3" />
+                      Golden 闭环
+                    </span>
+                  )}
+                >
+                  <div className="mb-4 flex flex-wrap gap-2">
+                    <label className="relative min-w-64 flex-1">
+                      <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                      <input
+                        value={questionQuery}
+                        onChange={(event) => setQuestionQuery(event.target.value)}
+                        placeholder="搜索问题或回答"
+                        className="h-9 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-xs outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                      />
+                    </label>
+                    <label className="relative">
+                      <select
+                        value={questionUser}
+                        onChange={(event) => setQuestionUser(event.target.value)}
+                        className="h-9 min-w-36 appearance-none rounded-lg border border-slate-200 bg-white pl-3 pr-8 text-xs outline-none focus:border-teal-500"
+                      >
+                        <option value="all">全部用户</option>
+                        {questionUsers.map((owner) => (
+                          <option key={owner.id} value={owner.id}>{owner.username}</option>
+                        ))}
+                      </select>
+                      <ChevronDown className="pointer-events-none absolute right-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                    </label>
+                    <label className="relative">
+                      <select
+                        value={questionLabel}
+                        onChange={(event) => setQuestionLabel(event.target.value)}
+                        className="h-9 min-w-36 appearance-none rounded-lg border border-slate-200 bg-white pl-3 pr-8 text-xs outline-none focus:border-teal-500"
+                      >
+                        <option value="all">全部标签</option>
+                        <option value="bad">Bad Case</option>
+                        <option value="good">正向反馈</option>
+                        <option value="golden">Golden</option>
+                        <option value="unrated">未评价</option>
+                      </select>
+                      <ChevronDown className="pointer-events-none absolute right-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                    </label>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[1080px] text-left">
+                      <thead>
+                        <tr className="border-b border-slate-200 text-[10px] uppercase tracking-[0.12em] text-slate-400">
+                          <th className="pb-2 font-semibold">用户 / 时间</th>
+                          <th className="pb-2 font-semibold">问题与回答</th>
+                          <th className="pb-2 font-semibold">反馈标签</th>
+                          <th className="pb-2 font-semibold">质量分</th>
+                          <th className="pb-2 font-semibold">测试资产</th>
+                          <th className="pb-2 text-right font-semibold">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {filteredQuestionAssets.map((item) => {
+                          const isBad = item.label === "BAD_CASE";
+                          const isGolden = item.dataset?.caseType === "golden";
+                          return (
+                            <tr key={item.id} className={isBad ? "bg-rose-50/45" : "hover:bg-slate-50/60"}>
+                              <td className="w-36 py-3 pr-4 align-top">
+                                <div className="flex items-center gap-2">
+                                  <span className="grid h-6 w-6 place-items-center rounded-full bg-slate-100 text-[10px] font-bold text-slate-600">
+                                    {item.user.username.slice(0, 1).toUpperCase()}
+                                  </span>
+                                  <span className="text-xs font-semibold text-slate-700">
+                                    {item.user.username}
+                                  </span>
+                                </div>
+                                <p className="mt-2 font-mono text-[9px] text-slate-400">
+                                  {formatTime(item.createdAt)}
+                                </p>
+                              </td>
+                              <td className="max-w-xl py-3 pr-6 align-top">
+                                <p className="text-xs font-semibold leading-5 text-slate-800">
+                                  {item.question}
+                                </p>
+                                <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-slate-400">
+                                  {item.answer?.content || "回答尚未完成"}
+                                </p>
+                                {item.answer && (
+                                  <span className="mt-1.5 inline-block text-[9px] text-slate-400">
+                                    {item.answer.sourceCount} 条召回证据
+                                  </span>
+                                )}
+                              </td>
+                              <td className="w-32 py-3 pr-5 align-top">
+                                <CaseLabel value={item.label} />
+                                {(item.feedback?.reason || item.feedback?.comment) && (
+                                  <p
+                                    className="mt-2 max-w-32 truncate text-[9px] text-slate-400"
+                                    title={item.feedback.comment || item.feedback.reason}
+                                  >
+                                    {item.feedback.comment || item.feedback.reason}
+                                  </p>
+                                )}
+                              </td>
+                              <td className="w-32 py-3 pr-5 align-top">
+                                <QualityScore value={item.qualityScore} bad={isBad} />
+                              </td>
+                              <td className="w-36 py-3 pr-5 align-top">
+                                <p className="text-[10px] font-semibold text-slate-600">
+                                  {isGolden ? "Golden Case" : item.dataset ? "Base Case" : "等待回答"}
+                                </p>
+                                <p className={`mt-1 text-[9px] ${
+                                  item.dataset?.reviewStatus === "needs_review"
+                                    ? "font-semibold text-rose-600"
+                                    : item.dataset?.active
+                                      ? "text-teal-600"
+                                      : "text-slate-400"
+                                }`}>
+                                  {item.dataset?.reviewStatus === "needs_review"
+                                    ? "待补标 · 未启用"
+                                    : item.dataset?.active
+                                      ? "已进入回归集"
+                                      : item.dataset
+                                        ? "自动生成 · 待提升"
+                                        : "尚未生成"}
+                                </p>
+                              </td>
+                              <td className="w-36 py-3 text-right align-top">
+                                <button
+                                  type="button"
+                                  onClick={() => generateGolden(item)}
+                                  disabled={!item.answer || promotingId === item.id || isGolden}
+                                  className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-[10px] font-semibold transition focus:outline-none focus:ring-2 focus:ring-offset-1 disabled:cursor-not-allowed ${
+                                    isBad && !isGolden
+                                      ? "border border-rose-200 bg-white text-rose-700 hover:bg-rose-50 focus:ring-rose-200"
+                                      : "bg-slate-900 text-white hover:bg-teal-800 focus:ring-teal-300 disabled:bg-slate-100 disabled:text-slate-400"
+                                  }`}
+                                >
+                                  {promotingId === item.id
+                                    ? <RefreshCw className="h-3 w-3 animate-spin" />
+                                    : <Sparkles className="h-3 w-3" />}
+                                  {isGolden ? "已生成" : isBad ? "保存待复核" : "生成 Golden"}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  {!filteredQuestionAssets.length && (
+                    <Empty text="暂无符合筛选条件的用户问题" />
+                  )}
+                </Panel>
+              </div>
+            )}
           </>
         )}
       </main>
@@ -1029,6 +1277,43 @@ function HeatValue({
     <span className={`inline-block min-w-16 rounded-md px-2 py-1.5 font-mono text-[10px] font-semibold ${tone}`}>
       {latency ? `${Math.round(value)}ms` : formatPercent(value)}
     </span>
+  );
+}
+
+function CaseLabel({ value }: { value: QuestionAsset["label"] }) {
+  const styles: Record<QuestionAsset["label"], [string, string]> = {
+    BAD_CASE: ["BAD CASE", "border-rose-200 bg-rose-100 text-rose-800"],
+    GOOD_CASE: ["正向反馈", "border-emerald-200 bg-emerald-50 text-emerald-700"],
+    GOLDEN: ["GOLDEN", "border-amber-200 bg-amber-50 text-amber-700"],
+    UNRATED: ["未评价", "border-slate-200 bg-slate-50 text-slate-500"],
+  };
+  const [label, tone] = styles[value];
+  return (
+    <span className={`inline-flex rounded-md border px-2 py-1 text-[9px] font-extrabold tracking-[0.08em] ${tone}`}>
+      {label}
+    </span>
+  );
+}
+
+function QualityScore({ value, bad }: { value: number; bad: boolean }) {
+  const tone = bad || value < 40
+    ? "bg-rose-500 text-rose-700"
+    : value >= 85
+      ? "bg-emerald-500 text-emerald-700"
+      : "bg-amber-500 text-amber-700";
+  return (
+    <div className="w-24" title="基于反馈、回答完整度和召回证据的自动分流分">
+      <div className="flex items-baseline justify-between">
+        <b className={`font-mono text-sm ${tone.split(" ")[1]}`}>{value}</b>
+        <span className="text-[9px] text-slate-400">/100</span>
+      </div>
+      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-100">
+        <div
+          className={`h-full rounded-full ${tone.split(" ")[0]}`}
+          style={{ width: `${Math.max(0, Math.min(100, value))}%` }}
+        />
+      </div>
+    </div>
   );
 }
 

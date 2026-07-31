@@ -143,4 +143,28 @@ class ChatService:
         )
         self.db.add(msg)
         await self.db.flush()
+        if role == "assistant":
+            question = (
+                await self.db.execute(
+                    select(Message)
+                    .where(
+                        Message.conversation_id == conversation_id,
+                        Message.user_id == self.user_id,
+                        Message.role == "user",
+                        Message.deleted == 0,
+                        Message.create_time <= msg.create_time,
+                    )
+                    .order_by(desc(Message.create_time))
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if question is not None:
+                from app.evaluation.cases import ensure_base_case
+
+                await ensure_base_case(
+                    self.db,
+                    question=question,
+                    answer=msg,
+                )
+                await self.db.flush()
         return msg.id

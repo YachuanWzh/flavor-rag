@@ -23,6 +23,7 @@ class EvaluationCase:
     expected_doc_ids: list[str]
     category: str
     answerable: bool
+    knowledge_base_ids: list[str] = field(default_factory=list)
     active: bool = True
     relevance_grades: dict[str, float] = field(default_factory=dict)
     difficulty: str = "medium"
@@ -100,6 +101,9 @@ def load_dataset(path: str | Path) -> list[EvaluationCase]:
                     ),
                     category=category,
                     answerable=bool(raw["answerable"]),
+                    knowledge_base_ids=list(
+                        dict.fromkeys(raw.get("knowledge_base_ids", []))
+                    ),
                     active=bool(raw.get("active", True)),
                     relevance_grades=grades,
                     difficulty=str(raw.get("difficulty", "medium")),

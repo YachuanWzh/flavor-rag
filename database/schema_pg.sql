@@ -96,6 +96,45 @@ CREATE TABLE t_message_feedback (
     CONSTRAINT uk_msg_user UNIQUE (message_id, user_id)
 );
 
+-- 线上问题评测资产（回答完成后自动生成 base case，可人工提升为 golden）
+CREATE TABLE t_evaluation_dataset_case (
+    id                    VARCHAR(20) PRIMARY KEY,
+    tenant_id             VARCHAR(64) NOT NULL DEFAULT 'default',
+    source_question_id    VARCHAR(20) NOT NULL,
+    source_answer_id      VARCHAR(20),
+    user_id               VARCHAR(20) NOT NULL,
+    conversation_id       VARCHAR(20) NOT NULL,
+    case_type             VARCHAR(16) NOT NULL DEFAULT 'base',
+    review_status         VARCHAR(24) NOT NULL DEFAULT 'generated',
+    question              TEXT NOT NULL,
+    expected_answer       TEXT NOT NULL DEFAULT '',
+    expected_chunk_ids    JSONB NOT NULL DEFAULT '[]',
+    expected_doc_ids      JSONB NOT NULL DEFAULT '[]',
+    retrieved_chunk_ids   JSONB NOT NULL DEFAULT '[]',
+    retrieved_doc_ids     JSONB NOT NULL DEFAULT '[]',
+    knowledge_base_ids    JSONB NOT NULL DEFAULT '[]',
+    category              VARCHAR(64) NOT NULL DEFAULT 'production',
+    difficulty            VARCHAR(16) NOT NULL DEFAULT 'medium',
+    tags                  JSONB NOT NULL DEFAULT '[]',
+    answerable            SMALLINT NOT NULL DEFAULT 1,
+    active                SMALLINT NOT NULL DEFAULT 0,
+    quality_score         DOUBLE PRECISION NOT NULL DEFAULT 0,
+    feedback_vote         SMALLINT,
+    feedback_reason       VARCHAR(255),
+    feedback_comment      VARCHAR(1024),
+    promoted_by           VARCHAR(20),
+    promoted_at           TIMESTAMP,
+    create_time           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted               SMALLINT DEFAULT 0,
+    CONSTRAINT uq_evaluation_case_source_question
+        UNIQUE (tenant_id, source_question_id)
+);
+CREATE INDEX idx_evaluation_case_tenant_status
+    ON t_evaluation_dataset_case (tenant_id, case_type, active, create_time);
+CREATE INDEX idx_evaluation_case_user
+    ON t_evaluation_dataset_case (tenant_id, user_id, create_time);
+
 -- ============================================================
 -- 知识库与文档
 -- ============================================================

@@ -182,7 +182,7 @@ export default function EvaluationPage() {
   const load = async (preferredKbId?: string) => {
     setLoading(true);
     try {
-      const requestedKbId = preferredKbId || kbId || "*";
+      const requestedKbId = preferredKbId || kbId || "";
       const overviewSuffix = requestedKbId
         ? `?kb_id=${encodeURIComponent(requestedKbId)}`
         : "";
@@ -192,8 +192,8 @@ export default function EvaluationPage() {
         fetchKnowledgeBases(),
         api.get("/api/admin/evaluation/questions?page_size=100"),
       ]) as unknown as [Overview, FeedbackCandidate[], KnowledgeBase[], QuestionAssetPage];
-      const nextKbId = requestedKbId === "*"
-        || kbList.some((item) => item.id === requestedKbId)
+      const nextKbId = requestedKbId && (requestedKbId === "*"
+        || kbList.some((item) => item.id === requestedKbId))
         ? requestedKbId
         : kbList[0]?.id || "";
       const suffix = nextKbId ? `&kb_id=${nextKbId}` : "";
@@ -239,7 +239,7 @@ export default function EvaluationPage() {
         top_k: topK,
         concurrency,
         repetitions,
-        timeout_seconds: 30,
+        timeout_seconds: 120,
         categories: [],
         graph_rag: false,
         label: `手动评测 · Top ${topK}`,

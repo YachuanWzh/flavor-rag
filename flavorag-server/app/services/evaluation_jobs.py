@@ -218,11 +218,7 @@ async def execute_evaluation_run(run_id: str, session_factory) -> None:
                 tenant_id=str(runtime.get("tenant_id", "default")),
                 department_id=str(runtime.get("department_id", "")),
                 role=str(runtime.get("role", "user")),
-                graph_rag=(
-                    True
-                    if scope_id == "*"
-                    else bool(config.get("graph_rag", False))
-                ),
+                graph_rag=bool(config.get("graph_rag", False)),
                 final_top_k=top_k,
                 embedding_model=(
                     None

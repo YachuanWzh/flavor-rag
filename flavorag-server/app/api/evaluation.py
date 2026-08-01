@@ -45,7 +45,7 @@ class EvaluationRunRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=20)
     categories: list[str] = Field(default_factory=list)
     concurrency: int = Field(default=4, ge=1, le=12)
-    timeout_seconds: float = Field(default=30, ge=5, le=120)
+    timeout_seconds: float = Field(default=120, ge=5, le=300)
     repetitions: int = Field(default=1, ge=1, le=5)
     graph_rag: bool = False
     label: str | None = Field(default=None, max_length=80)
@@ -752,7 +752,7 @@ async def run(
             ],
         },
     }
-    if scope_id == "*":
+    if scope_id == "*" and request.graph_rag:
         config["graph_rag"] = True
     record = EvaluationRun(
         tenant_id=user.tenant_id or "default",

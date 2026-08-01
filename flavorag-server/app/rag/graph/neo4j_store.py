@@ -167,6 +167,7 @@ class Neo4jGraphStore:
                         entity.collection_name = row.collection_name,
                         entity.doc_id = row.doc_id,
                         entity.chunk_id = row.chunk_id,
+                        entity.enabled = true,
                         entity.deterministic_extracted = true,
                         entity.updated_at = datetime()
                     """,
@@ -369,6 +370,7 @@ class Neo4jGraphStore:
                         entity.collection_name = row.collection_name,
                         entity.doc_id = row.doc_id,
                         entity.chunk_id = row.chunk_id,
+                        entity.enabled = true,
                         entity.semantic_extracted = true,
                         entity.updated_at = datetime()
                     """,
@@ -630,6 +632,50 @@ class Neo4jGraphStore:
                 )
             return summary
 
+    async def set_chunk_enabled(
+        self,
+        *,
+        kb_id: str,
+        chunk_id: str,
+        enabled: bool,
+    ) -> None:
+        """Set ``enabled`` on all FlavorEntity nodes linked to a chunk.
+
+        Called from ``update_chunk_status`` so that toggling a chunk in PG
+        immediately takes effect in Neo4j graph search and visualisation
+        without reindexing.
+        """
+        driver = self._driver()
+        async with driver.session() as session:
+            await session.run(
+                """
+                MATCH (entity:FlavorEntity {kb_id: $kb_id, chunk_id: $chunk_id})
+                SET entity.enabled = $enabled
+                """,
+                kb_id=kb_id,
+                chunk_id=chunk_id,
+                enabled=enabled,
+            )
+
+    async def backfill_enabled(self) -> dict:
+        """Set ``enabled = true`` on all FlavorEntity nodes missing the property.
+
+        Safe no-op for nodes that already have the property. Returns the
+        count of updated nodes.
+        """
+        driver = self._driver()
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (entity:FlavorEntity)
+                WHERE entity.enabled IS NULL
+                SET entity.enabled = true
+                RETURN count(entity) AS updated
+                """
+            )
+            row = await result.single()
+            return {"updated": row["updated"] if row else 0}
+
     async def delete_document(self, *, kb_id: str, doc_id: str) -> None:
         driver = self._driver()
         async with driver.session() as session:
@@ -676,7 +722,8 @@ class Neo4jGraphStore:
             result = await session.run(
                 """
                 MATCH (entity:FlavorEntity {kb_id: $kb_id})
-                WHERE any(
+                WHERE coalesce(entity.enabled, true) = true
+                  AND any(
                     term IN $terms
                     WHERE toLower(entity.name) CONTAINS term
                        OR toLower(entity.description) CONTAINS term
@@ -739,6 +786,7 @@ class Neo4jGraphStore:
                 node_query = """
                 MATCH (node:FlavorEntity)
                 WHERE node.kb_id IN $kb_ids
+                  AND coalesce(node.enabled, true) = true
                   AND ($entity = '*' OR toLower(node.name) CONTAINS toLower($entity))
                 OPTIONAL MATCH (node)-[relation:FLAVOR_RELATED|SEMANTIC_RELATED|CROSS_KB_RELATED]-(neighbor:FlavorEntity)
                 WHERE neighbor.kb_id IN $kb_ids
@@ -761,6 +809,7 @@ class Neo4jGraphStore:
                 node_query = """
                 MATCH (node:FlavorEntity)
                 WHERE node.kb_id IN $kb_ids
+                  AND coalesce(node.enabled, true) = true
                   AND ($entity = '*' OR toLower(node.name) CONTAINS toLower($entity))
                 OPTIONAL MATCH (node)-[relation:FLAVOR_RELATED|SEMANTIC_RELATED|CROSS_KB_RELATED]-(neighbor:FlavorEntity)
                 WHERE neighbor.kb_id IN $kb_ids

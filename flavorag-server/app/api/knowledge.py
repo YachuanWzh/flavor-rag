@@ -1329,6 +1329,23 @@ async def update_chunk_status(
     chunk.updated_by = user.id
     await db.flush()
 
+    # Sync Neo4j FlavorEntity nodes so graph search respects the toggle
+    try:
+        from app.rag.graph.neo4j_store import Neo4jGraphStore
+        await Neo4jGraphStore().set_chunk_enabled(
+            kb_id=chunk.kb_id,
+            chunk_id=chunk.id,
+            enabled=req.enabled,
+        )
+    except Exception:
+        _log.warning(
+            "neo4j_chunk_enabled_sync_failed",
+            chunk_id=chunk_id,
+            kb_id=chunk.kb_id,
+            enabled=req.enabled,
+            exc_info=True,
+        )
+
     ctx = get_audit_context()
     await record_audit(
         biz_type="knowledge_chunk",

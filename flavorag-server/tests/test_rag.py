@@ -1,7 +1,7 @@
 ﻿"""Unit tests for RAG rewrite, intent, pipeline — no external deps."""
 import pytest
 import hashlib
-from app.rag.rewrite import rewrite_query
+from app.rag.rewrite import needs_reference_clarification, rewrite_query
 from app.rag.intent import recognize_intent
 from app.rag.pipeline import RAGPipeline, RAGContext, RAGResult
 from app.rag.search.base import SearchResult
@@ -162,6 +162,7 @@ class TestRAGPipeline:
                     (
                         "content-hash",
                         "chunk-1",
+                        "kb-1",
                         9,
                         "doc-1",
                         "TEXT",
@@ -201,6 +202,16 @@ class TestRAGPipeline:
         await pipeline._resolve_metadata([result], kb_id="kb-1")
 
         assert result.metadata["section"] == "overview"
+        assert result.metadata["kb_id"] == "kb-1"
         assert result.metadata["fusionScore"] == 0.016
         assert result.metadata["matchedChannels"] == ["vector"]
         assert result.metadata["channelScores"]["vector"]["rank"] == 1
+
+
+def test_context_free_reference_requires_clarification():
+    assert needs_reference_clarification("它的默认值是多少？", [])
+    assert not needs_reference_clarification(
+        "它的默认值是多少？",
+        [{"role": "user", "content": "RETRIEVAL_FINAL_TOP_K"}],
+    )
+    assert not needs_reference_clarification("检索条数的默认值是多少？", [])

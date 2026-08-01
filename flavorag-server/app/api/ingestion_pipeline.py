@@ -27,6 +27,7 @@ from app.models import (
     User,
     gen_id,
 )
+from app.time_utils import utc_isoformat
 
 router = APIRouter(prefix="/api/admin/ingestion", tags=["admin-ingestion"])
 
@@ -101,10 +102,10 @@ def _task_payload(task: IngestionTask, pipeline_name: str = "") -> dict:
         "slaMs": task.sla_ms or 300_000,
         "slaBreached": _task_duration(task) > (task.sla_ms or 300_000),
         "errorMessage": task.error_message,
-        "heartbeatAt": task.heartbeat_at.isoformat() if task.heartbeat_at else None,
-        "startedAt": task.started_at.isoformat() if task.started_at else None,
-        "completedAt": task.completed_at.isoformat() if task.completed_at else None,
-        "createTime": task.create_time.isoformat() if task.create_time else None,
+        "heartbeatAt": utc_isoformat(task.heartbeat_at),
+        "startedAt": utc_isoformat(task.started_at),
+        "completedAt": utc_isoformat(task.completed_at),
+        "createTime": utc_isoformat(task.create_time),
     }
 
 
@@ -170,9 +171,7 @@ async def list_pipelines(
                 "description": pipeline.description,
                 "enabled": bool(pipeline.enabled),
                 "createdBy": pipeline.created_by,
-                "createTime": pipeline.create_time.isoformat()
-                if pipeline.create_time
-                else None,
+                "createTime": utc_isoformat(pipeline.create_time),
                 "health": {
                     "runs7d": len(recent),
                     "successRate": successes / len(completed) if completed else None,
@@ -258,9 +257,7 @@ async def get_pipeline(
             "name": pipeline.name,
             "description": pipeline.description,
             "enabled": bool(pipeline.enabled),
-            "createTime": pipeline.create_time.isoformat()
-            if pipeline.create_time
-            else None,
+            "createTime": utc_isoformat(pipeline.create_time),
             "nodes": [
                 {
                     "id": node.id,
@@ -551,12 +548,8 @@ async def get_task(
                     "durationMs": node.duration_ms or 0,
                     "message": node.message,
                     "errorMessage": node.error_message,
-                    "startedAt": node.started_at.isoformat()
-                    if node.started_at
-                    else None,
-                    "completedAt": node.completed_at.isoformat()
-                    if node.completed_at
-                    else None,
+                    "startedAt": utc_isoformat(node.started_at),
+                    "completedAt": utc_isoformat(node.completed_at),
                 }
                 for node in nodes
             ],
@@ -690,7 +683,7 @@ async def monitor_overview(
         ]
         buckets.append(
             {
-                "timestamp": bucket_start.isoformat(),
+                "timestamp": utc_isoformat(bucket_start),
                 "total": len(bucket_tasks),
                 "success": sum(task.status == "success" for task in bucket_terminal),
                 "error": sum(task.status in {"error", "timeout"} for task in bucket_terminal),
@@ -733,9 +726,9 @@ async def monitor_overview(
             "severity": "critical",
             "title": f"{names.get(task.pipeline_id, task.pipeline_id)} 任务心跳中断",
             "detail": task.source_file_name or task.id,
-            "timestamp": (
+            "timestamp": utc_isoformat(
                 task.heartbeat_at or task.started_at or task.create_time
-            ).isoformat(),
+            ),
             "taskId": task.id,
         }
         for task in stuck
@@ -747,7 +740,9 @@ async def monitor_overview(
             "severity": "critical" if task.attempt and task.attempt > 1 else "warning",
             "title": f"{names.get(task.pipeline_id, task.pipeline_id)} 执行失败",
             "detail": (task.error_message or "未知错误")[:180],
-            "timestamp": (task.completed_at or task.create_time).isoformat(),
+            "timestamp": utc_isoformat(
+                task.completed_at or task.create_time
+            ),
             "taskId": task.id,
         }
         for task in reversed(terminal)
@@ -760,7 +755,7 @@ async def monitor_overview(
             "severity": "critical" if job.status == "FAILED" else "warning",
             "title": "外部索引一致性待恢复",
             "detail": job.last_error or job.status,
-            "timestamp": job.create_time.isoformat() if job.create_time else None,
+            "timestamp": utc_isoformat(job.create_time),
             "taskId": None,
         }
         for job in index_jobs
@@ -778,7 +773,7 @@ async def monitor_overview(
         "code": "0",
         "data": {
             "health": health,
-            "generatedAt": now.isoformat(),
+            "generatedAt": utc_isoformat(now),
             "summary": {
                 "total24h": len(last_24h),
                 "running": sum(task.status == "running" for task in tasks),

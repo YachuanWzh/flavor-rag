@@ -9,6 +9,7 @@ from sqlalchemy import select
 from app.database.session import get_db
 from app.auth.dependencies import get_current_user
 from app.models import User, QueryTermMapping, gen_id
+from app.time_utils import utc_isoformat
 
 router = APIRouter(prefix="/api/admin/query-term-mapping", tags=["query-term-mapping"])
 
@@ -55,7 +56,7 @@ async def list_mappings(
             "mappingType": m.mapping_type,
             "enabled": m.enabled,
             "hitCount": m.hit_count or 0,
-            "createTime": str(m.create_time),
+            "createTime": utc_isoformat(m.create_time),
         }
         for m in items
     ]}

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from app.database.session import get_db
 from app.auth.dependencies import get_current_user
 from app.models import User, Conversation, Message, MessageFeedback, gen_id
+from app.time_utils import utc_isoformat
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -56,7 +57,7 @@ async def list_conversations(
                 "id": c.id,
                 "conversationId": c.conversation_id,
                 "title": c.title,
-                "lastTime": str(c.last_time) if c.last_time else None,
+                "lastTime": utc_isoformat(c.last_time),
             }
             for c in convs
         ],
@@ -147,7 +148,7 @@ def _message_payload(message: Message) -> dict:
         "retrievalChannels": message.retrieval_channels,
         "hydeDoc": message.hyde_doc,
         "hydeMeta": message.hyde_meta,
-        "createTime": str(message.create_time),
+        "createTime": utc_isoformat(message.create_time),
     }
 
 

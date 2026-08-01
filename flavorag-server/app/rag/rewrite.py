@@ -15,6 +15,20 @@ from app.database.session import async_session_factory
 from app.models import QueryTermMapping
 
 _rewrite_log = get_logger("flavorag.rag.rewrite")
+_UNRESOLVED_REFERENCE = re.compile(
+    r"^(?:请问)?(?:它|这个|那个|该(?:项|值|参数|配置|功能|方案)|其)(?:的|是|为|有|怎么|如何)"
+)
+
+
+def needs_reference_clarification(
+    question: str,
+    history: list[dict] | None = None,
+) -> bool:
+    """Return true for a context-free query with an unresolved reference."""
+    if any(str(item.get("content") or "").strip() for item in (history or [])):
+        return False
+    normalized = "".join((question or "").split())
+    return bool(_UNRESOLVED_REFERENCE.search(normalized))
 
 
 @dataclass(frozen=True)

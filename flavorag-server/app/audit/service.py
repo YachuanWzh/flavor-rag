@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.logging_config import get_logger
 from app.database.session import async_session_factory
 from app.models import BizChangeLog, gen_id
+from app.time_utils import utc_isoformat
 
 _log = get_logger("flavorag.audit")
 
@@ -150,7 +151,7 @@ async def query_audit_logs(
             "methodName": r.method_name,
             "ip": r.ip,
             "userAgent": r.user_agent,
-            "createTime": str(r.create_time),
+            "createTime": utc_isoformat(r.create_time),
         }
         for r in rows
     ], total

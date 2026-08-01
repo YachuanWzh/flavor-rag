@@ -7,6 +7,7 @@ from app.models import RagTraceRun, RagTraceNode, gen_id
 from app.observability import otel
 from app.observability.metrics import RAG_RUNS
 from app.config.settings import settings
+from app.time_utils import utc_isoformat
 
 
 def _redacted_text(value: str) -> str:
@@ -270,7 +271,7 @@ class TraceLogger:
                 "status": run.status,
                 "rejection_reason": run.rejection_reason,
                 "metadata": run.metadata_json,
-                "create_time": str(run.create_time),
+                "create_time": utc_isoformat(run.create_time),
             },
             "nodes": [
                 {

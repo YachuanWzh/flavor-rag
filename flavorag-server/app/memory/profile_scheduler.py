@@ -6,7 +6,8 @@ cron time and rebuilds profiles for all active users.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, distinct
 
@@ -25,6 +26,7 @@ class ProfileDailyScheduler:
     def __init__(self):
         self._task: asyncio.Task | None = None
         self._running = False
+        self._last_run_date: date | None = None
         # Default: check every hour if it's time to run
         self._poll_interval_sec = 3600
         from app.services.schedule.lock_manager import ScheduleLockManager
@@ -60,15 +62,20 @@ class ProfileDailyScheduler:
         """Poll loop: checks if current time matches the cron schedule."""
         while self._running:
             try:
-                now = datetime.now(timezone.utc).replace(tzinfo=True)
-                # Parse simple "H M * * *" cron (hour minute)
+                now = datetime.now(ZoneInfo(settings.app_timezone))
+                # Parse standard cron order: "minute hour * * *".
                 parts = settings.profile_daily_cron.split()
                 if len(parts) >= 2:
-                    target_hour = int(parts[0])
-                    target_minute = int(parts[1])
+                    target_minute = int(parts[0])
+                    target_hour = int(parts[1])
                     # Check if we're within the target hour and past the target minute
-                    if now.hour == target_hour and now.minute >= target_minute:
+                    if (
+                        now.hour == target_hour
+                        and now.minute >= target_minute
+                        and self._last_run_date != now.date()
+                    ):
                         await self._rebuild_all()
+                        self._last_run_date = now.date()
                         # Sleep until next hour to avoid re-running
                         await asyncio.sleep(self._poll_interval_sec)
             except Exception as exc:

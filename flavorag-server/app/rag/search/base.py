@@ -20,6 +20,7 @@ class SearchResult:
     metadata: dict = field(default_factory=dict)
     assets: list[dict] = field(default_factory=list)
     file_type: str = ""
+    content_hash: str = ""
 
 
 class SearchChannel(ABC):

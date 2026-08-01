@@ -25,6 +25,7 @@ from app.auth.dependencies import get_current_user
 from app.auth.jwt import decode_access_token
 from app.audit.middleware import get_audit_context
 from app.audit.service import record_audit
+from app.time_utils import utc_isoformat
 from app.models import (
     User,
     KnowledgeBase,
@@ -101,7 +102,7 @@ async def list_knowledge_bases(
                 "embeddingModel": kb.embedding_model,
                 "collectionName": kb.collection_name,
                 "pipelineId": kb.pipeline_id,
-                "createTime": str(kb.create_time),
+                "createTime": utc_isoformat(kb.create_time),
             }
             for kb in kbs
         ],
@@ -312,7 +313,7 @@ async def list_documents(
                 "fileSize": doc.file_size,
                 "chunkCount": doc.chunk_count,
                 "status": doc.status,
-                "createTime": str(doc.create_time),
+                "createTime": utc_isoformat(doc.create_time),
             }
             for doc in docs
         ],
@@ -1294,8 +1295,8 @@ async def list_chunks(
                 "pageEnd": c.page_end,
                 "bboxes": c.bbox_json or [],
                 "metadata": c.metadata_json or {},
-                "createTime": str(c.create_time) if c.create_time else None,
-                "updateTime": str(c.update_time) if c.update_time else None,
+                "createTime": utc_isoformat(c.create_time),
+                "updateTime": utc_isoformat(c.update_time),
             }
             for c in chunks
         ],
@@ -1366,7 +1367,7 @@ async def update_chunk_status(
         "data": {
             "id": chunk.id,
             "enabled": chunk.enabled,
-            "updateTime": str(chunk.update_time) if chunk.update_time else None,
+            "updateTime": utc_isoformat(chunk.update_time),
         },
     }
 
@@ -1593,7 +1594,7 @@ async def get_batch_import_status(
             "failedFiles": job.failed_files,
             "skippedDuplicates": job.skipped_duplicates,
             "errorMessage": job.error_message,
-            "createTime": str(job.create_time),
+            "createTime": utc_isoformat(job.create_time),
             "files": [
                 {
                     "id": f.id,

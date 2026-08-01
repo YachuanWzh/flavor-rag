@@ -13,6 +13,7 @@ import {
   reprocessDocument,
 } from "@/services/knowledgeService";
 import type { KnowledgeBase, KnowledgeDocument } from "@/types";
+import { formatLocalDateTime, parseApiDateTime } from "@/utils/dateTime";
 
 type Health = "healthy" | "warning" | "critical";
 
@@ -724,7 +725,7 @@ function ThroughputChart({ points }: { points: MonitorData["trend"] }) {
               />
             </div>
             <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 hidden w-32 -translate-x-1/2 rounded-lg bg-slate-950 p-2 text-[9px] text-white shadow-xl group-hover:block">
-              <b>{new Date(point.timestamp).getHours()}:00</b>
+              <b>{parseApiDateTime(point.timestamp)?.getHours() ?? "—"}:00</b>
               <p className="mt-1 text-slate-400">总量 {point.total} · 成功 {point.success} · 失败 {point.error}</p>
               <p className="text-slate-400">P95 {formatDuration(point.p95DurationMs)}</p>
             </div>
@@ -966,8 +967,8 @@ function formatDuration(value = 0) {
 }
 
 function formatTime(value?: string) {
-  if (!value) return "—";
-  return new Intl.DateTimeFormat("zh-CN", {
+  return formatLocalDateTime(value, {
     month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
-  }).format(new Date(value));
+    hour12: false,
+  });
 }

@@ -19,6 +19,7 @@ import type {
   InterviewHistoryItem,
   InterviewSession,
 } from "./types";
+import { parseApiDateTime } from "@/utils/dateTime";
 
 interface Props {
   history: InterviewHistoryData | null;
@@ -41,8 +42,8 @@ const difficultyLabels = {
 } as const;
 
 function formatCompletedAt(value: string): { date: string; time: string } {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return { date: value, time: "" };
+  const date = parseApiDateTime(value);
+  if (!date) return { date: value, time: "" };
   return {
     date: new Intl.DateTimeFormat("zh-CN", {
       year: "numeric",

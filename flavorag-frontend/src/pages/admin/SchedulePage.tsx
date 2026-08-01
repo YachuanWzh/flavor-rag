@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Clock, Play, Pause, Trash2, RefreshCw } from "lucide-react";
 import { api } from "@/services/api";
+import { formatLocalDateTime } from "@/utils/dateTime";
 
 interface ScheduleItem {
   id: string;
@@ -106,8 +107,8 @@ export default function SchedulePage() {
                       s.enabled ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-500"
                     }`}>{s.enabled ? "启用" : "停用"}</span>
                   </td>
-                  <td className="py-2.5 px-3 text-xs text-gray-400">{s.nextRunTime?.slice(0, 19) || "—"}</td>
-                  <td className="py-2.5 px-3 text-xs text-gray-400">{s.lastRunTime?.slice(0, 19) || "—"}</td>
+                  <td className="py-2.5 px-3 text-xs text-gray-400">{formatLocalDateTime(s.nextRunTime)}</td>
+                  <td className="py-2.5 px-3 text-xs text-gray-400">{formatLocalDateTime(s.lastRunTime)}</td>
                   <td className="py-2.5 px-3 whitespace-nowrap">
                     <span className={`inline-block text-xs px-1.5 py-0.5 rounded whitespace-nowrap ${
                       s.lastStatus === "success" ? "bg-green-50 text-green-700" :
@@ -156,8 +157,8 @@ export default function SchedulePage() {
             <tbody>
               {executions.map((e) => (
                 <tr key={e.id} className="border-b last:border-0 hover:bg-gray-50">
-                  <td className="py-2.5 px-3 text-xs text-gray-400">{e.startTime?.slice(0, 19) || "—"}</td>
-                  <td className="py-2.5 px-3 text-xs text-gray-400">{e.endTime?.slice(0, 19) || "—"}</td>
+                  <td className="py-2.5 px-3 text-xs text-gray-400">{formatLocalDateTime(e.startTime)}</td>
+                  <td className="py-2.5 px-3 text-xs text-gray-400">{formatLocalDateTime(e.endTime)}</td>
                   <td className="py-2.5 px-3 text-xs font-mono">{e.docId}</td>
                   <td className="py-2.5 px-3 whitespace-nowrap">
                     <span className={`inline-block text-xs px-1.5 py-0.5 rounded whitespace-nowrap ${

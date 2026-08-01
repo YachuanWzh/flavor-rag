@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ClipboardList, ChevronLeft, ChevronRight, Filter, ShieldAlert, X } from "lucide-react";
 import { api } from "@/services/api";
+import { formatLocalDateTime } from "@/utils/dateTime";
 
 interface AuditItem {
   id: string;
@@ -139,7 +140,7 @@ export default function AuditLogPage() {
               rows.map((r) => (
                 <tr key={r.id} onClick={() => setSelected(r)} className="cursor-pointer hover:bg-indigo-50/30 transition-colors">
                   <td className="py-3 px-3 text-xs text-gray-500 whitespace-nowrap font-mono tabular-nums">
-                    {r.createTime?.slice(0, 19) || "—"}
+                    {formatLocalDateTime(r.createTime)}
                   </td>
                   <td className="py-3 px-3 text-center whitespace-nowrap">
                     <span className="inline-flex items-center justify-center rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">
@@ -234,7 +235,7 @@ export default function AuditLogPage() {
               )}
               <section className="grid grid-cols-2 gap-3">
                 {[
-                  ["时间", selected.createTime],
+                  ["时间", formatLocalDateTime(selected.createTime)],
                   ["组件", selected.className || "—"],
                   ["方法", selected.methodName || "—"],
                   ["操作人", selected.operatorName || "系统后台"],

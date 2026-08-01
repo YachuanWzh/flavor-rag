@@ -16,6 +16,9 @@ from app.models import (
     KnowledgeDocumentScheduleExec,
     gen_id,
 )
+from app.config.settings import settings
+from app.services.schedule.scheduler import calculate_next_run
+from app.time_utils import utc_isoformat
 
 router = APIRouter(prefix="/api/admin/schedule", tags=["admin-schedule"])
 
@@ -69,15 +72,16 @@ async def list_schedules(
                     "kbId": r.kb_id,
                     "cronExpr": r.cron_expr,
                     "enabled": r.enabled == 1,
-                    "nextRunTime": str(r.next_run_time) if r.next_run_time else None,
-                    "lastRunTime": str(r.last_run_time) if r.last_run_time else None,
-                    "lastSuccessTime": str(r.last_success_time) if r.last_success_time else None,
+                    "nextRunTime": utc_isoformat(r.next_run_time),
+                    "lastRunTime": utc_isoformat(r.last_run_time),
+                    "lastSuccessTime": utc_isoformat(r.last_success_time),
                     "lastStatus": r.last_status,
                     "lastError": r.last_error,
                     "lockOwner": r.lock_owner,
                 }
                 for r in rows
             ],
+            "timezone": settings.app_timezone,
         },
     }
 
@@ -109,14 +113,10 @@ async def create_schedule(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="该文档已有调度配置")
 
-    from datetime import datetime, timezone, timedelta
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    # Parse interval
     try:
-        interval_sec = int(req.cron_expr)
-        next_run = now + timedelta(seconds=interval_sec)
-    except (ValueError, TypeError):
-        next_run = now + timedelta(hours=1)
+        next_run = calculate_next_run(req.cron_expr)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     sched = KnowledgeDocumentSchedule(
         id=gen_id(),
@@ -160,6 +160,10 @@ async def update_schedule(
 
     if req.cron_expr is not None:
         sched.cron_expr = req.cron_expr
+        try:
+            sched.next_run_time = calculate_next_run(req.cron_expr)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if req.enabled is not None:
         sched.enabled = 1 if req.enabled else 0
 
@@ -245,8 +249,8 @@ async def list_executions(
                     "kbId": r.kb_id,
                     "status": r.status,
                     "message": r.message,
-                    "startTime": str(r.start_time) if r.start_time else None,
-                    "endTime": str(r.end_time) if r.end_time else None,
+                    "startTime": utc_isoformat(r.start_time),
+                    "endTime": utc_isoformat(r.end_time),
                     "fileName": r.file_name,
                     "fileSize": r.file_size,
                 }

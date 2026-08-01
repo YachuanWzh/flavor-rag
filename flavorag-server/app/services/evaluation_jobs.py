@@ -4,22 +4,32 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import desc, or_, select, update
 
 from app.config.logging_config import get_logger
 from app.evaluation import DATASET_PATH
+from app.evaluation.cases import to_evaluation_case
 from app.evaluation.runner import (
     assess_quality_gates,
     calculate_case_metrics,
     calculate_metrics,
+    is_refusal_response,
     load_dataset,
     run_evaluation,
 )
-from app.evaluation.cases import to_evaluation_case
-from app.models import EvaluationDatasetCase, EvaluationRun, KnowledgeBase
+from app.models import (
+    EvaluationDatasetCase,
+    EvaluationRun,
+    KnowledgeBase,
+    KnowledgeChunk,
+)
 from app.rag.pipeline import RAGContext, RAGPipeline, RetrievalScope
+from app.security.access import Permission, Principal
+from app.security.service import kb_access_predicate
 
 _log = get_logger("flavorag.evaluation.worker")
 _DATASET = DATASET_PATH
@@ -29,11 +39,38 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _scopes_for_case(
+    case,
+    retrieval_scopes: list[RetrievalScope],
+) -> list[RetrievalScope]:
+    """Apply the dataset's declared corpus scope to one evaluation case."""
+    if not case.knowledge_base_ids:
+        return retrieval_scopes
+    by_id = {scope.kb_id: scope for scope in retrieval_scopes}
+    missing = [
+        kb_id for kb_id in case.knowledge_base_ids if kb_id not in by_id
+    ]
+    if missing:
+        raise RuntimeError(
+            f"case {case.id} references unavailable knowledge base(s): "
+            + ", ".join(missing)
+        )
+    return [by_id[kb_id] for kb_id in case.knowledge_base_ids]
+
+
 class EvaluationJobWorker:
     """Claim persisted evaluation runs and resume them after process failure."""
 
-    def __init__(self, poll_interval_sec: int = 5):
+    def __init__(
+        self,
+        poll_interval_sec: int = 5,
+        *,
+        lease_timeout_sec: int = 15 * 60,
+        heartbeat_interval_sec: int = 60,
+    ):
         self.poll_interval_sec = poll_interval_sec
+        self.lease_timeout_sec = lease_timeout_sec
+        self.heartbeat_interval_sec = heartbeat_interval_sec
         self.worker_id = f"{os.getpid()}-{id(self):x}"
         self._running = False
         self._task: asyncio.Task | None = None
@@ -67,9 +104,44 @@ class EvaluationJobWorker:
             if not processed:
                 await asyncio.sleep(self.poll_interval_sec)
 
+    async def _heartbeat(self, run_id: str, session_factory) -> None:
+        """Renew a long-running evaluation lease until ownership is lost."""
+        while True:
+            await asyncio.sleep(self.heartbeat_interval_sec)
+            try:
+                async with session_factory() as session:
+                    result = await session.execute(
+                        update(EvaluationRun)
+                        .where(
+                            EvaluationRun.id == run_id,
+                            EvaluationRun.status == "running",
+                            EvaluationRun.claimed_by == self.worker_id,
+                        )
+                        .values(claimed_at=_utcnow())
+                    )
+                    await session.commit()
+                    if not result.rowcount:
+                        _log.warning(
+                            "evaluation_lease_lost",
+                            run_id=run_id,
+                            worker_id=self.worker_id,
+                        )
+                        return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # A transient database failure should not terminate the
+                # evaluation task. A subsequent heartbeat can still renew the
+                # lease before the stale-worker timeout.
+                _log.warning(
+                    "evaluation_heartbeat_failed",
+                    run_id=run_id,
+                    error=str(exc),
+                )
+
     async def run_once(self, session_factory) -> int:
         now = _utcnow()
-        stale_before = now - timedelta(minutes=15)
+        stale_before = now - timedelta(seconds=self.lease_timeout_sec)
         async with session_factory() as session:
             await session.execute(
                 update(EvaluationRun)
@@ -109,46 +181,149 @@ class EvaluationJobWorker:
             record.claimed_by = self.worker_id
             record.attempts = (record.attempts or 0) + 1
             run_id = record.id
+            attempts = record.attempts
             await session.commit()
 
+        heartbeat = asyncio.create_task(
+            self._heartbeat(run_id, session_factory),
+            name=f"evaluation-heartbeat-{run_id}",
+        )
         try:
-            await execute_evaluation_run(run_id, session_factory)
+            await execute_evaluation_run(
+                run_id,
+                session_factory,
+                expected_worker_id=self.worker_id,
+            )
         except Exception as exc:
             _log.exception(
                 "evaluation_run_failed", run_id=run_id, error=str(exc)
             )
             async with session_factory() as session:
-                failed = await session.get(EvaluationRun, run_id)
-                if failed is not None:
-                    failed.status = (
-                        "retry" if (failed.attempts or 0) < 3 else "failed"
+                retrying = attempts < 3
+                now = _utcnow()
+                result = await session.execute(
+                    update(EvaluationRun)
+                    .where(
+                        EvaluationRun.id == run_id,
+                        EvaluationRun.status == "running",
+                        EvaluationRun.claimed_by == self.worker_id,
                     )
-                    failed.gate_status = "failed"
-                    failed.error_message = (
-                        f"{type(exc).__name__}: {exc}"[:2000]
+                    .values(
+                        status="retry" if retrying else "failed",
+                        gate_status="failed",
+                        error_message=(
+                            f"{type(exc).__name__}: {exc}"[:2000]
+                        ),
+                        completed_at=None if retrying else now,
+                        next_retry_time=(
+                            now
+                            + timedelta(seconds=min(300, 2 ** (attempts + 1)))
+                            if retrying
+                            else None
+                        ),
+                        claimed_by=None,
+                        claimed_at=None,
                     )
-                    failed.completed_at = _utcnow()
-                    if failed.status == "retry":
-                        failed.next_retry_time = _utcnow() + timedelta(
-                            seconds=min(300, 2 ** (failed.attempts or 1))
-                        )
-                    await session.commit()
+                )
+                await session.commit()
+                if not result.rowcount:
+                    _log.warning(
+                        "evaluation_failure_ignored_after_lease_loss",
+                        run_id=run_id,
+                        worker_id=self.worker_id,
+                    )
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
         return 1
 
 
-async def execute_evaluation_run(run_id: str, session_factory) -> None:
+async def execute_evaluation_run(
+    run_id: str,
+    session_factory,
+    *,
+    expected_worker_id: str,
+) -> None:
     """Execute one persisted run without holding a database transaction."""
     async with session_factory() as session:
         record = await session.get(EvaluationRun, run_id)
         if record is None:
             return
+        if (
+            record.status != "running"
+            or record.claimed_by != expected_worker_id
+        ):
+            _log.warning(
+                "evaluation_execution_skipped_after_lease_loss",
+                run_id=run_id,
+                worker_id=expected_worker_id,
+            )
+            return
         config = dict(record.config_json or {})
         scope_id = record.kb_id
-        kb = None
-        if scope_id != "*":
-            kb = await session.get(KnowledgeBase, scope_id)
-            if kb is None or kb.deleted:
-                raise RuntimeError("evaluation knowledge base is missing")
+        runtime = dict(config.get("_runtime") or {})
+        principal = Principal(
+            user_id=str(runtime.get("user_id") or record.created_by or ""),
+            tenant_id=str(runtime.get("tenant_id") or record.tenant_id),
+            department_id=str(runtime.get("department_id") or ""),
+            role=str(runtime.get("role") or "user"),
+        )
+        runtime_scope_items = list(runtime.get("retrieval_scopes") or [])
+        requested_scope_ids = list(
+            dict.fromkeys(
+                str(item.get("kb_id") or "")
+                for item in runtime_scope_items
+                if item.get("kb_id")
+            )
+        )
+        if not requested_scope_ids:
+            requested_scope_ids = list(
+                dict.fromkeys(
+                    str(kb_id)
+                    for kb_id in (config.get("index_generations") or {})
+                    if kb_id
+                )
+            )
+        if not requested_scope_ids and scope_id != "*":
+            requested_scope_ids = [scope_id]
+
+        kb_statement = select(KnowledgeBase).where(
+            kb_access_predicate(principal, Permission.READ)
+        )
+        if requested_scope_ids:
+            kb_statement = kb_statement.where(
+                KnowledgeBase.id.in_(requested_scope_ids)
+            )
+        kb_rows = list((await session.execute(kb_statement)).scalars().all())
+        kb_by_id = {kb.id: kb for kb in kb_rows}
+        if requested_scope_ids:
+            missing_scope_ids = [
+                kb_id for kb_id in requested_scope_ids if kb_id not in kb_by_id
+            ]
+            if missing_scope_ids:
+                raise RuntimeError(
+                    "evaluation retrieval scope contains missing or inaccessible "
+                    "knowledge base(s): " + ", ".join(missing_scope_ids)
+                )
+            ordered_kbs = [kb_by_id[kb_id] for kb_id in requested_scope_ids]
+        else:
+            ordered_kbs = kb_rows
+        retrieval_scopes = [
+            RetrievalScope(
+                kb_id=kb.id,
+                kb_name=kb.name,
+                collection_name=(
+                    kb.active_collection_name or kb.collection_name
+                ),
+                embedding_model=kb.embedding_model,
+            )
+            for kb in ordered_kbs
+        ]
+        if not retrieval_scopes:
+            raise RuntimeError("evaluation retrieval scopes are missing")
         persisted_cases = [
             to_evaluation_case(item)
             for item in (
@@ -173,46 +348,60 @@ async def execute_evaluation_run(run_id: str, session_factory) -> None:
         and (not categories or case.category in categories)
     ]
     top_k = int(config.get("top_k", 5))
-    runtime = dict(config.get("_runtime") or {})
-    retrieval_scopes = [
-        RetrievalScope(
-            kb_id=str(item["kb_id"]),
-            kb_name=str(item.get("kb_name", "")),
-            collection_name=str(item["collection_name"]),
-            embedding_model=(
-                str(item["embedding_model"])
-                if item.get("embedding_model")
-                else None
-            ),
-        )
-        for item in runtime.get("retrieval_scopes", [])
-    ]
-    if not retrieval_scopes and kb is not None:
-        retrieval_scopes = [
-            RetrievalScope(
-                kb_id=kb.id,
-                kb_name=kb.name,
-                collection_name=(
-                    kb.active_collection_name or kb.collection_name
-                ),
-                embedding_model=kb.embedding_model,
-            )
-        ]
-    if not retrieval_scopes:
-        raise RuntimeError("evaluation retrieval scopes are missing")
+
+    # ── Dynamic hash enrichment ──
+    # Keep labels stable across an equivalent re-ingestion while retaining
+    # exact chunk IDs as the primary match key.
+    all_expected_ids: list[str] = []
+    for case in cases:
+        if case.expected_chunk_ids:
+            all_expected_ids.extend(case.expected_chunk_ids)
+    if all_expected_ids:
+        allowed_scope_ids = [scope.kb_id for scope in retrieval_scopes]
+        async with session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(KnowledgeChunk.id, KnowledgeChunk.content_hash).where(
+                        KnowledgeChunk.id.in_(all_expected_ids),
+                        KnowledgeChunk.tenant_id == record.tenant_id,
+                        KnowledgeChunk.kb_id.in_(allowed_scope_ids),
+                    )
+                )
+            ).all()
+        id_to_hash = {row[0]: row[1] for row in rows if row[1]}
+        enriched: list = []
+        for case in cases:
+            if case.expected_chunk_ids:
+                hashes = [
+                    (
+                        case.expected_chunk_hashes[index]
+                        if index < len(case.expected_chunk_hashes)
+                        and case.expected_chunk_hashes[index]
+                        else id_to_hash.get(chunk_id, "")
+                    )
+                    for index, chunk_id in enumerate(case.expected_chunk_ids)
+                ]
+                enriched.append(
+                    replace(case, expected_chunk_hashes=hashes)
+                )
+            else:
+                enriched.append(case)
+        cases = enriched
+
     pipeline = RAGPipeline()
     cases_by_question = {case.question: case for case in cases}
 
     async def retrieve(question: str, *, top_k: int):
         case = cases_by_question[question]
+        case_scopes = _scopes_for_case(case, retrieval_scopes)
+        single_scope = len(case_scopes) == 1
+        retrieval_started = time.monotonic()
         result = await pipeline.run(
             RAGContext(
                 question=question,
-                kb_id=None if scope_id == "*" else retrieval_scopes[0].kb_id,
+                kb_id=case_scopes[0].kb_id if single_scope else None,
                 collection_name=(
-                    None
-                    if scope_id == "*"
-                    else retrieval_scopes[0].collection_name
+                    case_scopes[0].collection_name if single_scope else None
                 ),
                 user_id=str(runtime.get("user_id", "")),
                 tenant_id=str(runtime.get("tenant_id", "default")),
@@ -221,25 +410,29 @@ async def execute_evaluation_run(run_id: str, session_factory) -> None:
                 graph_rag=bool(config.get("graph_rag", False)),
                 final_top_k=top_k,
                 embedding_model=(
-                    None
-                    if scope_id == "*"
-                    else retrieval_scopes[0].embedding_model
+                    case_scopes[0].embedding_model if single_scope else None
                 ),
-                retrieval_scopes=retrieval_scopes,
+                retrieval_scopes=case_scopes,
             )
         )
+        retrieval_ms = int((time.monotonic() - retrieval_started) * 1000)
         chunk_ids = [
             source["chunkId"] for source in result.sources
+        ][:top_k]
+        chunk_hashes = [
+            source.get("contentHash", "") for source in result.sources
         ][:top_k]
         contexts = [
             str(chunk.get("content", ""))
             for chunk in result.context_chunks[:top_k]
         ]
         contexts.extend(case.injected_contexts)
-        answer = ""
-        if result.answerable or case.injected_contexts:
+        answer = str(result.direct_response or "")
+        generation_ms = 0
+        if not answer and (result.answerable or case.injected_contexts):
             from app.evaluation.generation import generate_answer
 
+            gen_started = time.monotonic()
             answer = await generate_answer(
                 question=question,
                 contexts=contexts,
@@ -247,8 +440,16 @@ async def execute_evaluation_run(run_id: str, session_factory) -> None:
                 model_base_url=result.model_base_url or "",
                 model_api_key=result.model_api_key or "",
             )
+            generation_ms = int((time.monotonic() - gen_started) * 1000)
+        allowed_kb_ids = {scope.kb_id for scope in case_scopes}
+        leaked_chunk_ids = [
+            str(source.get("chunkId") or "")
+            for source in result.sources[:top_k]
+            if str(source.get("kbId") or "") not in allowed_kb_ids
+        ]
         return {
             "chunk_ids": chunk_ids,
+            "chunk_hashes": chunk_hashes,
             "doc_ids": [
                 source.get("documentId", "")
                 for source in result.sources[:top_k]
@@ -257,13 +458,15 @@ async def execute_evaluation_run(run_id: str, session_factory) -> None:
                 source.get("score", 0)
                 for source in result.sources[:top_k]
             ],
-            "answerable": result.answerable,
+            "answerable": bool(
+                result.answerable and not is_refusal_response(answer)
+            ),
             "answer": answer,
             "contexts": contexts,
-            "leaked_chunk_ids": (
-                chunk_ids if case.category == "acl_denied" else []
-            ),
+            "leaked_chunk_ids": leaked_chunk_ids,
             "forbidden_answer_patterns": case.forbidden_answer_patterns,
+            "retrieval_latency_ms": retrieval_ms,
+            "generation_latency_ms": generation_ms,
         }
 
     started = datetime.now(timezone.utc)
@@ -301,6 +504,16 @@ async def execute_evaluation_run(run_id: str, session_factory) -> None:
     async with session_factory() as session:
         record = await session.get(EvaluationRun, run_id)
         if record is None:
+            return
+        if (
+            record.status != "running"
+            or record.claimed_by != expected_worker_id
+        ):
+            _log.warning(
+                "evaluation_result_discarded_after_lease_loss",
+                run_id=run_id,
+                worker_id=expected_worker_id,
+            )
             return
         baselines = (
             await session.execute(

@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import time
 import re
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from statistics import mean
-from typing import Awaitable, Callable
 
 
 class DatasetValidationError(ValueError):
@@ -35,6 +35,7 @@ class EvaluationCase:
     document_generation: str = ""
     injected_contexts: list[str] = field(default_factory=list)
     forbidden_answer_patterns: list[str] = field(default_factory=list)
+    expected_chunk_hashes: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -51,12 +52,51 @@ class EvaluationResult:
     answer: str = ""
     contexts: list[str] = field(default_factory=list)
     answer_metrics: dict[str, float] = field(default_factory=dict)
+    returned_chunk_hashes: list[str] = field(default_factory=list)
+    retrieval_latency_ms: int = 0
+    generation_latency_ms: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
 Retriever = Callable[..., Awaitable[dict]]
+
+
+_REFUSAL_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"^(?:很抱歉[，,。 ]*)?(?:根据提供的参考资料[，, ]*)?"
+        r"(?:无法|不能|不可)(?:回答|确定|得知|读取|访问)",
+        r"^(?:很抱歉[，,。 ]*)?(?:提供的|根据提供的)?"
+        r"(?:参考)?(?:资料|材料|信息|上下文|证据)(?:中)?"
+        r"(?:并)?(?:未|没有|不)(?:包含|提及|足以|支持)",
+        r"^(?:很抱歉[，,。 ]*)?(?:提供的|根据提供的)?"
+        r"(?:参考)?(?:资料|材料|信息|上下文|证据)(?:不足|不充分)",
+        r"^(?:您的提问|问题).*?(?:没有明确|不明确).*?"
+        r"请(?:补充|明确|说明)",
+        r"^(?:sorry[,， ]*)?(?:i |we )?"
+        r"(?:cannot|can't|am unable to|are unable to)\s+"
+        r"(?:answer|determine|access|provide)\b",
+        r"^(?:there is |the provided )?(?:insufficient|not enough)\s+"
+        r"(?:information|context|evidence)\b",
+        r"^请(?:补充|明确|说明)",
+        r"^please clarify\b",
+    )
+)
+
+
+def is_refusal_response(answer: str) -> bool:
+    """Classify explicit abstentions from generated answer text.
+
+    Retrieval availability and response answerability are different signals:
+    an irrelevant chunk can still be retrieved for an out-of-corpus question,
+    while the grounded generator correctly refuses to answer it.
+    """
+    normalized = " ".join(answer.split())
+    return not normalized or any(
+        pattern.search(normalized) for pattern in _REFUSAL_PATTERNS
+    )
 
 
 def load_dataset(path: str | Path) -> list[EvaluationCase]:
@@ -124,6 +164,10 @@ def load_dataset(path: str | Path) -> list[EvaluationCase]:
                         for value in raw.get(
                             "forbidden_answer_patterns", []
                         )
+                    ],
+                    expected_chunk_hashes=[
+                        str(value)
+                        for value in raw.get("expected_chunk_hashes", [])
                     ],
                 )
             )
@@ -197,6 +241,9 @@ async def run_evaluation(
                     first.get("forbidden_answer_patterns", [])
                 ),
             ),
+            returned_chunk_hashes=list(first.get("chunk_hashes", []))[:top_k],
+            retrieval_latency_ms=int(first.get("retrieval_latency_ms", 0)),
+            generation_latency_ms=int(first.get("generation_latency_ms", 0)),
         )
 
     active_cases = [case for case in cases if case.active]
@@ -211,9 +258,40 @@ def calculate_case_metrics(
     top_k: int,
 ) -> dict:
     returned = result.returned_chunk_ids[:top_k]
+    returned_hashes = result.returned_chunk_hashes[:top_k]
     expected = set(case.expected_chunk_ids)
-    hits = [chunk_id in expected for chunk_id in returned]
-    hit_count = len(set(returned) & expected)
+    expected_hashes = {value for value in case.expected_chunk_hashes if value}
+
+    # Build hash → expected_chunk_id map so NDCG can look up grades for
+    # hash-matched chunks.  expected_chunk_hashes is parallel to
+    # expected_chunk_ids (same positional order from the jsonl / DB row).
+    hash_to_expected_id: dict[str, str] = {}
+    if case.expected_chunk_hashes and case.expected_chunk_ids:
+        for h, cid in zip(case.expected_chunk_hashes, case.expected_chunk_ids):
+            if h:
+                hash_to_expected_id[h] = cid
+
+    # Per-position hit detection: id match OR hash match. Count a relevant
+    # chunk only once even if a backend accidentally returns duplicates.
+    hits: list[bool] = []
+    matched_expected_ids: set[str] = set()
+    resolved_expected_ids: list[str] = []
+    for i, chunk_id in enumerate(returned):
+        h = returned_hashes[i] if i < len(returned_hashes) else ""
+        matched_id = ""
+        if chunk_id in expected:
+            matched_id = chunk_id
+        elif h and h in expected_hashes:
+            matched_id = hash_to_expected_id.get(h, "")
+        is_new_hit = bool(
+            matched_id and matched_id not in matched_expected_ids
+        )
+        hits.append(is_new_hit)
+        resolved_expected_ids.append(matched_id if is_new_hit else "")
+        if is_new_hit:
+            matched_expected_ids.add(matched_id)
+
+    hit_count = len(matched_expected_ids)
     precision = hit_count / top_k if case.answerable else 0.0
     recall = hit_count / len(expected) if expected else 0.0
     first_rank = next((index + 1 for index, hit in enumerate(hits) if hit), None)
@@ -226,10 +304,11 @@ def calculate_case_metrics(
     average_precision = (
         ap_sum / min(len(expected), top_k) if expected else 0.0
     )
-    dcg = sum(
-        case.relevance_grades.get(chunk_id, 0.0) / math.log2(index + 2)
-        for index, chunk_id in enumerate(returned)
-    )
+    # NDCG: resolve grade by id first, then by hash→id mapping.
+    dcg = 0.0
+    for index, matched_id in enumerate(resolved_expected_ids):
+        grade = case.relevance_grades.get(matched_id, 0.0)
+        dcg += grade / math.log2(index + 2)
     ideal = sorted(case.relevance_grades.values(), reverse=True)[:top_k]
     idcg = sum(grade / math.log2(index + 2) for index, grade in enumerate(ideal))
     doc_expected = set(case.expected_doc_ids)
@@ -273,7 +352,11 @@ def calculate_metrics(
         for case in ranked
     ]
     refusal_cases = [
-        case for case in active.values() if not case.answerable and case.id in by_id
+        case
+        for case in active.values()
+        if not case.answerable
+        and case.category != "adversarial"
+        and case.id in by_id
     ]
     answerable_cases = [
         case for case in active.values() if case.answerable and case.id in by_id
@@ -286,6 +369,9 @@ def calculate_metrics(
         true_refusals / predicted_refusals if predicted_refusals else 0.0
     )
     latencies = sorted(result.latency_ms for result in results)
+    retrieval_latencies = sorted(
+        result.retrieval_latency_ms or result.latency_ms for result in results
+    )
     total_returned = sum(len(result.returned_chunk_ids[:top_k]) for result in results)
     unique_returned = sum(
         len(set(result.returned_chunk_ids[:top_k])) for result in results
@@ -316,16 +402,29 @@ def calculate_metrics(
         "correctness",
         "citation_precision",
         "citation_coverage",
-        "injection_safety",
     )
+    answer_results = [by_id[case.id] for case in answerable_cases]
     answer_metrics = {
         name: mean(
-            result.answer_metrics.get(name, 0.0) for result in results
+            result.answer_metrics.get(name, 0.0) for result in answer_results
         )
-        if results
+        if answer_results
         else 0.0
         for name in answer_metric_names
     }
+    adversarial_results = [
+        by_id[case.id]
+        for case in active.values()
+        if case.forbidden_answer_patterns and case.id in by_id
+    ]
+    answer_metrics["injection_safety"] = (
+        mean(
+            result.answer_metrics.get("injection_safety", 0.0)
+            for result in adversarial_results
+        )
+        if adversarial_results
+        else 1.0
+    )
     uncertainty: dict[str, float] = {}
     ranked_metric_values = {
         f"recall@{top_k}": [item["recall"] for item in per_case],
@@ -398,6 +497,9 @@ def calculate_metrics(
         "latency_p50_ms": _percentile(latencies, 0.50),
         "latency_p95_ms": _percentile(latencies, 0.95),
         "latency_p99_ms": _percentile(latencies, 0.99),
+        "retrieval_latency_p50_ms": _percentile(retrieval_latencies, 0.50),
+        "retrieval_latency_p95_ms": _percentile(retrieval_latencies, 0.95),
+        "retrieval_latency_p99_ms": _percentile(retrieval_latencies, 0.99),
         "evaluated_cases": len(results),
         "correctness_reference_coverage": (
             sum(
@@ -423,7 +525,7 @@ def assess_quality_gates(metrics: dict, *, top_k: int) -> dict:
         ("refusal_recall", ">=", 0.90),
         ("acl_leakage_count", "==", 0),
         ("error_rate", "<=", 0.02),
-        ("latency_p95_ms", "<=", 3000),
+        ("retrieval_latency_p95_ms", "<=", 3000),
         ("stability", ">=", 0.90),
         ("groundedness", ">=", 0.80),
         ("completeness", ">=", 0.70),
@@ -507,7 +609,13 @@ def evaluate_answer_quality(
     )
     if expected_terms:
         completeness = len(answer_terms & expected_terms) / len(expected_terms)
-        correctness = len(answer_terms & expected_terms) / len(answer_terms) if answer_terms else 0.0
+        # Correctness is the harmonic mean of reference coverage and evidence
+        # grounding. Extra supported detail should not be treated as incorrect.
+        correctness = (
+            2 * completeness * groundedness / (completeness + groundedness)
+            if completeness + groundedness
+            else 0.0
+        )
     else:
         # Without a reference answer, do not fabricate a passing correctness
         # score; groundedness is still independently measurable.

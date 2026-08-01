@@ -35,6 +35,7 @@ from app.evaluation.cases import (
 )
 from app.security.access import Permission
 from app.security.service import kb_access_predicate, principal_from_user
+from app.time_utils import utc_isoformat
 
 router = APIRouter(prefix="/api/admin/evaluation", tags=["evaluation"])
 _DATASET = DATASET_PATH
@@ -128,9 +129,7 @@ def _run_payload(item: EvaluationRun, *, include_results: bool = False) -> dict:
         "durationMs": item.duration_ms or 0,
         "attempts": item.attempts or 0,
         "errorMessage": item.error_message,
-        "createdAt": (
-            item.create_time.isoformat() if item.create_time else None
-        ),
+        "createdAt": utc_isoformat(item.create_time),
     }
     if include_results:
         payload["results"] = item.results_json or []
@@ -302,11 +301,7 @@ async def trend(
             "points": [
                 {
                     "id": item.id,
-                    "timestamp": (
-                        item.create_time.isoformat()
-                        if item.create_time
-                        else None
-                    ),
+                    "timestamp": utc_isoformat(item.create_time),
                     "kbName": item.kb_name,
                     "gateStatus": item.gate_status,
                     "metrics": item.metrics_json or {},
@@ -520,9 +515,7 @@ async def list_question_assets(
                     if asset_row
                     else None
                 ),
-                "createdAt": question_row.create_time.isoformat()
-                if question_row.create_time
-                else None,
+                "createdAt": utc_isoformat(question_row.create_time),
             }
         )
     await db.flush()

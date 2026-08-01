@@ -9,6 +9,7 @@ from sqlalchemy import select
 from app.database.session import get_db
 from app.auth.dependencies import get_current_user
 from app.models import User, SampleQuestion, gen_id
+from app.time_utils import utc_isoformat
 
 router = APIRouter(prefix="/api/admin/sample-questions", tags=["sample-questions"])
 
@@ -51,7 +52,7 @@ async def list_questions(
             "kbId": s.kb_id,
             "sortOrder": s.sort_order,
             "enabled": s.enabled,
-            "createTime": str(s.create_time),
+            "createTime": utc_isoformat(s.create_time),
         }
         for s in items
     ]}

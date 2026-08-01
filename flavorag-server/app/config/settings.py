@@ -7,6 +7,8 @@ _ENV_FILE = str(Path(__file__).resolve().parent.parent.parent.parent / ".env")
 class Settings(BaseSettings):
     # 服务器
     server_port: int = 9090
+    # User-facing wall-clock timezone. Persistent timestamps remain UTC.
+    app_timezone: str = "Asia/Shanghai"
 
     # 数据库
     database_url: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/flavorag"

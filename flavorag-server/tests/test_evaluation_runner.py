@@ -9,7 +9,10 @@ from app.evaluation.runner import (
     EvaluationCase,
     EvaluationResult,
     assess_quality_gates,
+    calculate_case_metrics,
     calculate_metrics,
+    evaluate_answer_quality,
+    is_refusal_response,
     load_dataset,
     run_evaluation,
 )
@@ -173,3 +176,155 @@ def test_quality_gate_fails_closed_when_metrics_are_missing():
 
     assert gates["status"] == "failed"
     assert gates["total"] == 17
+
+
+def test_hash_matching_is_resilient_to_id_drift_without_counting_duplicates():
+    case = _case("hash", expected=["old-id"])
+    case = EvaluationCase(
+        **{
+            **case.__dict__,
+            "expected_chunk_hashes": ["same-content"],
+        }
+    )
+    result = EvaluationResult(
+        case_id=case.id,
+        returned_chunk_ids=["new-id", "duplicate-new-id"],
+        returned_chunk_hashes=["same-content", "same-content"],
+        returned_doc_ids=["doc-1", "doc-1"],
+        scores=[1.0, 0.9],
+        answerable=True,
+        latency_ms=10,
+    )
+
+    metrics = calculate_case_metrics(case, result, top_k=2)
+
+    assert metrics["recall"] == 1.0
+    assert metrics["precision"] == 0.5
+    assert metrics["average_precision"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "参考资料中未包含实时价格，因此无法回答。",
+        "问题中的‘它’不明确，请补充具体参数。",
+        "请明确说明‘它’指代的对象。",
+        "I cannot answer because there is not enough information.",
+    ],
+)
+def test_refusal_response_detection(answer):
+    assert is_refusal_response(answer)
+    assert not is_refusal_response("PostgreSQL 是权威数据源 [1]。")
+    assert not is_refusal_response(
+        "Prompt 无法提供实质安全保证，因此必须使用确定性权限守卫 [1]。"
+    )
+
+
+def test_answer_quality_does_not_penalize_supported_extra_detail():
+    metrics = evaluate_answer_quality(
+        answer="PostgreSQL 是权威数据源，也保存审计日志 [1]。",
+        contexts=["PostgreSQL 是权威数据源，并保存审计日志。"],
+        expected_answer="PostgreSQL 是权威数据源。",
+        source_count=1,
+    )
+
+    assert metrics["correctness"] >= metrics["completeness"] * 0.9
+
+
+def test_aggregate_answer_metrics_use_their_applicable_case_slices():
+    answerable = _case("answerable", expected=["chunk"])
+    refusal = _case(
+        "refusal", expected=[], answerable=False, category="unanswerable"
+    )
+    adversarial = EvaluationCase(
+        id="adversarial",
+        question="summarize safely",
+        expected_chunk_ids=[],
+        expected_doc_ids=[],
+        category="adversarial",
+        answerable=False,
+        injected_contexts=["unsafe instruction"],
+        forbidden_answer_patterns=["CANARY"],
+    )
+    common = {
+        "returned_chunk_ids": [],
+        "returned_doc_ids": [],
+        "scores": [],
+        "latency_ms": 10,
+    }
+    results = [
+        EvaluationResult(
+            case_id="answerable",
+            answerable=True,
+            answer_metrics={"groundedness": 0.8, "injection_safety": 1.0},
+            **common,
+        ),
+        EvaluationResult(
+            case_id="refusal",
+            answerable=False,
+            answer_metrics={"groundedness": 0.0, "injection_safety": 1.0},
+            **common,
+        ),
+        EvaluationResult(
+            case_id="adversarial",
+            answerable=False,
+            answer_metrics={"groundedness": 0.0, "injection_safety": 0.0},
+            **common,
+        ),
+    ]
+
+    metrics = calculate_metrics(
+        [answerable, refusal, adversarial], results, top_k=5
+    )
+
+    assert metrics["groundedness"] == 0.8
+    assert metrics["refusal_recall"] == 1.0
+    assert metrics["injection_safety"] == 0.0
+
+
+def test_quality_gate_uses_retrieval_latency_not_generation_latency():
+    metrics = {
+        "evaluated_cases": 30,
+        "recall@5": 1,
+        "ndcg@5": 1,
+        "mrr@5": 1,
+        "refusal_recall": 1,
+        "acl_leakage_count": 0,
+        "error_rate": 0,
+        "latency_p95_ms": 60_000,
+        "retrieval_latency_p95_ms": 2_000,
+        "stability": 1,
+        "groundedness": 1,
+        "completeness": 1,
+        "answer_relevance": 1,
+        "correctness": 1,
+        "citation_precision": 1,
+        "citation_coverage": 1,
+        "injection_safety": 1,
+        "correctness_reference_coverage": 1,
+    }
+
+    gates = assess_quality_gates(metrics, top_k=5)
+
+    assert gates["status"] == "passed"
+
+
+def test_case_scope_uses_declared_knowledge_bases_only():
+    from app.rag.pipeline import RetrievalScope
+    from app.services.evaluation_jobs import _scopes_for_case
+
+    scopes = [
+        RetrievalScope("kb-a", "A", "collection-a"),
+        RetrievalScope("kb-b", "B", "collection-b"),
+    ]
+    case = EvaluationCase(
+        id="scoped",
+        question="q",
+        expected_chunk_ids=["chunk-a"],
+        expected_doc_ids=["doc-a"],
+        category="direct",
+        answerable=True,
+        knowledge_base_ids=["kb-a"],
+    )
+
+    assert [scope.kb_id for scope in _scopes_for_case(case, scopes)] == ["kb-a"]

@@ -19,7 +19,11 @@ from app.rag.postprocess.reranker import Reranker
 from app.rag.search.base import SearchResult
 # Compatibility exports remain importable because existing integrations monkeypatch
 # these names while migrating to the structured entry points.
-from app.rag.rewrite import rewrite_query, rewrite_query_result  # noqa: F401
+from app.rag.rewrite import (  # noqa: F401
+    needs_reference_clarification,
+    rewrite_query,
+    rewrite_query_result,
+)
 from app.rag.intent import recognize_intent, resolve_intents  # noqa: F401
 from app.rag.graph.lightrag_client import LightRAGClient
 from app.rag.graph.neo4j_store import Neo4jGraphStore
@@ -453,6 +457,26 @@ class RAGPipeline:
         t0 = time.time()
         trace_id = ctx.trace_run_id
         _tenant = ctx.tenant_id or "default"
+        if needs_reference_clarification(ctx.question, ctx.history):
+            model_name, model_base_url, model_api_key = self.model_router.route(
+                "general", deep_thinking=False
+            )
+            return RAGResult(
+                question=ctx.question,
+                rewrite=None,
+                intent=None,
+                context_chunks=[],
+                sources=[],
+                duration_ms=int((time.time() - t0) * 1000),
+                trace_run_id=trace_id,
+                model_name=model_name,
+                model_base_url=model_base_url,
+                model_api_key=model_api_key,
+                answerable=False,
+                rejection_reason="ambiguous_reference",
+                response_mode="guidance",
+                direct_response="请明确说明“它”指代的参数、配置或对象。",
+            )
         budget = RetrievalBudget(
             per_channel_top_k=get_hyperparam_typed(
                 "retrieval_per_channel_top_k", settings.retrieval_per_channel_top_k,
@@ -983,6 +1007,7 @@ class RAGPipeline:
                 "fileType": r.file_type or "",
                 "kbId": r.metadata.get("kb_id") or "",
                 "kbName": _kb_name_map.get(r.metadata.get("kb_id", ""), ""),
+                "contentHash": r.content_hash or "",
             }
             for r in reranked
         ]
@@ -1584,6 +1609,7 @@ class RAGPipeline:
                 "fileType": r.file_type or "",
                 "kbId": r.metadata.get("kb_id") or "",
                 "kbName": _kb_name_map.get(r.metadata.get("kb_id", ""), ""),
+                "contentHash": r.content_hash or "",
             }
             for r in reranked
         ]
@@ -1895,6 +1921,7 @@ class RAGPipeline:
                     select(
                         KnowledgeChunk.content_hash,
                         KnowledgeChunk.id,
+                        KnowledgeChunk.kb_id,
                         KnowledgeChunk.chunk_index,
                         KnowledgeChunk.doc_id,
                         KnowledgeChunk.block_type,
@@ -1917,6 +1944,7 @@ class RAGPipeline:
                     (
                         content_hash,
                         chunk_id,
+                        chunk_kb_id,
                         chunk_index,
                         doc_id,
                         block_type,
@@ -1947,10 +1975,12 @@ class RAGPipeline:
                         # happens to use the same name.
                         r.metadata = {
                             **(metadata_json or {}),
+                            "kb_id": chunk_kb_id,
                             **r.metadata,
                         }
                         r.doc_name = doc_name or "unknown"
                         r.file_type = file_type or ""
+                        r.content_hash = content_hash or ""
 
                 asset_ids = {
                     asset_id

@@ -227,30 +227,19 @@ def select_context(
     kb_quota: int | None = None,
     fallback_pool: list[SearchResult] | None = None,
 ) -> tuple[list[SearchResult], RetrievalDecision]:
-    eligible = [item for item in candidates if item.score >= min_score]
+    # External reranker APIs are not required to return rows in score order.
+    # Normalize the contract here so the final context order, citations, and
+    # NDCG all reflect the actual relevance score.
+    eligible = sorted(
+        (item for item in candidates if item.score >= min_score),
+        key=lambda item: item.score,
+        reverse=True,
+    )
     below = len(candidates) - len(eligible)
     selected: list[SearchResult] = []
     used_chars = 0
     used_tokens = 0
-    # Prefer evidence diversity before taking a second chunk from the same doc.
-    grouped: dict[str, list[SearchResult]] = {}
-    order: list[str] = []
     for item in eligible:
-        key = item.doc_id or f"chunk:{item.chunk_id}"
-        if key not in grouped:
-            grouped[key] = []
-            order.append(key)
-        grouped[key].append(item)
-    diversified: list[SearchResult] = []
-    while len(diversified) < len(eligible):
-        added = False
-        for key in order:
-            if grouped[key]:
-                diversified.append(grouped[key].pop(0))
-                added = True
-        if not added:
-            break
-    for item in diversified:
         if len(selected) >= budget.final_top_k:
             break
         length = len(item.content)
@@ -337,6 +326,10 @@ def select_context(
                         selected.append(fill_item)
                         selected_ids.add(fill_item.chunk_id)
                         kb_counts[kb] = kb_counts.get(kb, 0) + 1
+
+    # Quota replacement may insert fallback candidates into arbitrary slots.
+    # Preserve the quota membership but restore the public ranking contract.
+    selected.sort(key=lambda item: item.score, reverse=True)
 
     dropped_budget = len(eligible) - len(selected)
     if not selected:

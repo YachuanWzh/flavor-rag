@@ -9,6 +9,7 @@ import { toast } from "sonner";
 import { api } from "@/services/api";
 import { fetchKnowledgeBases } from "@/services/knowledgeService";
 import type { KnowledgeBase } from "@/types";
+import { formatLocalDateTime } from "@/utils/dateTime";
 
 type MetricMap = Record<string, number>;
 
@@ -46,6 +47,7 @@ interface RunResult {
   deltas: MetricMap;
   durationMs: number;
   createdAt?: string;
+  errorMessage?: string | null;
   results?: Array<{
     case_id: string;
     question: string;
@@ -134,6 +136,7 @@ const metricLabels: Record<string, string> = {
   duplicate_rate: "重复率",
   empty_result_rate: "空结果率",
   latency_p95_ms: "P95 时延",
+  retrieval_latency_p95_ms: "P95 检索时延",
   quality_score: "综合质量分",
   acl_leakage_count: "越权泄漏",
 };
@@ -451,8 +454,8 @@ export default function EvaluationPage() {
                   Latest quality score
                 </p>
                 <div className="mt-5 flex items-end gap-2">
-                  <span className={`font-mono text-6xl font-semibold leading-none tracking-[-0.08em] ${scoreTone}`}>
-                    {selectedRun ? Math.round(qualityScore * 100) : "—"}
+                  <span className={`font-mono text-6xl font-semibold leading-none tracking-[-0.08em] ${selectedRun?.status === "failed" ? "text-rose-300" : scoreTone}`}>
+                    {!selectedRun ? "—" : selectedRun?.status === "failed" ? "!" : Math.round(qualityScore * 100)}
                   </span>
                   <span className="mb-1 text-sm text-slate-500">/ 100</span>
                 </div>
@@ -462,13 +465,21 @@ export default function EvaluationPage() {
                     {selectedRun ? formatTime(selectedRun.createdAt) : "尚未运行评测"}
                   </span>
                 </div>
+                {selectedRun?.status === "failed" && selectedRun?.errorMessage && (
+                  <div className="mt-4 rounded-lg border border-rose-500/30 bg-rose-950/50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-rose-400">运行异常</p>
+                    <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-[10px] leading-relaxed text-rose-200">
+                      {selectedRun.errorMessage}
+                    </pre>
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-px bg-white/10 sm:grid-cols-4">
                 <DarkMetric label={`Recall@${rankedK}`} value={metrics[rankedMetric("recall")]} delta={selectedRun?.deltas[rankedMetric("recall")]} icon={<Target />} />
                 <DarkMetric label={`NDCG@${rankedK}`} value={metrics[rankedMetric("ndcg")]} delta={selectedRun?.deltas[rankedMetric("ndcg")]} icon={<BarChart3 />} />
                 <DarkMetric label="拒答 F1" value={metrics.refusal_f1} delta={selectedRun?.deltas.refusal_f1} icon={<ShieldCheck />} />
-                <DarkMetric label="P95 时延" value={metrics.latency_p95_ms} delta={selectedRun?.deltas.latency_p95_ms} icon={<Clock3 />} latency />
+                <DarkMetric label="P95 检索时延" value={metrics.retrieval_latency_p95_ms ?? metrics.latency_p95_ms} delta={selectedRun?.deltas.retrieval_latency_p95_ms ?? selectedRun?.deltas.latency_p95_ms} icon={<Clock3 />} latency />
               </div>
 
               <div className="border-t border-white/10 p-6 lg:border-l lg:border-t-0">
@@ -1213,7 +1224,7 @@ function SliceMatrix({
   const entries = Object.entries(slices);
   const columns = [
     `recall@${topK}`, `ndcg@${topK}`, `mrr@${topK}`,
-    `hit_rate@${topK}`, "pass_rate", "latency_p95_ms",
+    `hit_rate@${topK}`, "pass_rate", "retrieval_latency_p95_ms",
   ];
   if (!entries.length) {
     return <Empty text="选择包含切片结果的运行后查看诊断" />;
@@ -1382,18 +1393,18 @@ function trendMetric(metrics: MetricMap, key: string) {
 
 function formatGateValue(metric: string, value: number) {
   if (metric.includes("latency")) return `${value.toFixed(0)}ms`;
-  if (metric.includes("count")) return value.toFixed(0);
+  if (metric.includes("count") || metric.includes("cases")) return value.toFixed(0);
   return formatPercent(value);
 }
 
 function formatTime(value?: string) {
-  if (!value) return "—";
-  return new Intl.DateTimeFormat("zh-CN", {
+  return formatLocalDateTime(value, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(value));
+    hour12: false,
+  });
 }
 
 function formatDuration(value = 0) {

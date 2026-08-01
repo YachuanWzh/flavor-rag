@@ -141,6 +141,58 @@ def test_threshold_and_context_budget_are_enforced():
     assert decision.reason == "insufficient_relevance"
 
 
+def test_context_selection_restores_score_order_after_reranking_and_quota():
+    from app.rag.governance import RetrievalBudget, select_context
+
+    candidates = [
+        SearchResult(
+            "low",
+            "low",
+            0.2,
+            doc_id="doc-1",
+            metadata={"kb_id": "kb-a"},
+        ),
+        SearchResult(
+            "high",
+            "high",
+            0.9,
+            doc_id="doc-1",
+            metadata={"kb_id": "kb-a"},
+        ),
+        SearchResult(
+            "middle",
+            "middle",
+            0.7,
+            doc_id="doc-2",
+            metadata={"kb_id": "kb-a"},
+        ),
+    ]
+    budget = RetrievalBudget(context_max_tokens=100, final_top_k=3)
+
+    selected, _ = select_context(candidates, budget, min_score=0)
+
+    assert [item.chunk_id for item in selected] == ["high", "middle", "low"]
+
+    selected, _ = select_context(
+        candidates,
+        RetrievalBudget(context_max_tokens=100, final_top_k=2),
+        min_score=0,
+        kb_quota=1,
+        fallback_pool=[
+            *candidates,
+            SearchResult(
+                "kb-b",
+                "fallback",
+                0.1,
+                doc_id="doc-b",
+                metadata={"kb_id": "kb-b"},
+            ),
+        ],
+    )
+
+    assert [item.chunk_id for item in selected] == ["high", "kb-b"]
+
+
 @pytest.mark.asyncio
 async def test_parallel_channels_are_bounded_and_isolated():
     from app.rag.governance import RetrievalBudget, run_search_channels

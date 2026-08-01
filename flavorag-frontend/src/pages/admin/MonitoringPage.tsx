@@ -5,6 +5,7 @@ import {
   Server, ShieldAlert, Sparkles, X,
 } from "lucide-react";
 import { api } from "@/services/api";
+import { formatLocalDateTime } from "@/utils/dateTime";
 
 interface Diagnostic {
   key: string;
@@ -397,7 +398,7 @@ export default function MonitoringPage() {
                   {job.source === "async_outbox" ? `${job.attempts}/${job.maxAttempts}` : job.attempts}
                 </span>
                 <span className="font-mono text-xs text-slate-500">{job.durationMs == null ? "—" : `${job.durationMs} ms`} / {job.chunkCount ?? "—"}</span>
-                <span className="font-mono text-[11px] text-slate-400">{job.createTime?.slice(0, 19) || "—"}</span>
+                <span className="font-mono text-[11px] text-slate-400">{formatLocalDateTime(job.createTime)}</span>
                 <ChevronRight className="h-4 w-4 text-slate-300" />
               </button>
             ))}
@@ -499,9 +500,9 @@ function JobDrawer({
                 operation: job.operation,
                 attempts: job.attempts,
                 maxAttempts: job.maxAttempts,
-                nextRetryTime: job.nextRetryTime,
-                createdAt: job.createTime,
-                completedAt: job.completedAt,
+                nextRetryTime: formatLocalDateTime(job.nextRetryTime),
+                createdAt: formatLocalDateTime(job.createTime),
+                completedAt: formatLocalDateTime(job.completedAt),
                 ...job.detail,
               }, null, 2)}
             </pre>

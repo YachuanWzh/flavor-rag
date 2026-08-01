@@ -22,6 +22,7 @@ from app.models import (
     RagTraceRun,
     User,
 )
+from app.time_utils import utc_isoformat
 
 router = APIRouter(prefix="/api/admin/monitoring", tags=["monitoring"])
 
@@ -264,7 +265,10 @@ async def monitoring_summary(
                 if failed_ingestion else "任务已超过自动重试上限"
             )[:500],
             "action": "打开下方任务详情核对失败节点；异步任务可直接重新入队。",
-            "lastOccurredAt": str(getattr(failed_ingestion, "completed_at", None) or getattr(failed_ingestion, "create_time", "")),
+            "lastOccurredAt": utc_isoformat(
+                getattr(failed_ingestion, "completed_at", None)
+                or getattr(failed_ingestion, "create_time", None)
+            ),
         })
     if rag_total - rag_success:
         diagnostics.append({
@@ -276,7 +280,9 @@ async def monitoring_summary(
                 if latest_failed_rag else "未找到可用证据或模型调用失败"
             ) or "未找到可用证据或模型调用失败",
             "action": "前往链路追踪按节点查看检索通道、模型与耗时。",
-            "lastOccurredAt": str(latest_failed_rag.create_time) if latest_failed_rag else "",
+            "lastOccurredAt": utc_isoformat(
+                latest_failed_rag.create_time if latest_failed_rag else None
+            ),
         })
     if error_count:
         diagnostics.append({
@@ -285,7 +291,9 @@ async def monitoring_summary(
             "title": f"窗口内已审计 {error_count} 个系统错误",
             "reason": latest_error.error_message if latest_error else "系统组件报告异常",
             "action": "前往审计日志，筛选“系统错误”查看错误编号、上下文与堆栈。",
-            "lastOccurredAt": str(latest_error.create_time) if latest_error else "",
+            "lastOccurredAt": utc_isoformat(
+                latest_error.create_time if latest_error else None
+            ),
         })
     if not diagnostics:
         diagnostics.append({
@@ -388,8 +396,8 @@ async def monitoring_timeseries(
 
     series = [
         {
-            "time": (since + timedelta(seconds=bucket_sec * i)).isoformat(
-                sep=" ", timespec="seconds"
+            "time": utc_isoformat(
+                since + timedelta(seconds=bucket_sec * i)
             ),
             "ragTotal": 0,
             "ragFailed": 0,
@@ -527,9 +535,9 @@ async def list_ingestion_jobs(
             "durationMs": job.duration_ms,
             "chunkCount": job.chunk_count,
             "errorMessage": (job.error_message or "")[:300],
-            "nextRetryTime": str(job.next_retry_time) if job.next_retry_time else None,
-            "createTime": str(job.create_time),
-            "completedAt": str(job.completed_at) if job.completed_at else None,
+            "nextRetryTime": utc_isoformat(job.next_retry_time),
+            "createTime": utc_isoformat(job.create_time),
+            "completedAt": utc_isoformat(job.completed_at),
             "retryable": job.status in ("DEAD", "RETRY"),
             "detail": {
                 "idempotencyKey": job.idempotency_key,
@@ -552,8 +560,8 @@ async def list_ingestion_jobs(
         "chunkCount": task.chunk_count,
         "errorMessage": (task.error_message or "")[:300],
         "nextRetryTime": None,
-        "createTime": str(task.create_time),
-        "completedAt": str(task.completed_at) if task.completed_at else None,
+        "createTime": utc_isoformat(task.create_time),
+        "completedAt": utc_isoformat(task.completed_at),
         "retryable": False,
         "detail": {
             "pipelineId": task.pipeline_id,

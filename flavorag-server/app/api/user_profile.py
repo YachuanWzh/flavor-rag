@@ -16,6 +16,7 @@ from app.config.settings import settings
 from app.models import User, UserProfile
 from app.memory.mem0_client import Mem0Manager
 from app.memory.profile_builder import build_or_update_profile
+from app.time_utils import utc_isoformat
 
 router = APIRouter(prefix="/api/admin/profiles", tags=["admin-profiles"])
 
@@ -87,8 +88,8 @@ async def list_profiles(
                     "thumbsDown": p.thumbs_down_count or 0,
                     "mem0FactsCount": p.mem0_facts_count or 0,
                     "profileVersion": p.profile_version or 1,
-                    "lastActiveTime": str(p.last_active_time) if p.last_active_time else None,
-                    "updatedAt": str(p.updated_at) if p.updated_at else None,
+                    "lastActiveTime": utc_isoformat(p.last_active_time),
+                    "updatedAt": utc_isoformat(p.updated_at),
                 }
                 for p, username, role in rows
             ],
@@ -133,7 +134,7 @@ async def get_profile_detail(
             "userRole": user_role or "user",
             "tenantId": tenant_id or p.tenant_id,
             "departmentId": dept_id,
-            "userCreateTime": str(user_created) if user_created else None,
+            "userCreateTime": utc_isoformat(user_created),
 
             # Dimension 2: Professional domain
             "domains": p.domains or [],
@@ -161,15 +162,15 @@ async def get_profile_detail(
 
             # Dimension 7: mem0
             "mem0FactsCount": p.mem0_facts_count or 0,
-            "mem0LastSync": str(p.mem0_last_sync) if p.mem0_last_sync else None,
+            "mem0LastSync": utc_isoformat(p.mem0_last_sync),
 
             # Metadata
             "totalQueries": p.total_queries or 0,
             "totalConversations": p.total_conversations or 0,
-            "lastActiveTime": str(p.last_active_time) if p.last_active_time else None,
+            "lastActiveTime": utc_isoformat(p.last_active_time),
             "profileVersion": p.profile_version or 1,
-            "createdAt": str(p.created_at) if p.created_at else None,
-            "updatedAt": str(p.updated_at) if p.updated_at else None,
+            "createdAt": utc_isoformat(p.created_at),
+            "updatedAt": utc_isoformat(p.updated_at),
         },
     }
 

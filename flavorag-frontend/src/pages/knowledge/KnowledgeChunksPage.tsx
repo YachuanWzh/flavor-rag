@@ -15,6 +15,7 @@ import {
   updateChunkStatus,
 } from "@/services/knowledgeService";
 import type { KnowledgeChunk } from "@/types";
+import { parseApiDateTime } from "@/utils/dateTime";
 
 const PAGE_SIZE = 10;
 type StatusFilter = "all" | "enabled" | "disabled";
@@ -320,18 +321,13 @@ export default function KnowledgeChunksPage() {
                   ? (chunk.metadata?.asset_ids?.length ?? 0)
                   : 0;
               const fmtTime = (t?: string) => {
-                if (!t) return null;
-                try {
-                  const d = new Date(t);
-                  return d.toLocaleString("zh-CN", {
-                    month: "2-digit",
-                    day: "2-digit",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  });
-                } catch {
-                  return null;
-                }
+                const d = parseApiDateTime(t);
+                return d?.toLocaleString("zh-CN", {
+                  month: "2-digit",
+                  day: "2-digit",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                }) ?? null;
               };
               const createdLabel = fmtTime(chunk.createTime);
               const updatedLabel = fmtTime(chunk.updateTime);

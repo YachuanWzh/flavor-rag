@@ -24,6 +24,7 @@ from app.ingestion.upload_validation import (
     UploadValidationError,
     save_upload_bounded,
 )
+from app.time_utils import utc_isoformat
 from app.models import (
     InterviewAnswer,
     InterviewMaterial,
@@ -91,7 +92,7 @@ def _material_summary(material: InterviewMaterial | None) -> dict:
         "fileName": material.file_name,
         "contentHash": material.content_hash,
         "fileSize": material.file_size,
-        "updatedAt": str(material.updated_at) if material.updated_at else None,
+        "updatedAt": utc_isoformat(material.updated_at),
     }
 
 
@@ -549,7 +550,7 @@ async def _profile_payload(db: AsyncSession, user_id: str) -> dict:
                 "interviewCount": profile.interview_count or 0,
                 "latestInterviewId": profile.latest_interview_id,
                 "targetRole": profile.target_role,
-                "updatedAt": str(profile.updated_at) if profile.updated_at else None,
+                "updatedAt": utc_isoformat(profile.updated_at),
             }
             if profile
             else None
@@ -561,7 +562,7 @@ async def _profile_payload(db: AsyncSession, user_id: str) -> dict:
                 "kbName": item.kb_name,
                 "difficulty": item.difficulty,
                 "overallScore": item.overall_score,
-                "completedAt": str(item.completed_at) if item.completed_at else None,
+                "completedAt": utc_isoformat(item.completed_at),
             }
             for item in recent
         ],
@@ -602,9 +603,7 @@ async def get_interview_history(
                     "dimensionScores": item.dimension_scores or {},
                     "roleFitBreakdown": item.role_fit_breakdown or {},
                     "summary": item.summary,
-                    "completedAt": (
-                        str(item.completed_at) if item.completed_at else None
-                    ),
+                    "completedAt": utc_isoformat(item.completed_at),
                 }
                 for item in interviews
             ],
@@ -936,8 +935,8 @@ async def _interview_payload(
         "questionCount": interview.question_count,
         "hasResume": bool(interview.resume_hash),
         "hasJd": bool(interview.jd_hash),
-        "startedAt": str(interview.started_at) if interview.started_at else None,
-        "completedAt": str(interview.completed_at) if interview.completed_at else None,
+        "startedAt": utc_isoformat(interview.started_at),
+        "completedAt": utc_isoformat(interview.completed_at),
         "questions": [],
     }
     for question in questions:

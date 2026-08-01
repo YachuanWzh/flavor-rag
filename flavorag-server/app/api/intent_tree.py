@@ -9,6 +9,7 @@ from sqlalchemy import select
 from app.database.session import get_db
 from app.auth.dependencies import get_current_user
 from app.models import User, IntentNode, gen_id
+from app.time_utils import utc_isoformat
 
 router = APIRouter(prefix="/api/admin/intent-tree", tags=["intent-tree"])
 
@@ -86,7 +87,7 @@ async def list_intents(
             "mcpToolId": n.mcp_tool_id,
             "sortOrder": n.sort_order,
             "enabled": n.enabled,
-            "createTime": str(n.create_time),
+            "createTime": utc_isoformat(n.create_time),
         }
         for n in nodes
     ]}

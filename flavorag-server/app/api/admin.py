@@ -22,6 +22,7 @@ from app.config.hyperparam import (
     update_hyperparam,
     refresh_cache,
 )
+from app.time_utils import utc_isoformat
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -279,7 +280,7 @@ async def list_traces(
             "recallCount": t.recall_count,
             "finalCount": t.final_count,
             "status": t.status,
-            "createTime": str(t.create_time),
+            "createTime": utc_isoformat(t.create_time),
         } for t in traces],
     }}
 

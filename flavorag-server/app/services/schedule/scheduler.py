@@ -8,16 +8,52 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
 from app.config.logging_config import get_logger
+from app.config.settings import settings
 from app.database.session import async_session_factory
 from app.models import KnowledgeDocumentSchedule
 from app.services.schedule.lock_manager import ScheduleLockManager
 from app.services.schedule.refresh_processor import RefreshProcessor
 
 _log = get_logger("flavorag.schedule.engine")
+
+
+def calculate_next_run(
+    cron_expr: str,
+    *,
+    now_utc: datetime | None = None,
+) -> datetime:
+    """Calculate the next fire time and return it as naive UTC for storage."""
+    aware_now = now_utc or datetime.now(timezone.utc)
+    if aware_now.tzinfo is None:
+        aware_now = aware_now.replace(tzinfo=timezone.utc)
+    else:
+        aware_now = aware_now.astimezone(timezone.utc)
+
+    try:
+        interval_sec = int(cron_expr)
+        return (aware_now + timedelta(seconds=interval_sec)).replace(
+            tzinfo=None
+        )
+    except (ValueError, TypeError):
+        pass
+
+    if not cron_expr:
+        raise ValueError("cron expression is required")
+    from apscheduler.triggers.cron import CronTrigger
+
+    trigger = CronTrigger.from_crontab(
+        cron_expr,
+        timezone=ZoneInfo(settings.app_timezone),
+    )
+    next_fire = trigger.get_next_fire_time(None, aware_now)
+    if next_fire is None:
+        raise ValueError(f"cron expression has no next fire time: {cron_expr}")
+    return next_fire.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 class DocumentScheduleScheduler:
@@ -129,26 +165,4 @@ class DocumentScheduleScheduler:
         Supports simple interval-in-seconds format (e.g., "3600" = 1 hour)
         in addition to standard cron expressions.
         """
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        cron = sched.cron_expr or ""
-
-        # Simple interval: just a number of seconds
-        try:
-            interval_sec = int(cron)
-            sched.next_run_time = now + timedelta(seconds=interval_sec)
-            return
-        except (ValueError, TypeError):
-            pass
-
-        from apscheduler.triggers.cron import CronTrigger
-
-        if not cron:
-            raise ValueError("cron expression is required")
-        trigger = CronTrigger.from_crontab(cron, timezone=timezone.utc)
-        aware_now = datetime.now(timezone.utc)
-        next_fire = trigger.get_next_fire_time(None, aware_now)
-        if next_fire is None:
-            raise ValueError(f"cron expression has no next fire time: {cron}")
-        sched.next_run_time = next_fire.astimezone(timezone.utc).replace(
-            tzinfo=None
-        )
+        sched.next_run_time = calculate_next_run(sched.cron_expr or "")

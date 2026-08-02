@@ -67,6 +67,17 @@ class CircuitOpenError(RuntimeError):
     pass
 
 
+def rejection_reason_for_channels(
+    statuses: dict[str, ChannelStatus], fallback_reason: str
+) -> str:
+    """Distinguish backend unavailability from a successful empty retrieval."""
+    if statuses and all(
+        status.status in {"timeout", "error"} for status in statuses.values()
+    ):
+        return "retrieval_unavailable"
+    return fallback_reason
+
+
 class CircuitBreaker:
     def __init__(
         self,
@@ -260,20 +271,15 @@ def select_context(
     # with the best eligible items from under-represented KBs.  This keeps
     # the total count within final_top_k (no token-budget overflow) while
     # ensuring every searched KB has a voice.
-    # fallback_pool (pre-rerank candidates) is used when the reranker output
-    # does not contain enough items from a given KB.
+    # Pre-rerank fallback rows are deliberately ineligible: their scores live
+    # in a different domain and they have not passed the active threshold.
     if kb_quota and kb_quota > 0:
-        # Determine all KBs from both eligible AND fallback_pool
+        # Determine quota membership only from reranked, eligible candidates.
         all_kbs = {
             item.metadata.get("kb_id", "")
             for item in eligible
             if item.metadata.get("kb_id")
         }
-        if fallback_pool:
-            for item in fallback_pool:
-                kb = item.metadata.get("kb_id", "")
-                if kb:
-                    all_kbs.add(kb)
         if len(all_kbs) > 1:
             selected_ids = {item.chunk_id for item in selected}
             kb_counts = _kb_distribution(selected)
@@ -287,17 +293,6 @@ def select_context(
                     if item.metadata.get("kb_id") == kb
                     and item.chunk_id not in selected_ids
                 ][:needed]
-                # If reranked pool is insufficient, pull from fallback_pool
-                if len(backfill) < needed and fallback_pool:
-                    extra_needed = needed - len(backfill)
-                    backfill_ids = {item.chunk_id for item in backfill}
-                    extra = [
-                        item for item in fallback_pool
-                        if item.metadata.get("kb_id") == kb
-                        and item.chunk_id not in selected_ids
-                        and item.chunk_id not in backfill_ids
-                    ][:extra_needed]
-                    backfill.extend(extra)
                 if not backfill:
                     continue
                 # Find items to evict: lowest-score selected items from KBs

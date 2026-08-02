@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import asyncio
 import time
+import unicodedata
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, replace
 
@@ -32,6 +33,7 @@ from app.rag.governance import (
     CircuitBreaker,
     RetrievalBudget,
     estimate_tokens,
+    rejection_reason_for_channels,
     run_search_channels,
     select_context,
 )
@@ -168,6 +170,24 @@ class RetrievalScope:
     kb_name: str
     collection_name: str
     embedding_model: str | None = None
+
+
+def select_query_scopes(
+    question: str, scopes: list[RetrievalScope]
+) -> list[RetrievalScope]:
+    """Narrow an authorized global scope when complete KB names are explicit."""
+    normalized_question = unicodedata.normalize("NFKC", question or "").casefold()
+    matched: list[RetrievalScope] = []
+    for scope in scopes:
+        normalized_name = unicodedata.normalize(
+            "NFKC", scope.kb_name or ""
+        ).casefold().strip()
+        significant_chars = sum(char.isalnum() for char in normalized_name)
+        if significant_chars < 3:
+            continue
+        if normalized_name and normalized_name in normalized_question:
+            matched.append(scope)
+    return matched or scopes
 
 
 @dataclass
@@ -716,7 +736,16 @@ class RAGPipeline:
             or "default_store"
         )
         _pipeline_log.info("collection_resolved", collection_name=collection_name)
-        scopes = self._resolved_scopes(ctx, collection_name)
+        scopes = select_query_scopes(
+            ctx.question, self._resolved_scopes(ctx, collection_name)
+        )
+        if len(scopes) < len(ctx.retrieval_scopes):
+            _pipeline_log.info(
+                "retrieval_scopes_narrowed",
+                requested=len(ctx.retrieval_scopes),
+                selected=len(scopes),
+                kb_ids=[scope.kb_id for scope in scopes],
+            )
 
         search_question = rewritten or ctx.question
 
@@ -868,6 +897,7 @@ class RAGPipeline:
                 took_ms=neighbor_ms,
             )
             if self._trace:
+                neighbor_error = getattr(self, "_neighbor_expansion_error", None)
                 await self._trace.trace_node(
                     trace_id or "",
                     "postprocess",
@@ -883,11 +913,11 @@ class RAGPipeline:
                         "after_count": neighbor_after,
                         "neighbors_added": neighbor_after - neighbor_before,
                     },
+                    status="error" if neighbor_error else "success",
+                    error_message=neighbor_error,
                 )
 
-        post_process_scopes = self._resolved_scopes(
-            ctx, ctx.collection_name or "default_store"
-        )
+        post_process_scopes = scopes
         allowed_kb_ids = [scope.kb_id for scope in post_process_scopes]
         if allowed_kb_ids:
             principal = Principal(
@@ -931,7 +961,7 @@ class RAGPipeline:
         # Per-KB quota: guarantee each KB minimum representation in cross-KB mode
         kb_quota = (
             settings.retrieval_kb_min_quota
-            if settings.retrieval_kb_quota_enabled and len(ctx.retrieval_scopes) > 1
+            if settings.retrieval_kb_quota_enabled and len(scopes) > 1
             else None
         )
         reranked, retrieval_decision = select_context(
@@ -940,6 +970,9 @@ class RAGPipeline:
             min_score=relevance_threshold(reranked, tenant_id=_tenant),
             kb_quota=kb_quota,
             fallback_pool=deduped if kb_quota else None,
+        )
+        rejection_reason = rejection_reason_for_channels(
+            channel_statuses, retrieval_decision.reason
         )
         t_rerank_end = datetime.now(timezone.utc).replace(tzinfo=None)
         rerank_ms = int((t_rerank_end - t_rerank).total_seconds() * 1000)
@@ -966,7 +999,7 @@ class RAGPipeline:
         )
 
         # 9. Build chunks
-        _kb_name_map = {s.kb_id: s.kb_name for s in ctx.retrieval_scopes if s.kb_name}
+        _kb_name_map = {s.kb_id: s.kb_name for s in scopes if s.kb_name}
         chunks = [
             {
                 "content": r.content,
@@ -1027,7 +1060,7 @@ class RAGPipeline:
             recall_count=recall_count,
             final_count=final_count,
             answerable=retrieval_decision.answerable,
-            rejection_reason=retrieval_decision.reason or None,
+            rejection_reason=rejection_reason or None,
             channel_statuses={
                 name: status.__dict__ for name, status in channel_statuses.items()
             },
@@ -1047,7 +1080,7 @@ class RAGPipeline:
             model_base_url=model_base_url,
             model_api_key=model_api_key,
             answerable=retrieval_decision.answerable,
-            rejection_reason=retrieval_decision.reason or None,
+            rejection_reason=rejection_reason or None,
             channel_statuses={
                 name: status.__dict__ for name, status in channel_statuses.items()
             },
@@ -1073,7 +1106,9 @@ class RAGPipeline:
         # Speculative vector search with original query (while LLM calls in flight)
         speculative_task: asyncio.Task | None = None
         collection_name = ctx.collection_name or "default_store"
-        speculative_scopes = self._resolved_scopes(ctx, collection_name)
+        speculative_scopes = select_query_scopes(
+            ctx.question, self._resolved_scopes(ctx, collection_name)
+        )
         speculative_scope = (
             speculative_scopes[0] if len(speculative_scopes) == 1 else None
         )
@@ -1241,7 +1276,16 @@ class RAGPipeline:
             or (intent.get("collection_name") if intent else None)
             or "default_store"
         )
-        scopes = self._resolved_scopes(ctx, collection_name)
+        scopes = select_query_scopes(
+            ctx.question, self._resolved_scopes(ctx, collection_name)
+        )
+        if len(scopes) < len(ctx.retrieval_scopes):
+            _pipeline_log.info(
+                "retrieval_scopes_narrowed",
+                requested=len(ctx.retrieval_scopes),
+                selected=len(scopes),
+                kb_ids=[scope.kb_id for scope in scopes],
+            )
 
         # Build subqueries from rewrite result
         search_question = rewritten or ctx.question
@@ -1384,6 +1428,7 @@ class RAGPipeline:
             intent_name=intent_name,
             search_question=search_question,
             subqueries=subqueries,
+            scopes=scopes,
             all_results=all_results,
             active_channel_names=active_channel_names,
             channel_statuses=channel_statuses,
@@ -1407,6 +1452,7 @@ class RAGPipeline:
         intent_name: str,
         search_question: str,
         subqueries: list[str],
+        scopes: list[RetrievalScope],
         all_results: list[list[SearchResult]],
         active_channel_names: list[str],
         channel_statuses: dict,
@@ -1486,16 +1532,17 @@ class RAGPipeline:
             neighbor_ms = int((t_neighbor_end - t_neighbor_start).total_seconds() * 1000)
             _pipeline_log.info("neighbor_expansion", before=neighbor_before, after=neighbor_after, added=neighbor_after - neighbor_before, took_ms=neighbor_ms)
             if self._trace:
+                neighbor_error = getattr(self, "_neighbor_expansion_error", None)
                 await self._trace.trace_node(
                     trace_id or "", "postprocess", "neighbor_expansion",
                     t_neighbor_start, t_neighbor_end,
                     input_data={"before_count": neighbor_before, "window": 2, "top_n_anchors": 10},
                     output_data={"after_count": neighbor_after, "neighbors_added": neighbor_after - neighbor_before},
+                    status="error" if neighbor_error else "success",
+                    error_message=neighbor_error,
                 )
 
-        post_process_scopes = self._resolved_scopes(
-            ctx, ctx.collection_name or "default_store"
-        )
+        post_process_scopes = scopes
         allowed_kb_ids = [scope.kb_id for scope in post_process_scopes]
         if allowed_kb_ids:
             principal = Principal(
@@ -1536,7 +1583,7 @@ class RAGPipeline:
         # Per-KB quota: guarantee each KB minimum representation in cross-KB mode
         kb_quota = (
             settings.retrieval_kb_min_quota
-            if settings.retrieval_kb_quota_enabled and len(ctx.retrieval_scopes) > 1
+            if settings.retrieval_kb_quota_enabled and len(scopes) > 1
             else None
         )
         # Diagnostic: KB distribution before select_context
@@ -1551,6 +1598,9 @@ class RAGPipeline:
             reranked, budget, min_score=relevance_threshold(reranked, tenant_id=ctx.tenant_id or "default"),
             kb_quota=kb_quota,
             fallback_pool=deduped if kb_quota else None,
+        )
+        rejection_reason = rejection_reason_for_channels(
+            channel_statuses, retrieval_decision.reason
         )
         if kb_quota:
             _post_dist: dict[str, int] = {}
@@ -1578,7 +1628,7 @@ class RAGPipeline:
         )
 
         # 9. Build chunks
-        _kb_name_map = {s.kb_id: s.kb_name for s in ctx.retrieval_scopes if s.kb_name}
+        _kb_name_map = {s.kb_id: s.kb_name for s in scopes if s.kb_name}
         chunks = [
             {
                 "content": r.content, "chunk_id": r.chunk_id, "score": r.score,
@@ -1622,7 +1672,7 @@ class RAGPipeline:
             search=search_ms, fusion=fusion_ms, dedup=dedup_ms, rerank=rerank_ms,
             total_ms=duration, recall_count=recall_count, final_count=final_count,
             answerable=retrieval_decision.answerable,
-            rejection_reason=retrieval_decision.reason or None,
+            rejection_reason=rejection_reason or None,
             channel_statuses={name: status.__dict__ for name, status in channel_statuses.items()},
             subqueries=subqueries,
         )
@@ -1634,7 +1684,7 @@ class RAGPipeline:
             model_name=model_name, model_base_url=model_base_url,
             model_api_key=model_api_key,
             answerable=retrieval_decision.answerable,
-            rejection_reason=retrieval_decision.reason or None,
+            rejection_reason=rejection_reason or None,
             channel_statuses={name: status.__dict__ for name, status in channel_statuses.items()},
             subqueries=subqueries,
             applied_mappings=rewrite_result.applied_mappings,
@@ -1663,9 +1713,7 @@ class RAGPipeline:
         """
         if not results or window < 1:
             return results
-
-        import logging
-        _log = logging.getLogger("flavorag.rag.pipeline")
+        self._neighbor_expansion_error = None
 
         # Only expand from top-N scored results to control neighbor budget
         anchor_candidates = sorted(results, key=lambda r: r.score, reverse=True)
@@ -1786,15 +1834,26 @@ class RAGPipeline:
                         )
                     )
 
-                _log.info(
-                    "neighbor_expansion_done",
-                    original=len(results),
-                    neighbors=len(neighbors),
-                )
-                return results + neighbors
+                expanded = results + neighbors
+                try:
+                    _pipeline_log.info(
+                        "neighbor_expansion_done",
+                        original=len(results),
+                        neighbors=len(neighbors),
+                    )
+                except Exception:
+                    # Retrieval evidence must not be discarded because an
+                    # observability adapter rejected a log field.
+                    pass
+                return expanded
 
         except Exception as exc:
-            _log.warning("neighbor_expansion_failed: %s", exc)
+            self._neighbor_expansion_error = f"{type(exc).__name__}: {exc}"[:500]
+            _pipeline_log.warning(
+                "neighbor_expansion_failed",
+                error_type=type(exc).__name__,
+                error=str(exc)[:300],
+            )
             return results
 
     async def _filter_unavailable_chunks(

@@ -186,6 +186,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   ...m,
                   ragModes: payload.modes,
                   retrievalChannels: payload.channels,
+                  neighborEvidenceCount: payload.neighborEvidenceCount,
                   appliedMappings: payload.appliedMappings,
                   hydeDoc: payload.hydeDoc || m.hydeDoc,
                   hydeMeta: payload.hydeMeta || m.hydeMeta,

@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     embedding_base_url: str = "https://api.siliconflow.cn/v1"
     embedding_model: str = "Qwen/Qwen3-Embedding-8B"
     embedding_dim: int = 4096
-    embedding_query_timeout_sec: float = 25.0
+    embedding_query_timeout_sec: float = 10.0
     embedding_query_max_attempts: int = 2
 
     # LLM

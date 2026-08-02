@@ -13,6 +13,7 @@ from app.config.settings import settings
 _BATCH_SIZE = 16
 _QUERY_CACHE_MAX_SIZE = 256
 _query_cache: OrderedDict[tuple[str, str, str], list[float]] = OrderedDict()
+_query_inflight: dict[tuple[str, str, str], asyncio.Task[list[float]]] = {}
 _query_cache_lock = asyncio.Lock()
 _log = get_logger("flavorag.embedding")
 
@@ -50,19 +51,33 @@ class EmbeddingClient:
             if cached is not None:
                 _query_cache.move_to_end(cache_key)
                 return list(cached)
+            task = _query_inflight.get(cache_key)
+            if task is None:
+                task = asyncio.create_task(self._embed_query_uncached(text))
+                _query_inflight[cache_key] = task
+                task.add_done_callback(
+                    lambda done, key=cache_key: asyncio.create_task(
+                        _discard_inflight_query(key, done)
+                    )
+                )
 
-        results = await self._call_with_retry(
-            [text],
-            timeout_sec=settings.embedding_query_timeout_sec,
-            max_attempts=settings.embedding_query_max_attempts,
-        )
-        vector = results[0]
+        # A scope-level cancellation must not cancel the provider request that
+        # other KB scopes are sharing.
+        vector = await asyncio.shield(task)
         async with _query_cache_lock:
             _query_cache[cache_key] = list(vector)
             _query_cache.move_to_end(cache_key)
             while len(_query_cache) > _QUERY_CACHE_MAX_SIZE:
                 _query_cache.popitem(last=False)
         return vector
+
+    async def _embed_query_uncached(self, text: str) -> list[float]:
+        results = await self._call_with_retry(
+            [text],
+            timeout_sec=settings.embedding_query_timeout_sec,
+            max_attempts=settings.embedding_query_max_attempts,
+        )
+        return results[0]
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         all_vectors: list[list[float]] = []
@@ -126,6 +141,15 @@ class EmbeddingClient:
         raise RuntimeError(
             f"Embedding failed after {attempts} attempt(s): {error_detail}"
         )
+
+
+async def _discard_inflight_query(
+    cache_key: tuple[str, str, str],
+    task: asyncio.Task[list[float]],
+) -> None:
+    async with _query_cache_lock:
+        if _query_inflight.get(cache_key) is task:
+            _query_inflight.pop(cache_key, None)
 
 
 class MockEmbeddingClient:

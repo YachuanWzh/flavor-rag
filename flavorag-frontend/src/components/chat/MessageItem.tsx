@@ -5,6 +5,7 @@ import SourceMedia from "./SourceMedia";
 import ThinkingIndicator from "./ThinkingIndicator";
 import { submitFeedback } from "@/services/feedbackService";
 import { ArrowUpRight, ChevronDown, ChevronUp, Layers, Network, Orbit, Sparkles } from "lucide-react";
+import { displayedNeighborEvidenceCount } from "./chatStreamingUtils";
 
 interface Props {
   message: Message;
@@ -148,7 +149,7 @@ export default function MessageItem({
                 className="inline-flex items-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-800"
               >
                 <Layers className="h-3 w-3" />
-                近邻补偿 {(message.sources || []).filter((s) => s.neighborOf?.length).length} 条证据
+                近邻补偿 {displayedNeighborEvidenceCount(message.sources, message.neighborEvidenceCount)} 条证据
               </span>
             )}
           </div>

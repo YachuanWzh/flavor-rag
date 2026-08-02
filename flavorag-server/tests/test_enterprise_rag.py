@@ -174,23 +174,73 @@ def test_context_selection_restores_score_order_after_reranking_and_quota():
     assert [item.chunk_id for item in selected] == ["high", "middle", "low"]
 
     selected, _ = select_context(
-        candidates,
-        RetrievalBudget(context_max_tokens=100, final_top_k=2),
-        min_score=0,
-        kb_quota=1,
-        fallback_pool=[
+        [
             *candidates,
             SearchResult(
                 "kb-b",
-                "fallback",
+                "reranked eligible",
                 0.1,
                 doc_id="doc-b",
-                metadata={"kb_id": "kb-b"},
+                metadata={"kb_id": "kb-b", "rerank_score": 0.1},
             ),
         ],
+        RetrievalBudget(context_max_tokens=100, final_top_k=2),
+        min_score=0,
+        kb_quota=1,
     )
 
     assert [item.chunk_id for item in selected] == ["high", "kb-b"]
+
+
+def test_kb_quota_never_admits_unreranked_or_below_threshold_fallback():
+    from app.rag.governance import RetrievalBudget, select_context
+
+    eligible = [
+        SearchResult(
+            "kb-a-high",
+            "relevant",
+            0.9,
+            metadata={"kb_id": "kb-a", "rerank_score": 0.9},
+        )
+    ]
+    fallback = SearchResult(
+        "kb-b-low",
+        "irrelevant fallback",
+        0.1,
+        metadata={"kb_id": "kb-b"},
+    )
+
+    selected, _ = select_context(
+        eligible,
+        RetrievalBudget(final_top_k=2),
+        min_score=0.5,
+        kb_quota=1,
+        fallback_pool=[fallback],
+    )
+
+    assert [item.chunk_id for item in selected] == ["kb-a-high"]
+
+
+def test_all_channel_failure_is_not_classified_as_knowledge_gap():
+    from app.rag.governance import ChannelStatus, rejection_reason_for_channels
+
+    unavailable = {
+        "vector": ChannelStatus("timeout", 20_000, error="channel_timeout"),
+        "keyword": ChannelStatus("error", 10_000, error="ConnectionTimeout"),
+    }
+    degraded = {
+        **unavailable,
+        "graph": ChannelStatus("success", 50, count=0),
+    }
+
+    assert (
+        rejection_reason_for_channels(unavailable, "insufficient_relevance")
+        == "retrieval_unavailable"
+    )
+    assert (
+        rejection_reason_for_channels(degraded, "insufficient_relevance")
+        == "insufficient_relevance"
+    )
 
 
 @pytest.mark.asyncio

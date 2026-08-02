@@ -6,7 +6,12 @@ from dataclasses import replace
 from app.agent.controlled import AgentAction, ControlledAgent
 from app.config.settings import settings
 from app.database.session import engine
-from app.rag.pipeline import RAGContext, RAGPipeline, RAGResult
+from app.rag.pipeline import (
+    RAGContext,
+    RAGPipeline,
+    RAGResult,
+    select_query_scopes,
+)
 from app.tools.registry import ToolRegistry
 from app.tools.sql_tool import ReadOnlySQLTool
 from app.tools.mcp_tool import ControlledMCPClient, MCPToolTarget
@@ -37,6 +42,12 @@ class ControlledRAGAgent:
         self.pipeline = pipeline
 
     async def run(self, context: RAGContext) -> tuple[RAGResult, list[dict]]:
+        context = replace(
+            context,
+            retrieval_scopes=select_query_scopes(
+                context.question, context.retrieval_scopes
+            ),
+        )
         registry = ToolRegistry()
         retrieved: list[RAGResult] = []
 

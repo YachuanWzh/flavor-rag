@@ -12,6 +12,7 @@ export interface StreamHandlers {
     taskId: string;
     modes?: RagModes;
     channels?: Record<string, RetrievalChannelStatus>;
+    neighborEvidenceCount?: number;
     appliedMappings?: Array<{ source: string; target: string; type: string }>;
     hydeDoc?: string;
     hydeMeta?: { model?: string; durationMs?: number; timedOut?: boolean };

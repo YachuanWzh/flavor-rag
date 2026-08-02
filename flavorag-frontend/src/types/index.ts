@@ -29,6 +29,7 @@ export interface Message {
   agentSteps?: AgentStep[];
   ragModes?: RagModes;
   retrievalChannels?: Record<string, RetrievalChannelStatus>;
+  neighborEvidenceCount?: number;
   appliedMappings?: AppliedMapping[];
   hydeDoc?: string;
   hydeMeta?: { model?: string; durationMs?: number; timedOut?: boolean };

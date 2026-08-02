@@ -1,6 +1,7 @@
 ﻿"""Unit tests for RAG rewrite, intent, pipeline — no external deps."""
 import pytest
 import hashlib
+from types import SimpleNamespace
 from app.rag.rewrite import needs_reference_clarification, rewrite_query
 from app.rag.intent import recognize_intent
 from app.rag.pipeline import RAGPipeline, RAGContext, RAGResult
@@ -206,6 +207,54 @@ class TestRAGPipeline:
         assert result.metadata["fusionScore"] == 0.016
         assert result.metadata["matchedChannels"] == ["vector"]
         assert result.metadata["channelScores"]["vector"]["rank"] == 1
+
+    @pytest.mark.asyncio
+    async def test_neighbor_expansion_keeps_fetched_neighbors(self, monkeypatch):
+        import app.rag.pipeline as pipeline_module
+
+        neighbor = SimpleNamespace(
+            id="chunk-12",
+            chunk_index=12,
+            doc_id="doc-1",
+            content="neighbor content",
+            embedding_content=None,
+            block_type="TEXT",
+            page_start=None,
+            page_end=None,
+            bbox_json=[],
+            metadata_json={},
+            doc_name="guide.md",
+        )
+
+        class FakeSession:
+            async def execute(self, _statement):
+                return [neighbor]
+
+        class FakeSessionContext:
+            async def __aenter__(self):
+                return FakeSession()
+
+            async def __aexit__(self, _exc_type, _exc, _traceback):
+                return False
+
+        monkeypatch.setattr(
+            pipeline_module,
+            "async_session_factory",
+            lambda: FakeSessionContext(),
+        )
+        anchor = SearchResult(
+            chunk_id="chunk-13",
+            doc_id="doc-1",
+            content="anchor content",
+            score=0.9,
+            chunk_index=13,
+        )
+
+        pipeline = RAGPipeline.__new__(RAGPipeline)
+        expanded = await pipeline._expand_neighbors([anchor], window=2)
+
+        assert [item.chunk_id for item in expanded] == ["chunk-13", "chunk-12"]
+        assert expanded[1].metadata["neighbor_of"] == ["chunk-13"]
 
 
 def test_context_free_reference_requires_clarification():

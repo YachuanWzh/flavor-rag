@@ -59,6 +59,17 @@ def effective_graph_rag(
     return server_default if requested is None else requested
 
 
+def retrieval_refusal_message(rejection_reason: str | None) -> str:
+    if rejection_reason == "retrieval_unavailable":
+        return "检索服务暂时不可用，请稍后重试。"
+    return "当前授权范围内没有找到足够可靠的资料，暂时无法回答该问题。"
+
+
+def _neighbor_evidence_count(sources: list[dict]) -> int:
+    """Count final neighbor evidence for retrieval-stage SSE metadata."""
+    return sum(1 for source in sources if source.get("neighborOf"))
+
+
 async def resolve_chat_kb_scopes(
     db: AsyncSession,
     user: User,
@@ -535,6 +546,9 @@ async def chat(
                         "hyde": hyde,
                     },
                     "channels": rag_result.channel_statuses,
+                    "neighborEvidenceCount": _neighbor_evidence_count(
+                        rag_result.sources
+                    ),
                     "queryUnderstanding": rag_result.intent,
                     "appliedMappings": [
                         {"source": m["source"], "target": m["target"], "type": m["type"]}
@@ -623,7 +637,7 @@ async def chat(
                 RAG_REFUSALS.labels(
                     reason=rag_result.rejection_reason or "insufficient_evidence"
                 ).inc()
-                refusal = "当前授权范围内没有找到足够可靠的资料，暂时无法回答该问题。"
+                refusal = retrieval_refusal_message(rag_result.rejection_reason)
                 yield (
                     "event: message\ndata: "
                     + json.dumps({"type": "response", "delta": refusal})

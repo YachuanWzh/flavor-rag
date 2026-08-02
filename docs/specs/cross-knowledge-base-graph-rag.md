@@ -1,7 +1,7 @@
 # Cross-Knowledge-Base Graph RAG — SDD
 
-Status: implemented in v0.0.7
-Date: 2026-07-28
+Status: implemented in v0.0.7; reliability hardening specified for v0.0.9
+Date: 2026-07-28; updated 2026-08-02
 
 ## 1. Goal
 
@@ -121,6 +121,54 @@ requires the Graph RAG channel to be scheduled, but an optional graph backend
 outage may degrade through the existing native/fallback behavior and must not
 leak data.
 
+### 5.1 Reliability hardening (v0.0.9)
+
+Global scope remains an authorization boundary, not a requirement to query
+every readable index for every question. After resolving the complete readable
+scope set, chat retrieval applies deterministic query-aware narrowing:
+
+- when the original question contains one or more complete knowledge-base
+  display names (Unicode NFKC + case-insensitive comparison), retrieval searches
+  exactly those matched readable scopes;
+- short one- or two-character names are not used for implicit narrowing because
+  they are too ambiguous;
+- when no readable knowledge-base name is mentioned, all resolved scopes remain
+  active;
+- the client cannot use a name mention to escape the previously resolved ACL
+  boundary.
+
+Embedding generation is shared per `(provider, canonical model, query)` while
+concurrent scope searches are in flight. One caller owns the provider request;
+other callers await the same task. Cancellation of one scope must not cancel the
+shared provider request, and failed tasks must be evicted so a later request can
+retry. Milvus searches remain independently scoped after the vector is shared.
+
+Per-KB quota operates only on candidates returned by the reranker and passing
+the active relevance threshold. A pre-rerank fallback candidate must never enter
+the final context merely to satisfy diversity. If a KB has no eligible candidate,
+its quota is intentionally left unmet.
+
+Adjacent-chunk expansion runs after canonical metadata resolution. It must:
+
+- fetch enabled, non-deleted chunks in the configured window from the same
+  document and resolved KB set;
+- append each neighbor once and retain `neighbor_of` attribution;
+- use the structured application logger without allowing observability failures
+  to discard successfully fetched neighbors;
+- report a failed expansion as failed rather than a successful zero-addition
+  trace.
+
+Empty evidence has two distinct public outcomes:
+
+- at least one retrieval channel completed successfully: `insufficient_relevance`;
+- every scheduled channel timed out or failed: `retrieval_unavailable` and a
+  retryable service-unavailable message, never a knowledge-gap message.
+
+Deployment configuration must leave headroom between embedding retries and the
+outer retrieval budgets. With two 10-second query attempts and a one-second
+backoff, `RETRIEVAL_CHANNEL_TIMEOUT_MS` must exceed 21 seconds and
+`RETRIEVAL_TOTAL_TIMEOUT_MS` must exceed the channel timeout.
+
 ## 6. Graph presentation
 
 The visual language is a “knowledge star map”:
@@ -185,6 +233,20 @@ Interaction state is a transform `{x, y, scale}`:
     evidence/model/prompt provenance.
 11. Semantic model failure preserves the deterministic graph and allows the
     optional LightRAG enrichment step to continue.
+12. A global question naming two readable KBs searches those two scopes and no
+    others; a question naming none retains all readable scopes.
+13. Concurrent scope searches for the same canonical embedding model/query
+    make one provider embedding call, including when distinct client instances
+    participate.
+14. Per-KB quota cannot admit a below-threshold or pre-rerank fallback row.
+15. Adjacent-chunk expansion returns existing neighbors with parent attribution
+    and does not lose them while emitting structured logs.
+16. All-channel timeout/error is classified as `retrieval_unavailable`; a
+    successful empty channel remains `insufficient_relevance`.
+17. The chat refusal text distinguishes temporary retrieval unavailability from
+    an actual lack of authorized evidence.
+18. Retrieval-stage SSE metadata includes the final neighbor-evidence count so
+    streaming clients do not display a placeholder zero until `finish`.
 
 ### Frontend
 
@@ -200,6 +262,9 @@ Interaction state is a transform `{x, y, scale}`:
    and preserves aggregate edge counts.
 7. Detail rendering excludes offscreen nodes/edges while retaining overscan
    and explicitly pinned interaction nodes.
+8. Before `finish` supplies final sources, the neighbor badge uses the count
+   delivered by retrieval metadata; after `finish`, final sources are the
+   source of truth.
 
 ## 9. Definition of done
 

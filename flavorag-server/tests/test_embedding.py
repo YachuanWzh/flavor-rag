@@ -1,4 +1,5 @@
 ﻿"""Unit tests for embedding module — mock client only."""
+import asyncio
 import httpx
 import pytest
 from app.llm.embedding import MockEmbeddingClient, get_embedding_client
@@ -91,6 +92,110 @@ async def test_query_embedding_uses_bounded_attempts_and_cache(monkeypatch):
 
     assert first == second == [0.25, 0.75]
     assert calls == [(["cache-me"], 7.0, 1)]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_query_embeddings_share_one_provider_call(monkeypatch):
+    from app.llm import embedding as embedding_module
+
+    embedding_module._query_cache.clear()
+    if hasattr(embedding_module, "_query_inflight"):
+        embedding_module._query_inflight.clear()
+    first = embedding_module.EmbeddingClient(
+        api_key="test-key",
+        base_url="https://embedding.invalid/v1",
+        model="test-model",
+    )
+    second = embedding_module.EmbeddingClient(
+        api_key="test-key",
+        base_url="https://embedding.invalid/v1",
+        model="test-model",
+    )
+    calls = 0
+    release = asyncio.Event()
+
+    async def fake_call(texts, *, timeout_sec=120.0, max_attempts=3):
+        nonlocal calls
+        calls += 1
+        await release.wait()
+        return [[0.25, 0.75]]
+
+    monkeypatch.setattr(first, "_call_with_retry", fake_call)
+    monkeypatch.setattr(second, "_call_with_retry", fake_call)
+
+    tasks = [
+        asyncio.create_task(first.embed_query("shared-query")),
+        asyncio.create_task(second.embed_query("shared-query")),
+    ]
+    await asyncio.sleep(0)
+    release.set()
+    vectors = await asyncio.gather(*tasks)
+
+    assert vectors == [[0.25, 0.75], [0.25, 0.75]]
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_embedding_waiter_does_not_cancel_shared_request(monkeypatch):
+    from app.llm import embedding as embedding_module
+
+    embedding_module._query_cache.clear()
+    embedding_module._query_inflight.clear()
+    client = embedding_module.EmbeddingClient(
+        api_key="test-key",
+        base_url="https://embedding.invalid/v1",
+        model="test-model",
+    )
+    release = asyncio.Event()
+    calls = 0
+
+    async def fake_call(texts, *, timeout_sec=120.0, max_attempts=3):
+        nonlocal calls
+        calls += 1
+        await release.wait()
+        return [[0.25, 0.75]]
+
+    monkeypatch.setattr(client, "_call_with_retry", fake_call)
+    cancelled = asyncio.create_task(client.embed_query("shared-cancel"))
+    survivor = asyncio.create_task(client.embed_query("shared-cancel"))
+    await asyncio.sleep(0)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    release.set()
+
+    assert await survivor == [0.25, 0.75]
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_inflight_embedding_is_evicted_for_retry(monkeypatch):
+    from app.llm import embedding as embedding_module
+
+    embedding_module._query_cache.clear()
+    embedding_module._query_inflight.clear()
+    client = embedding_module.EmbeddingClient(
+        api_key="test-key",
+        base_url="https://embedding.invalid/v1",
+        model="test-model",
+    )
+    calls = 0
+
+    async def flaky_call(texts, *, timeout_sec=120.0, max_attempts=3):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary provider failure")
+        return [[0.25, 0.75]]
+
+    monkeypatch.setattr(client, "_call_with_retry", flaky_call)
+
+    with pytest.raises(RuntimeError, match="temporary provider failure"):
+        await client.embed_query("retry-after-failure")
+    await asyncio.sleep(0)
+
+    assert await client.embed_query("retry-after-failure") == [0.25, 0.75]
+    assert calls == 2
 
 
 @pytest.mark.asyncio

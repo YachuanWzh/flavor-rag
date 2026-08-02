@@ -82,6 +82,17 @@ def test_global_scope_forces_graph_rag():
     assert effective_graph_rag("kb-a", None, server_default=True) is True
 
 
+def test_retrieval_unavailable_has_a_retryable_refusal_message():
+    from app.api.chat import retrieval_refusal_message
+
+    unavailable = retrieval_refusal_message("retrieval_unavailable")
+    knowledge_gap = retrieval_refusal_message("insufficient_relevance")
+
+    assert "暂时不可用" in unavailable
+    assert "稍后重试" in unavailable
+    assert "没有找到足够可靠的资料" in knowledge_gap
+
+
 @pytest.mark.asyncio
 async def test_acl_filter_accepts_only_exact_resolved_kb_set(tmp_path):
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -188,6 +199,26 @@ async def test_vector_search_fans_out_over_queries_and_scopes():
         ("q2", "collection-a", "embed-a"),
         ("q2", "collection-b", "embed-b"),
     ]
+
+
+def test_named_global_scopes_are_narrowed_without_expanding_authorization():
+    from app.rag.pipeline import RetrievalScope, select_query_scopes
+
+    scopes = [
+        RetrievalScope("kb-code", "flavor-code", "collection-code", "embed"),
+        RetrievalScope("kb-rag", "flavor-rag", "collection-rag", "embed"),
+        RetrievalScope("kb-agent", "huamulan-agent", "collection-agent", "embed"),
+        RetrievalScope("kb-short", "AI", "collection-short", "embed"),
+    ]
+
+    selected = select_query_scopes(
+        "flavor-code 和 FLAVOR-RAG 有哪些可以结合的点？",
+        scopes,
+    )
+
+    assert [scope.kb_id for scope in selected] == ["kb-code", "kb-rag"]
+    assert select_query_scopes("介绍一下检索系统", scopes) == scopes
+    assert select_query_scopes("AI 有什么能力？", scopes) == scopes
 
 
 def test_entity_normalization_is_stable_and_unicode_aware():

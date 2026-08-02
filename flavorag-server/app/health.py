@@ -85,6 +85,21 @@ async def readiness_checks() -> dict[str, str]:
         checks["llm"] = "error:not_configured"
     else:
         checks["llm"] = "configured"
+    # 3.1: JWT default secret check
+    if settings.jwt_secret_key == "change-me-in-production":
+        checks["jwt"] = "error:default_secret"
+    else:
+        checks["jwt"] = "configured"
+    # 4.4: Critical worker health check
+    try:
+        from app.main import _critical_worker_failures
+
+        if _critical_worker_failures:
+            checks["workers"] = f"error:{','.join(_critical_worker_failures)}"
+        else:
+            checks["workers"] = "ok"
+    except ImportError:
+        checks["workers"] = "ok"
     return checks
 
 

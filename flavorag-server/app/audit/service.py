@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.logging_config import get_logger
@@ -14,6 +16,14 @@ from app.models import BizChangeLog, gen_id
 from app.time_utils import utc_isoformat
 
 _log = get_logger("flavorag.audit")
+
+
+def _compute_entry_hash(entry_data: dict) -> str:
+    """Compute SHA-256 hash of an audit entry for chain integrity (3.2)."""
+    canonical = json.dumps(
+        entry_data, sort_keys=True, ensure_ascii=False, default=str
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 async def record_audit(
@@ -47,32 +57,63 @@ async def record_audit(
     if before_snapshot is not None and after_snapshot is not None:
         change_diff = _compute_diff(before_snapshot, after_snapshot)
 
-    entry = BizChangeLog(
-        id=gen_id(),
-        biz_type=biz_type,
-        biz_id=biz_id,
-        operation_type=operation_type,
-        action_desc=action_desc,
-        before_snapshot=before_snapshot,
-        after_snapshot=after_snapshot,
-        change_diff=change_diff,
-        operator_id=operator_id,
-        operator_name=operator_name,
-        operator_role=operator_role,
-        success=1 if success else 0,
-        error_message=error_message,
-        class_name=class_name,
-        method_name=method_name,
-        ip=ip,
-        user_agent=user_agent,
-        create_time=datetime.now(timezone.utc).replace(tzinfo=None),
-    )
+    entry_id = gen_id()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    # 3.2: Hash chain — link this entry to the previous one
+    effective_after = dict(after_snapshot or {})
+
+    async def _resolve_prev_hash(session: AsyncSession) -> str:
+        latest = (
+            await session.execute(
+                select(BizChangeLog)
+                .order_by(desc(BizChangeLog.create_time))
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if latest and latest.after_snapshot:
+            return latest.after_snapshot.get("_entry_hash", "genesis")
+        return "genesis"
 
     if db is not None:
+        prev_hash = await _resolve_prev_hash(db)
+        effective_after["_prev_hash"] = prev_hash
+        effective_after["_entry_hash"] = _compute_entry_hash({
+            "id": entry_id, "biz_type": biz_type, "biz_id": biz_id,
+            "operation_type": operation_type, "prev_hash": prev_hash,
+            "create_time": now.isoformat(),
+        })
+        entry = BizChangeLog(
+            id=entry_id, biz_type=biz_type, biz_id=biz_id,
+            operation_type=operation_type, action_desc=action_desc,
+            before_snapshot=before_snapshot, after_snapshot=effective_after,
+            change_diff=change_diff, operator_id=operator_id,
+            operator_name=operator_name, operator_role=operator_role,
+            success=1 if success else 0, error_message=error_message,
+            class_name=class_name, method_name=method_name,
+            ip=ip, user_agent=user_agent, create_time=now,
+        )
         db.add(entry)
         await db.flush()
     else:
         async with async_session_factory() as session:
+            prev_hash = await _resolve_prev_hash(session)
+            effective_after["_prev_hash"] = prev_hash
+            effective_after["_entry_hash"] = _compute_entry_hash({
+                "id": entry_id, "biz_type": biz_type, "biz_id": biz_id,
+                "operation_type": operation_type, "prev_hash": prev_hash,
+                "create_time": now.isoformat(),
+            })
+            entry = BizChangeLog(
+                id=entry_id, biz_type=biz_type, biz_id=biz_id,
+                operation_type=operation_type, action_desc=action_desc,
+                before_snapshot=before_snapshot, after_snapshot=effective_after,
+                change_diff=change_diff, operator_id=operator_id,
+                operator_name=operator_name, operator_role=operator_role,
+                success=1 if success else 0, error_message=error_message,
+                class_name=class_name, method_name=method_name,
+                ip=ip, user_agent=user_agent, create_time=now,
+            )
             session.add(entry)
             await session.commit()
 

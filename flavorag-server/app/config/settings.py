@@ -158,7 +158,7 @@ class Settings(BaseSettings):
     intent_max_matches: int = 5
     intent_guidance_min_score: float = 0.55
     intent_guidance_score_gap: float = 0.08
-    query_understanding_timeout_sec: float = 20.0
+    query_understanding_timeout_sec: float = 8.0
 
     # TTFT 优化
     ttft_parallel_rewrite_intent: bool = True  # 并行执行 rewrite + intent
@@ -186,6 +186,7 @@ class Settings(BaseSettings):
     trace_store_content: bool = False
     trace_retention_days: int = 30
     index_retired_retention_days: int = 7
+    audit_retention_days: int = 180
 
     # 异步摄取（Outbox 任务表 + Worker）
     ingestion_async_enabled: bool = True
@@ -193,6 +194,13 @@ class Settings(BaseSettings):
     ingestion_worker_poll_interval_sec: int = 3
     ingestion_job_max_attempts: int = 3
     ingestion_job_claim_timeout_sec: int = 900
+
+    # Prompt injection 防御
+    injection_detection_enabled: bool = True
+
+    # 评估告警
+    evaluation_webhook_url: str = ""
+    evaluation_alert_min_quality_score: float = 0.7
 
     # 限流
     rate_limit_enabled: bool = False

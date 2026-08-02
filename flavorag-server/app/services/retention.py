@@ -10,6 +10,7 @@ from sqlalchemy import delete, select
 from app.config.logging_config import get_logger
 from app.config.settings import settings
 from app.models import (
+    BizChangeLog,
     EvaluationRun,
     KnowledgeIndexGeneration,
     RagTraceNode,
@@ -128,14 +129,32 @@ class RetentionWorker:
                         )
                         generation.status = "DELETED"
                         generation.deleted = 1
+                # 3.2: Independent audit log retention (default ≥ 180 days)
+                audit_cutoff = (
+                    datetime.now(timezone.utc).replace(tzinfo=None)
+                    - timedelta(
+                        days=max(1, settings.audit_retention_days)
+                    )
+                )
+                audit_deleted = (
+                    await session.execute(
+                        delete(BizChangeLog).where(
+                            BizChangeLog.create_time < audit_cutoff
+                        )
+                    )
+                ).rowcount
                 await session.commit()
-                removed = len(trace_ids) + len(old_runs) + len(retired)
+                removed = (
+                    len(trace_ids) + len(old_runs) + len(retired)
+                    + audit_deleted
+                )
                 if removed:
                     _log.info(
                         "retention_complete",
                         traces=len(trace_ids),
                         evaluation_payloads=len(old_runs),
                         index_generations=len(retired),
+                        audit_logs=audit_deleted,
                     )
                 return removed
         finally:

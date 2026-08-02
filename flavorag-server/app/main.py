@@ -53,6 +53,14 @@ _index_reconciliation_worker = None
 _index_build_worker = None
 _batch_import_worker = None
 
+# 4.4: Track critical worker startup failures for readiness checks
+_critical_worker_failures: list[str] = []
+_CRITICAL_WORKERS = {
+    "ingestion_job_worker",
+    "index_reconciliation_worker",
+    "index_repair_worker",
+}
+
 
 async def _seed_admin_user():
     """Create default admin user (admin/admin123) if no users exist."""
@@ -112,6 +120,14 @@ async def lifespan(app: FastAPI):
     # Seed admin user for all backends
     await _seed_admin_user()
 
+    # 3.1: JWT default secret startup validation
+    if settings.jwt_secret_key == "change-me-in-production":
+        _log.critical(
+            "jwt_default_secret_detected",
+            detail="JWT secret is using the default value. "
+            "Change JWT_SECRET_KEY in production!",
+        )
+
     # Preload hyperparameter overrides into in-memory cache
     try:
         from app.config.hyperparam import refresh_cache
@@ -170,6 +186,13 @@ async def lifespan(app: FastAPI):
             _log.info("index_repair_worker_started")
         except Exception as exc:
             _log.warning("index_repair_worker_failed", error=str(exc))
+            _critical_worker_failures.append("index_repair_worker")
+            from app.error_handling import record_system_error
+
+            await record_system_error(
+                exc, component="worker.index_repair",
+                context={"worker": "index_repair_worker"},
+            )
 
     global _ingestion_watchdog
     if _workers_enabled:
@@ -216,6 +239,13 @@ async def lifespan(app: FastAPI):
             _log.info("index_reconciliation_worker_started")
         except Exception as exc:
             _log.warning("index_reconciliation_worker_failed", error=str(exc))
+            _critical_worker_failures.append("index_reconciliation_worker")
+            from app.error_handling import record_system_error
+
+            await record_system_error(
+                exc, component="worker.index_reconciliation",
+                context={"worker": "index_reconciliation_worker"},
+            )
 
     global _index_build_worker
     if _workers_enabled:
@@ -250,6 +280,13 @@ async def lifespan(app: FastAPI):
             _log.info("ingestion_job_worker_started")
         except Exception as exc:
             _log.warning("ingestion_job_worker_failed", error=str(exc))
+            _critical_worker_failures.append("ingestion_job_worker")
+            from app.error_handling import record_system_error
+
+            await record_system_error(
+                exc, component="worker.ingestion_job",
+                context={"worker": "ingestion_job_worker"},
+            )
 
     # Optional OpenTelemetry tracing (no-op unless otel_enabled)
     if setup_otel(app):

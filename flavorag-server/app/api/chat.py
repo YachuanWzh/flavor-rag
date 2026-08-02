@@ -70,6 +70,24 @@ def _neighbor_evidence_count(sources: list[dict]) -> int:
     return sum(1 for source in sources if source.get("neighborOf"))
 
 
+def _truncate_history_by_tokens(
+    history: list[dict], max_tokens: int
+) -> list[dict]:
+    """Keep most recent messages within a token budget (2.4 Prompt slimming)."""
+    from app.rag.governance import estimate_tokens
+
+    result: list[dict] = []
+    total = 0
+    for msg in reversed(history):
+        msg_tokens = estimate_tokens(msg.get("content", ""))
+        if total + msg_tokens > max_tokens:
+            break
+        result.append(msg)
+        total += msg_tokens
+    result.reverse()
+    return result
+
+
 async def resolve_chat_kb_scopes(
     db: AsyncSession,
     user: User,
@@ -334,6 +352,21 @@ async def chat(
             status_code=413,
             detail="question exceeds the configured model token budget",
         )
+
+    # ── 3.5 Prompt injection detection ──
+    if getattr(settings, "injection_detection_enabled", True):
+        from app.security.injection import detect_injection
+
+        is_injection, pattern = detect_injection(question)
+        if is_injection:
+            _log.warning(
+                "injection_detected", pattern=pattern, question=question[:80]
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="检测到异常输入，请修改后重试",
+            )
+
     t_total_start = time.time()
     effective_agentic_rag = (
         settings.agentic_rag_enabled if agentic_rag is None else agentic_rag
@@ -420,11 +453,14 @@ async def chat(
 
     async def event_stream():
         try:
-            # ─── TTFT optimization: immediate feedback ───
+            # ─── 2.1 TTFT: immediate connected heartbeat (first byte) ───
+            yield "event: connected\ndata: {}\n\n"
+
+            # ─── 1.1 Progress: multi-stage feedback ───
             if settings.ttft_early_feedback:
                 yield (
                     "event: progress\ndata: "
-                    + json.dumps({"stage": "thinking", "message": "正在理解您的问题..."}, ensure_ascii=False)
+                    + json.dumps({"stage": "understanding", "message": "正在理解您的问题..."}, ensure_ascii=False)
                     + "\n\n"
                 )
 
@@ -697,6 +733,13 @@ async def chat(
                 return
 
             # 6. Build prompt with context
+            # ─── 1.1 Progress: ranking stage ───
+            if settings.ttft_early_feedback:
+                yield (
+                    "event: progress\ndata: "
+                    + json.dumps({"stage": "ranking", "message": "正在排序结果..."}, ensure_ascii=False)
+                    + "\n\n"
+                )
             if settings.ttft_early_feedback:
                 yield (
                     "event: progress\ndata: "
@@ -722,6 +765,11 @@ async def chat(
                 _format_context_item(i, c)
                 for i, c in enumerate(rag_result.context_chunks)
             )
+            # ── 3.5 Sanitize evidence before prompt injection ──
+            if getattr(settings, "injection_detection_enabled", True):
+                from app.security.injection import sanitize_evidence
+
+                context_text = sanitize_evidence(context_text)
             # ── mem0: inject user memories + profile into system prompt ──
             memory_block = ""
             if rag_result.memories:
@@ -768,7 +816,10 @@ async def chat(
                 # Append memory + profile blocks to any prompt path
                 system_prompt += memory_block + profile_block
             messages = [{"role": "system", "content": system_prompt}]
-            for h in history[-16:]:
+            # 2.4 Token-budget truncation instead of fixed count
+            for h in _truncate_history_by_tokens(
+                history, settings.conversation_context_max_tokens
+            ):
                 messages.append({"role": h["role"], "content": h["content"]})
             messages.append({"role": "user", "content": question})
 
@@ -862,57 +913,103 @@ async def chat(
                 )
             )
 
-            # 9. Save assistant message
-            recommended_questions = await recommend_questions(
-                db,
-                question=question,
-                kb_id=resolved_kb_id,
-                tenant_id=user.tenant_id or "default",
-                sources=rag_result.sources,
-            )
-            assistant_msg_id = await chat_service.save_message(
-                conversation_id=conversation_id,
-                role="assistant", content=full_content,
-                thinking_content=thinking_content or None,
-                sources=rag_result.sources,
-                recommended_questions=recommended_questions,
-                agent_steps=agent_steps,
-                rag_modes={
-                    "agenticRag": effective_agentic_rag,
-                    "graphRag": effective_graph_rag_enabled,
-                    "neighborExpansion": neighbor_expansion,
-                    "hyde": hyde,
-                },
-                retrieval_channels=rag_result.channel_statuses,
-                hyde_doc=rag_result.hyde_doc or None,
-                hyde_meta=rag_result.hyde_meta or None,
-            )
-            await db.flush()
-            await chat_service.maybe_summarize(conversation_id)
+            # ── 3.5 PII masking on output ──
+            if getattr(settings, "injection_detection_enabled", True):
+                from app.security.injection import mask_pii
 
-            # 10. Finalize trace
+                full_content = mask_pii(full_content)
+
+            # 9. Save assistant message (4.2: independent session)
+            from app.database.session import async_session_factory
+
+            async with async_session_factory() as save_session:
+                save_chat_service = ChatService(
+                    save_session,
+                    user_id=user.id,
+                    tenant_id=user.tenant_id or "default",
+                )
+                recommended_questions = await recommend_questions(
+                    save_session,
+                    question=question,
+                    kb_id=resolved_kb_id,
+                    tenant_id=user.tenant_id or "default",
+                    sources=rag_result.sources,
+                )
+                assistant_msg_id = await save_chat_service.save_message(
+                    conversation_id=conversation_id,
+                    role="assistant", content=full_content,
+                    thinking_content=thinking_content or None,
+                    sources=rag_result.sources,
+                    recommended_questions=recommended_questions,
+                    agent_steps=agent_steps,
+                    rag_modes={
+                        "agenticRag": effective_agentic_rag,
+                        "graphRag": effective_graph_rag_enabled,
+                        "neighborExpansion": neighbor_expansion,
+                        "hyde": hyde,
+                    },
+                    retrieval_channels=rag_result.channel_statuses,
+                    hyde_doc=rag_result.hyde_doc or None,
+                    hyde_meta=rag_result.hyde_meta or None,
+                )
+                await save_session.commit()
+            # Summarize in its own short-lived session
+            async with async_session_factory() as sum_session:
+                sum_chat_service = ChatService(
+                    sum_session,
+                    user_id=user.id,
+                    tenant_id=user.tenant_id or "default",
+                )
+                await sum_chat_service.maybe_summarize(conversation_id)
+                await sum_session.commit()
+
+            # 10. Finalize trace (4.2: independent session)
             total_duration = int((time.time() - t_total_start) * 1000)
             from app.observability.metrics import RAG_E2E_LATENCY
 
             RAG_E2E_LATENCY.observe(total_duration / 1000)
-            await trace.finalize(
-                trace_run_id=trace_id,
-                search_duration_ms=rag_result.duration_ms,
-                llm_duration_ms=llm_duration,
-                total_duration_ms=total_duration,
-                recall_count=len(rag_result.context_chunks),
-                final_count=len(rag_result.sources),
-                model_name=generation_model,
-                metadata={
-                    "channels": rag_result.channel_statuses,
-                    "agenticRag": effective_agentic_rag,
-                    "graphRag": effective_graph_rag_enabled,
-                    "neighborExpansion": neighbor_expansion,
-                    "hyde": hyde,
-                    "generationRetry": generation_retry,
-                },
-            )
-            await db.commit()
+            async with async_session_factory() as trace_session:
+                trace_logger = TraceLogger(trace_session)
+                await trace_logger.finalize(
+                    trace_run_id=trace_id,
+                    search_duration_ms=rag_result.duration_ms,
+                    llm_duration_ms=llm_duration,
+                    total_duration_ms=total_duration,
+                    recall_count=len(rag_result.context_chunks),
+                    final_count=len(rag_result.sources),
+                    model_name=generation_model,
+                    metadata={
+                        "channels": rag_result.channel_statuses,
+                        "agenticRag": effective_agentic_rag,
+                        "graphRag": effective_graph_rag_enabled,
+                        "neighborExpansion": neighbor_expansion,
+                        "hyde": hyde,
+                        "generationRetry": generation_retry,
+                    },
+                )
+                await trace_session.commit()
+
+            # ── 3.2 Chat audit logging ──
+            try:
+                from app.audit.service import record_audit
+
+                await record_audit(
+                    biz_type="chat",
+                    biz_id=conversation_id or "",
+                    operation_type="QUERY",
+                    action_desc=f"用户提问: {question[:100]}",
+                    after_snapshot={
+                        "question": question[:200],
+                        "conversation_id": conversation_id,
+                        "kb_id": kb_id,
+                    },
+                    operator_id=user.id,
+                    operator_name=user.username,
+                    operator_role=user.role,
+                    success=True,
+                )
+            except Exception as audit_exc:
+                _log.warning("chat_audit_failed", error=str(audit_exc)[:200])
 
             # 11. Send finish
             finish = json.dumps(
@@ -949,16 +1046,17 @@ async def chat(
             # empty string; fall back to the class name so the client never
             # sees a blank "Unknown error".
             error_msg = str(e) or type(e).__name__
-            # A failed flush leaves the session in a "pending rollback" state;
-            # clear it so the finalize below (and get_db's commit) can proceed
-            # without raising PendingRollbackError.
-            try:
-                await db.rollback()
-            except Exception:
-                pass
+            # 4.2: use independent session for error trace finalization
             if trace_id:
                 try:
-                    await trace.finalize(trace_id, status="error", error_message=error_msg)
+                    from app.database.session import async_session_factory as _asf
+
+                    async with _asf() as err_session:
+                        err_trace = TraceLogger(err_session)
+                        await err_trace.finalize(
+                            trace_id, status="error", error_message=error_msg
+                        )
+                        await err_session.commit()
                 except Exception:
                     pass
             from app.error_handling import describe_error, record_system_error

@@ -1,0 +1,38 @@
+name: RAG Evaluation
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "flavorag-server/app/rag/**"
+      - "flavorag-server/app/llm/**"
+      - "flavorag-server/app/config/settings.py"
+      - "flavorag-server/app/evaluation/**"
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        working-directory: flavorag-server
+        run: uv sync
+
+      - name: Run evaluation unit tests
+        working-directory: flavorag-server
+        run: uv run python -m pytest tests/test_evaluation_runner.py -v
+
+      - name: Quality gate check
+        working-directory: flavorag-server
+        run: |
+          uv run python -c "
+          from app.evaluation.runner import assess_quality_gates
+          import json, sys
+          # Template: integrate with POST /api/admin/evaluation/run
+          # Load metrics from the latest evaluation run and assert gates pass.
+          print('Quality gate template — wire up with evaluation API in CI')
+          sys.exit(0)
+          "

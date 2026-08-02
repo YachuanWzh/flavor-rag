@@ -1,6 +1,6 @@
 # flavor-rag
 
-> 版本：v0.0.9 · 企业级运营增强版 · 2026-08-02
+> 版本：v1.0.0 · 生产加固版 · 2026-08-02
 
 flavor-rag 是一个面向企业知识库的全链路 RAG 系统，覆盖多格式摄取、版本化索引、混合检索、证据约束生成、引用、长期记忆、离线评测和生产可观测性。本版本不把登录与权限作为企业级结论的一部分；重点是 RAG 数据面的正确性、可恢复性和可运维性。
 
@@ -237,9 +237,26 @@ docker compose -f ../docker/app.compose.yaml config --quiet
 
 CI 还会在空 PostgreSQL 上执行完整 Alembic migration，并构建前后端容器。
 
+## v1.0.0 生产加固
+
+本版本完成优化方案中全部 P1 优先级条目（10 项），核心变更：
+
+- **SSE 与首包延迟（1.1 / 2.1）**：流式响应首包发送 `connected` 心跳，消除 DB 查询延迟感知；后端 4 阶段进度事件（understanding → retrieving → ranking → generating）；前端 SSE 断线自动重连（3 次指数退避）；nginx `proxy_read/send_timeout` 提升至 300s
+- **检索性能（2.2）**：Embedding 客户端使用共享 httpx 连接池（30 连接 / 10 keepalive / HTTP2）；推测搜索从单库扩展到全部 scope；`query_understanding_timeout` 从 20s 降至 8s
+- **Prompt 瘦身（2.4）**：历史消息从固定 16 条改为 token 预算截断（默认 2000 tokens），避免超长上下文浪费 LLM 窗口
+- **安全加固（3.5）**：中英文 Prompt Injection 检测（18 条规则）；检索证据 sanitize（HTML 注释注入 + 指令行过滤）；输出 PII 检测与脱敏（身份证 / 手机 / 邮箱）
+- **审计与合规（3.2）**：聊天操作写入审计日志（`record_audit`）；`BizChangeLog` 哈希链（SHA-256 `_prev_hash` / `_entry_hash`）；审计日志独立保留期（默认 180 天）
+- **Worker 健康（4.4）**：关键 Worker 分级（ingestion / reconciliation / repair），启动失败记录 + `record_system_error`；readiness 暴露 worker 状态；新增 `WORKER_HEARTBEAT` Prometheus Gauge
+- **RBAC 基础（3.1）**：JWT 默认密钥启动时 CRITICAL 告警 + readiness 检查；`.env.example` 改为占位符
+- **SQLite 并发（4.2）**：`event_stream` 内所有写操作（save_message / maybe_summarize / trace.finalize）改用独立短 session
+- **评估增强（3.3）**：质量告警 Webhook（DingTalk / Feishu / Slack 兼容）；CI 评测工作流模板
+
+新增模块：`app/security/injection.py`（Injection 检测 + 证据 sanitize + PII 脱敏）。
+
 ## 生产注意事项
 
 - 生产必须设置真实模型凭据，否则 readiness 为 503。
+- 生产必须替换 `JWT_SECRET_KEY` 默认值，否则 readiness 报告 `error:default_secret`。
 - 不要手工删除 active Milvus collection；通过 index generation API 重建。
 - 不要把本地 `uploads` 当作多副本共享源存储。
 - 对 PostgreSQL 和对象存储执行备份；外部索引应视为可重建投影。
@@ -252,6 +269,7 @@ CI 还会在空 PostgreSQL 上执行完整 Alembic migration，并构建前后�
 
 | 版本 | 日期 | 主题 | 详细设计 |
 |---|---|---|---|
+| v1.0.0 | 2026-08-02 | 生产加固：SSE 断线重连 + 多阶段进度 + 首包延迟优化 + Embedding 连接池 + 多库推测搜索 + Prompt 瘦身 + Prompt Injection 防御 + PII 脱敏 + 审计哈希链 + Worker 健康分级 + JWT 启动校验 + SQLite 并发修复 + 评估 Webhook 告警 + CI 模板 | [技术方案文档](技术方案文档.md) |
 | v0.0.9 | 2026-08-02 | 企业级运营增强：Worker 进程分离 + 语义缓存 + Token 配额 + 质量闭环 + 文档审批 + 表格 QA + 图谱交互 + 版本 Diff + 对话分析 | [技术方案文档](技术方案文档.md) |
 | v0.0.8 | 2026-07-28 | 跨库公平召回：KB Interleave + Per-KB 配额 + Fallback Pool + 来源归因 + Rewrite/Intent 降级 | [技术方案文档](技术方案文档.md) |
 | v0.0.7 | 2026-07-27 | 可信语义知识图谱：三层混合图谱 + 原文证据校验 + 增量维护 + 原地回填 | [技术方案文档](技术方案文档.md) |

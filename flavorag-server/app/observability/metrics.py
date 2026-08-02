@@ -138,6 +138,13 @@ CIRCUIT_BREAKER_OPEN = Gauge(
     ["name"],
 )
 
+# 4.4: Worker heartbeat for Grafana alerting
+WORKER_HEARTBEAT = Gauge(
+    "flavorag_worker_last_heartbeat_timestamp",
+    "Last heartbeat timestamp per worker.",
+    ["worker"],
+)
+
 INGESTION_JOBS = Counter(
     "flavorag_ingestion_jobs_total",
     "Ingestion outbox jobs finished by result.",

@@ -1109,22 +1109,14 @@ class RAGPipeline:
         speculative_scopes = select_query_scopes(
             ctx.question, self._resolved_scopes(ctx, collection_name)
         )
-        speculative_scope = (
-            speculative_scopes[0] if len(speculative_scopes) == 1 else None
-        )
-        speculative_collection_name = (
-            speculative_scope.collection_name
-            if speculative_scope
-            else collection_name
-        )
-        if settings.ttft_speculative_search and speculative_scope:
+        speculative_collection_name = collection_name
+        if settings.ttft_speculative_search and speculative_scopes:
             async def _speculative_vector():
                 try:
-                    return await self._search_vector(
-                        ctx.question,
-                        speculative_scope.collection_name,
+                    return await self._search_vector_scopes(
+                        [ctx.question],
+                        speculative_scopes,
                         top_k=budget.per_channel_top_k,
-                        embedding_model=speculative_scope.embedding_model,
                     )
                 except Exception:
                     return []

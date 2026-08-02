@@ -202,6 +202,9 @@ async def test_failed_inflight_embedding_is_evicted_for_retry(monkeypatch):
 async def test_embedding_retries_transient_timeout(monkeypatch):
     from app.llm import embedding as embedding_module
 
+    # Reset shared HTTP client so the mock AsyncClient is used
+    monkeypatch.setattr(embedding_module, "_shared_http_client", None)
+
     calls = 0
 
     class FakeResponse:
@@ -253,6 +256,9 @@ async def test_embedding_retries_transient_timeout(monkeypatch):
 @pytest.mark.asyncio
 async def test_embedding_error_preserves_empty_exception_type(monkeypatch):
     from app.llm import embedding as embedding_module
+
+    # Reset shared HTTP client so the mock AsyncClient is used
+    monkeypatch.setattr(embedding_module, "_shared_http_client", None)
 
     class AlwaysTimeoutClient:
         def __init__(self, **_kwargs):

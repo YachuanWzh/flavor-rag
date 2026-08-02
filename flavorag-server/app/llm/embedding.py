@@ -17,6 +17,27 @@ _query_inflight: dict[tuple[str, str, str], asyncio.Task[list[float]]] = {}
 _query_cache_lock = asyncio.Lock()
 _log = get_logger("flavorag.embedding")
 
+# ─── Shared HTTP client pool (avoids repeated TCP/TLS handshakes) ───
+_shared_http_client: httpx.AsyncClient | None = None
+
+
+def _get_shared_http_client() -> httpx.AsyncClient:
+    """Return a module-level persistent AsyncClient with connection pooling."""
+    global _shared_http_client
+    if _shared_http_client is None or getattr(
+        _shared_http_client, "is_closed", False
+    ):
+        _shared_http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(120.0, connect=10.0),
+            limits=httpx.Limits(
+                max_connections=30,
+                max_keepalive_connections=10,
+                keepalive_expiry=60,
+            ),
+            http2=True,
+        )
+    return _shared_http_client
+
 _MODEL_ALIASES = {
     # v0.0.5 and earlier UI default. SiliconFlow requires the provider-qualified
     # model identifier and returns HTTP 400 for this legacy shorthand.
@@ -104,21 +125,22 @@ class EmbeddingClient:
 
         last_err: Exception | None = None
         attempts = max(1, max_attempts)
+        client = _get_shared_http_client()
         for attempt in range(attempts):
             try:
-                async with httpx.AsyncClient(timeout=timeout_sec) as client:
-                    resp = await client.post(
-                        f"{self.base_url}/embeddings",
-                        headers=headers,
-                        json=payload,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    items = sorted(data["data"], key=lambda x: x["index"])
-                    vectors = [item["embedding"] for item in items]
-                    if vectors:
-                        self.dim = len(vectors[0])
-                    return vectors
+                resp = await client.post(
+                    f"{self.base_url}/embeddings",
+                    headers=headers,
+                    json=payload,
+                    timeout=timeout_sec,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                items = sorted(data["data"], key=lambda x: x["index"])
+                vectors = [item["embedding"] for item in items]
+                if vectors:
+                    self.dim = len(vectors[0])
+                return vectors
             except Exception as e:
                 last_err = e
                 error_detail = str(e) or type(e).__name__

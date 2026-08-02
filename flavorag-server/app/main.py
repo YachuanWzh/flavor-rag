@@ -120,111 +120,128 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         _log.warning("hyperparam_cache_init_failed", error=str(exc))
 
+    # Workers are skipped in standalone mode (run_worker.py handles them).
+    from app.worker.registry import should_start_workers
+
+    _workers_enabled = should_start_workers(settings.worker_mode)
+    if not _workers_enabled:
+        _log.info("workers_skipped_standalone_mode")
+
     # Start URL refresh scheduler
     global _url_scheduler
-    try:
-        from app.services.url_refresh_scheduler import URLRefreshScheduler
-        _url_scheduler = URLRefreshScheduler()
-        await _url_scheduler.start()
-        _log.info("url_scheduler_started")
-    except Exception as exc:
-        _log.warning("url_scheduler_failed", error=str(exc))
+    if _workers_enabled:
+        try:
+            from app.services.url_refresh_scheduler import URLRefreshScheduler
+            _url_scheduler = URLRefreshScheduler()
+            await _url_scheduler.start()
+            _log.info("url_scheduler_started")
+        except Exception as exc:
+            _log.warning("url_scheduler_failed", error=str(exc))
 
     # Start document schedule scheduler
     global _doc_schedule_scheduler
-    try:
-        from app.services.schedule.scheduler import DocumentScheduleScheduler
-        _doc_schedule_scheduler = DocumentScheduleScheduler(poll_interval_sec=60)
-        await _doc_schedule_scheduler.start()
-        _log.info("doc_schedule_scheduler_started")
-    except Exception as exc:
-        _log.warning("doc_schedule_scheduler_failed", error=str(exc))
+    if _workers_enabled:
+        try:
+            from app.services.schedule.scheduler import DocumentScheduleScheduler
+            _doc_schedule_scheduler = DocumentScheduleScheduler(poll_interval_sec=60)
+            await _doc_schedule_scheduler.start()
+            _log.info("doc_schedule_scheduler_started")
+        except Exception as exc:
+            _log.warning("doc_schedule_scheduler_failed", error=str(exc))
 
     global _index_sync_scheduler
-    try:
-        from app.services.index_sync import IndexSyncRetryScheduler
+    if _workers_enabled:
+        try:
+            from app.services.index_sync import IndexSyncRetryScheduler
 
-        _index_sync_scheduler = IndexSyncRetryScheduler()
-        await _index_sync_scheduler.start()
-        _log.info("index_sync_retry_scheduler_started")
-    except Exception as exc:
-        _log.warning("index_sync_retry_scheduler_failed", error=str(exc))
+            _index_sync_scheduler = IndexSyncRetryScheduler()
+            await _index_sync_scheduler.start()
+            _log.info("index_sync_retry_scheduler_started")
+        except Exception as exc:
+            _log.warning("index_sync_retry_scheduler_failed", error=str(exc))
 
     global _index_repair_worker
-    try:
-        from app.services.index_repair import IndexRepairWorker
+    if _workers_enabled:
+        try:
+            from app.services.index_repair import IndexRepairWorker
 
-        _index_repair_worker = IndexRepairWorker()
-        await _index_repair_worker.start()
-        _log.info("index_repair_worker_started")
-    except Exception as exc:
-        _log.warning("index_repair_worker_failed", error=str(exc))
+            _index_repair_worker = IndexRepairWorker()
+            await _index_repair_worker.start()
+            _log.info("index_repair_worker_started")
+        except Exception as exc:
+            _log.warning("index_repair_worker_failed", error=str(exc))
 
     global _ingestion_watchdog
-    try:
-        from app.services.ingestion_watchdog import IngestionWatchdog
+    if _workers_enabled:
+        try:
+            from app.services.ingestion_watchdog import IngestionWatchdog
 
-        _ingestion_watchdog = IngestionWatchdog()
-        await _ingestion_watchdog.start()
-        _log.info("ingestion_watchdog_started")
-    except Exception as exc:
-        _log.warning("ingestion_watchdog_failed", error=str(exc))
+            _ingestion_watchdog = IngestionWatchdog()
+            await _ingestion_watchdog.start()
+            _log.info("ingestion_watchdog_started")
+        except Exception as exc:
+            _log.warning("ingestion_watchdog_failed", error=str(exc))
 
     global _evaluation_job_worker
-    try:
-        from app.services.evaluation_jobs import EvaluationJobWorker
+    if _workers_enabled:
+        try:
+            from app.services.evaluation_jobs import EvaluationJobWorker
 
-        _evaluation_job_worker = EvaluationJobWorker()
-        await _evaluation_job_worker.start()
-        _log.info("evaluation_job_worker_started")
-    except Exception as exc:
-        _log.warning("evaluation_job_worker_failed", error=str(exc))
+            _evaluation_job_worker = EvaluationJobWorker()
+            await _evaluation_job_worker.start()
+            _log.info("evaluation_job_worker_started")
+        except Exception as exc:
+            _log.warning("evaluation_job_worker_failed", error=str(exc))
 
     global _retention_worker
-    try:
-        from app.services.retention import RetentionWorker
+    if _workers_enabled:
+        try:
+            from app.services.retention import RetentionWorker
 
-        _retention_worker = RetentionWorker()
-        await _retention_worker.start()
-        _log.info("retention_worker_started")
-    except Exception as exc:
-        _log.warning("retention_worker_failed", error=str(exc))
+            _retention_worker = RetentionWorker()
+            await _retention_worker.start()
+            _log.info("retention_worker_started")
+        except Exception as exc:
+            _log.warning("retention_worker_failed", error=str(exc))
 
     global _index_reconciliation_worker
-    try:
-        from app.services.index_reconciliation import (
-            IndexReconciliationWorker,
-        )
+    if _workers_enabled:
+        try:
+            from app.services.index_reconciliation import (
+                IndexReconciliationWorker,
+            )
 
-        _index_reconciliation_worker = IndexReconciliationWorker()
-        await _index_reconciliation_worker.start()
-        _log.info("index_reconciliation_worker_started")
-    except Exception as exc:
-        _log.warning("index_reconciliation_worker_failed", error=str(exc))
+            _index_reconciliation_worker = IndexReconciliationWorker()
+            await _index_reconciliation_worker.start()
+            _log.info("index_reconciliation_worker_started")
+        except Exception as exc:
+            _log.warning("index_reconciliation_worker_failed", error=str(exc))
 
     global _index_build_worker
-    try:
-        from app.services.index_lifecycle import IndexBuildWorker
+    if _workers_enabled:
+        try:
+            from app.services.index_lifecycle import IndexBuildWorker
 
-        _index_build_worker = IndexBuildWorker()
-        await _index_build_worker.start()
-        _log.info("index_build_worker_started")
-    except Exception as exc:
-        _log.warning("index_build_worker_failed", error=str(exc))
+            _index_build_worker = IndexBuildWorker()
+            await _index_build_worker.start()
+            _log.info("index_build_worker_started")
+        except Exception as exc:
+            _log.warning("index_build_worker_failed", error=str(exc))
 
     global _batch_import_worker
-    try:
-        from app.services.batch_import import BatchImportWorker
+    if _workers_enabled:
+        try:
+            from app.services.batch_import import BatchImportWorker
 
-        _batch_import_worker = BatchImportWorker()
-        await _batch_import_worker.start()
-        _log.info("batch_import_worker_started")
-    except Exception as exc:
-        _log.warning("batch_import_worker_failed", error=str(exc))
+            _batch_import_worker = BatchImportWorker()
+            await _batch_import_worker.start()
+            _log.info("batch_import_worker_started")
+        except Exception as exc:
+            _log.warning("batch_import_worker_failed", error=str(exc))
 
     # Start async ingestion outbox worker
     global _ingestion_job_worker
-    if settings.ingestion_async_enabled:
+    if _workers_enabled and settings.ingestion_async_enabled:
         try:
             from app.services.ingestion_jobs import IngestionJobWorker
 
@@ -360,7 +377,7 @@ async def lifespan(app: FastAPI):
     _log.info("server_shutting_down")
 
 
-app = FastAPI(title="flavor-rag API", version="0.0.8", lifespan=lifespan)
+app = FastAPI(title="flavor-rag API", version="0.0.9", lifespan=lifespan)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
@@ -399,12 +416,12 @@ app.include_router(interview_router)
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok", "version": "0.0.8"}
+    return {"status": "ok", "version": "0.0.9"}
 
 
 @app.get("/api/health/live")
 async def liveness_check():
-    return {"status": "ok", "version": "0.0.8"}
+    return {"status": "ok", "version": "0.0.9"}
 
 
 @app.get("/api/health/ready")
@@ -417,7 +434,7 @@ async def readiness_check():
         status_code=200 if ready else 503,
         content={
             "status": "ready" if ready else "not_ready",
-            "version": "0.0.8",
+            "version": "0.0.9",
             "checks": checks,
         },
     )

@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     server_port: int = 9090
     # User-facing wall-clock timezone. Persistent timestamps remain UTC.
     app_timezone: str = "Asia/Shanghai"
+    # Worker mode: "embedded" starts workers in the API process (default),
+    # "standalone" skips workers so they can run in separate processes.
+    worker_mode: str = "embedded"
 
     # 数据库
     database_url: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/flavorag"
@@ -195,6 +198,18 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = False
     rate_limit_user_qpm: int = 60
     rate_limit_ip_qpm: int = 600
+
+    # 语义缓存 (F2)
+    semantic_cache_enabled: bool = False
+    semantic_cache_threshold: float = 0.96
+    semantic_cache_ttl_sec: int = 3600
+
+    # Token 配额 (F2)
+    token_quota_enabled: bool = False
+    token_quota_daily_default: int = 1_000_000
+
+    # 文档审批 (F4)
+    approval_enabled: bool = False
 
     # URL ingestion safety
     url_ingestion_max_bytes: int = 52428800

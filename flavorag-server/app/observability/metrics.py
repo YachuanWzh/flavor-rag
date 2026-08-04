@@ -107,6 +107,10 @@ RAG_REFUSALS = Counter(
     "RAG refusals by reason.",
     ["reason"],
 )
+CHAT_STOPPED_GENERATIONS = Counter(
+    "flavorag_chat_stopped_generations_total",
+    "Chat generations stopped by the user before completion.",
+)
 CITATION_COVERAGE = Histogram(
     "flavorag_citation_coverage_ratio",
     "Fraction of retrieved sources cited by the final answer.",

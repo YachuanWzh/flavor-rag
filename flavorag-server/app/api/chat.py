@@ -21,6 +21,12 @@ from app.rag.trace import TraceLogger
 from app.rag.rate_limiter import RateLimiter
 from app.llm.client import collect_agentic_generation, get_llm_client
 from app.services.chat_service import ChatService
+from app.services.stream_control import (
+    is_stop_requested,
+    register_stream,
+    request_stop,
+    unregister_stream,
+)
 from app.config.settings import settings
 from app.config.logging_config import get_logger
 from app.rag.recommendations import recommend_questions
@@ -45,6 +51,10 @@ class ChatRequest(BaseModel):
     graph_rag: bool | None = None
     neighbor_expansion: bool = False
     hyde: bool = False
+
+
+class StopRequest(BaseModel):
+    conversation_id: str = Field(min_length=1)
 
 
 def effective_graph_rag(
@@ -452,6 +462,8 @@ async def chat(
     )
 
     async def event_stream():
+        stop_key = conversation_id or ""
+        register_stream(stop_key)
         try:
             # ─── 2.1 TTFT: immediate connected heartbeat (first byte) ───
             yield "event: connected\ndata: {}\n\n"
@@ -837,6 +849,7 @@ async def chat(
             # 8. Stream LLM response
             full_content = ""
             thinking_content = ""
+            stopped = False
             generation_model = rag_result.model_name or settings.llm_model
             generation_retry = {
                 "attempts": 1,
@@ -866,7 +879,8 @@ async def chat(
                     min(100, settings.agentic_replay_interval_ms),
                 ) / 1000
                 for token_index, token in enumerate(replay_tokens):
-                    if await request.is_disconnected():
+                    if await request.is_disconnected() or is_stop_requested(stop_key):
+                        stopped = True
                         break
                     if token.startswith("__THINK__"):
                         thinking_content += token[9:]
@@ -882,20 +896,108 @@ async def chat(
                     base_url=rag_result.model_base_url,
                     model=rag_result.model_name,
                 )
-                async with asyncio.timeout(settings.llm_generation_timeout_sec):
-                    async for token in llm_client.chat_stream(
-                        messages, max_tokens=settings.llm_max_output_tokens
-                    ):
-                        if await request.is_disconnected():
-                            break
-                        if token.startswith("__THINK__"):
-                            thinking_content += token[9:]
-                            yield f"event: message\ndata: {json.dumps({'type': 'think', 'delta': token[9:]})}\n\n"
-                        else:
-                            full_content += token
-                            yield f"event: message\ndata: {json.dumps({'type': 'response', 'delta': token})}\n\n"
+                stream = llm_client.chat_stream(
+                    messages, max_tokens=settings.llm_max_output_tokens
+                )
+                try:
+                    async with asyncio.timeout(settings.llm_generation_timeout_sec):
+                        async for token in stream:
+                            if await request.is_disconnected() or is_stop_requested(stop_key):
+                                stopped = True
+                                break
+                            if token.startswith("__THINK__"):
+                                thinking_content += token[9:]
+                                yield f"event: message\ndata: {json.dumps({'type': 'think', 'delta': token[9:]})}\n\n"
+                            else:
+                                full_content += token
+                                yield f"event: message\ndata: {json.dumps({'type': 'response', 'delta': token})}\n\n"
+                finally:
+                    if stopped:
+                        # Close the upstream LLM connection immediately so the
+                        # provider stops generating (and billing) tokens.
+                        try:
+                            await stream.aclose()
+                        except Exception:
+                            pass
 
             llm_duration = int((time.time() - t_llm_start) * 1000)
+
+            # 8.4 User stopped the generation — persist the partial answer and
+            # finalize without any further LLM post-processing.
+            if stopped:
+                from app.database.session import async_session_factory
+                from app.observability.metrics import CHAT_STOPPED_GENERATIONS
+
+                CHAT_STOPPED_GENERATIONS.inc()
+                _log.info(
+                    "chat_generation_stopped",
+                    conversation_id=conversation_id,
+                    generated_chars=len(full_content),
+                    llm_duration_ms=llm_duration,
+                )
+                async with async_session_factory() as stop_session:
+                    stop_chat_service = ChatService(
+                        stop_session,
+                        user_id=user.id,
+                        tenant_id=user.tenant_id or "default",
+                    )
+                    assistant_msg_id = await stop_chat_service.save_message(
+                        conversation_id=conversation_id,
+                        role="assistant",
+                        content=full_content,
+                        thinking_content=thinking_content or None,
+                        sources=rag_result.sources,
+                        agent_steps=agent_steps,
+                        rag_modes={
+                            "agenticRag": effective_agentic_rag,
+                            "graphRag": effective_graph_rag_enabled,
+                            "neighborExpansion": neighbor_expansion,
+                            "hyde": hyde,
+                        },
+                        retrieval_channels=rag_result.channel_statuses,
+                        hyde_doc=rag_result.hyde_doc or None,
+                        hyde_meta=rag_result.hyde_meta or None,
+                    )
+                    await stop_session.commit()
+
+                async with async_session_factory() as stop_trace_session:
+                    stop_trace = TraceLogger(stop_trace_session)
+                    await stop_trace.finalize(
+                        trace_run_id=trace_id,
+                        search_duration_ms=rag_result.duration_ms,
+                        llm_duration_ms=llm_duration,
+                        total_duration_ms=int((time.time() - t_total_start) * 1000),
+                        recall_count=len(rag_result.context_chunks),
+                        final_count=len(rag_result.sources),
+                        model_name=generation_model,
+                        status="stopped",
+                        metadata={
+                            "channels": rag_result.channel_statuses,
+                            "generatedChars": len(full_content),
+                        },
+                    )
+                    await stop_trace_session.commit()
+
+                stop_finish = json.dumps(
+                    {
+                        "messageId": assistant_msg_id,
+                        "fullAnswer": full_content,
+                        "sources": rag_result.sources,
+                        "recommendedQuestions": [],
+                        "stopped": True,
+                        "modes": {
+                            "agenticRag": effective_agentic_rag,
+                            "graphRag": effective_graph_rag_enabled,
+                            "neighborExpansion": neighbor_expansion,
+                            "hyde": hyde,
+                        },
+                        "channels": rag_result.channel_statuses,
+                    },
+                    ensure_ascii=False,
+                )
+                yield f"event: finish\ndata: {stop_finish}\n\n"
+                yield "event: done\ndata: {}\n\n"
+                return
 
             # 8.5 Citation validation — append footnotes if LLM omitted [N] refs
             full_content, citation_stats = _validate_citations(
@@ -1080,6 +1182,9 @@ async def chat(
             }
             yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
+        finally:
+            unregister_stream(stop_key)
+
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
@@ -1112,3 +1217,24 @@ async def chat_post(
         db=db,
         user=user,
     )
+
+
+@router.post("/chat/stop")
+async def chat_stop(
+    payload: StopRequest,
+    user: User = Depends(get_current_user),
+):
+    """Signal an in-flight streaming generation to stop.
+
+    The SSE generator for this conversation checks the flag on every token,
+    breaks out of the LLM stream, closes the upstream connection and persists
+    the partial answer.  Returns whether a live stream was actually flagged.
+    """
+    stopped = request_stop(payload.conversation_id)
+    _log.info(
+        "chat_stop_requested",
+        conversation_id=payload.conversation_id,
+        user_id=user.id,
+        stream_flagged=stopped,
+    )
+    return {"stopped": stopped, "conversationId": payload.conversation_id}

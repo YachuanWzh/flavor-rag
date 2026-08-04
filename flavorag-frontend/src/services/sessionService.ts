@@ -37,3 +37,14 @@ export async function renameSession(
   form.set("title", title);
   await api.put(`/api/conversations/${id}`, form);
 }
+
+export async function stopChatGeneration(
+  conversationId: string
+): Promise<{ stopped: boolean }> {
+  const result: any = await api.post("/api/rag/v3/chat/stop", {
+    conversation_id: conversationId,
+  });
+  return {
+    stopped: Boolean(result?.stopped),
+  };
+}

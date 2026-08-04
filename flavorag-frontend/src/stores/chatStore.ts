@@ -297,9 +297,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   cancelGeneration: () => {
+    // Tell the backend to really stop: flag the stream so it breaks out of the
+    // LLM loop, closes the upstream connection and saves the partial answer.
+    const conversationId = get().currentSessionId;
+    if (conversationId) {
+      import("@/services/sessionService")
+        .then(({ stopChatGeneration }) =>
+          stopChatGeneration(conversationId).catch(() => {})
+        )
+        .catch(() => {});
+    }
     cancelFn?.();
     cancelFn = null;
-    set({ isLoading: false, isStreaming: false, streamingMessageId: null });
+    set({ isLoading: false, isStreaming: false, streamingMessageId: null, progressStage: null, progressMessage: null });
   },
 
   addSession: (session) =>
